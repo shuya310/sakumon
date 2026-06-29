@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>作問システム</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --green: #0F6E56;
+    --green-bright: #1D9E75;
+    --orange: #EF9F27;
+    --gray-bg: #F4F6F5;
+    --gray-border: #D0D5D3;
+    --radius: 12px;
+  }
+
+  body {
+    font-family: system-ui, "Hiragino Kaku Gothic ProN", sans-serif;
+    background: var(--gray-bg);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .screen { display: none; width: 100%; }
+  .screen.active { display: flex; }
+
+  /* ===== 共通カード ===== */
+  .center-screen {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  .card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 40px 48px;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(15,110,86,.12);
+    max-width: 440px;
+    width: 100%;
+  }
+
+  .card-expression {
+    font-size: 2.8rem;
+    font-weight: 800;
+    color: var(--green);
+    letter-spacing: .08em;
+    margin-bottom: 6px;
+  }
+
+  .card-title {
+    font-size: 1.1rem;
+    color: #555;
+    margin-bottom: 28px;
+    letter-spacing: .1em;
+  }
+
+  .card-label {
+    font-size: .88rem;
+    color: #777;
+    margin-bottom: 10px;
+  }
+
+  /* ===== ログイン入力 ===== */
+  .input-id {
+    width: 100%;
+    border: 2px solid var(--gray-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 1.4rem;
+    font-weight: 700;
+    text-align: center;
+    letter-spacing: .3em;
+    outline: none;
+    color: var(--green);
+    margin-bottom: 6px;
+    transition: border-color .15s;
+  }
+  .input-id:focus { border-color: var(--green); }
+
+  .input-hint {
+    font-size: .78rem;
+    color: #aaa;
+    margin-bottom: 20px;
+  }
+
+  .error-msg {
+    font-size: .82rem;
+    color: #DC2626;
+    margin-bottom: 10px;
+    min-height: 1.2em;
+  }
+
+  /* ===== ボタン共通 ===== */
+  .btn {
+    border: none;
+    border-radius: 12px;
+    padding: 13px 36px;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+    letter-spacing: .08em;
+    transition: background .15s, opacity .15s;
+    display: inline-block;
+  }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  .btn-primary {
+    background: var(--green);
+    color: #fff;
+  }
+  .btn-primary:not(:disabled):hover { background: var(--green-bright); }
+
+  .btn-secondary {
+    background: #fff;
+    color: var(--green);
+    border: 2px solid var(--green);
+  }
+  .btn-secondary:not(:disabled):hover { background: #E8F5F1; }
+
+  /* ===== 選択画面 ===== */
+  .choose-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 8px;
+  }
+
+  /* ===== セッション一覧 ===== */
+  .session-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 16px 0 24px;
+    max-height: 280px;
+    overflow-y: auto;
+    text-align: left;
+  }
+
+  .session-item {
+    background: #F0FDF8;
+    border: 1.5px solid var(--gray-border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .session-item:hover {
+    border-color: var(--green-bright);
+    background: #DCFCE7;
+  }
+  .session-item.selected {
+    border-color: var(--green);
+    background: #DCFCE7;
+    box-shadow: 0 0 0 2px var(--green);
+  }
+
+  .session-item .s-date {
+    font-size: .82rem;
+    color: #555;
+    margin-bottom: 4px;
+  }
+
+  .session-item .s-info {
+    font-size: .9rem;
+    font-weight: 700;
+    color: var(--green);
+  }
+
+  /* ===== 作問画面 ===== */
+  #screen-game {
+    flex-direction: row;
+    align-items: stretch;
+    min-height: 100vh;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 20px 16px;
+    gap: 16px;
+  }
+
+  .chat-panel {
+    flex: 2;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-radius: var(--radius);
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    overflow: hidden;
+  }
+
+  .chat-header {
+    background: var(--green);
+    color: #fff;
+    padding: 14px 20px;
+    text-align: center;
+  }
+
+  .chat-header .expression {
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: .1em;
+  }
+
+  .chat-header .subtitle {
+    font-size: .82rem;
+    opacity: .85;
+    margin-top: 2px;
+  }
+
+  .chat-header .user-badge {
+    font-size: .75rem;
+    opacity: .75;
+    margin-top: 4px;
+  }
+
+  .chat-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bubble {
+    max-width: 80%;
+    border-radius: 14px;
+    padding: 12px 16px;
+    font-size: .95rem;
+    line-height: 1.6;
+    word-break: break-all;
+  }
+
+  .bubble-user {
+    align-self: flex-end;
+    background: #DBEAFE;
+    border: 1.5px solid #93C5FD;
+    color: #1e3a5f;
+    border-bottom-right-radius: 4px;
+  }
+
+  .bubble-ai {
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+  }
+  .bubble-ai.normal {
+    background: #F3F4F6;
+    border: 1.5px solid var(--gray-border);
+    color: #333;
+  }
+  .bubble-ai.new-structure {
+    background: #ECFDF5;
+    border: 2.5px solid var(--green-bright);
+    color: #064E3B;
+    font-weight: 600;
+  }
+  .bubble-ai.hint {
+    background: #FFFBEB;
+    border: 2px solid var(--orange);
+    color: #7C4700;
+  }
+  .bubble-ai.clear {
+    background: #ECFDF5;
+    border: 2.5px solid var(--green-bright);
+    color: #064E3B;
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+
+  .chat-input-area {
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--gray-border);
+    background: #fff;
+  }
+
+  .chat-input {
+    flex: 1;
+    border: 1.5px solid var(--gray-border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: .95rem;
+    font-family: inherit;
+    resize: none;
+    outline: none;
+    transition: border-color .15s;
+    line-height: 1.5;
+  }
+  .chat-input:focus { border-color: var(--green); }
+
+  .btn-send {
+    background: var(--green);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 20px;
+    font-size: .95rem;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s;
+    align-self: flex-end;
+  }
+  .btn-send:hover { background: var(--green-bright); }
+  .btn-send:disabled { background: #aaa; cursor: default; }
+
+  /* 右パネル */
+  .meter-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 200px;
+  }
+
+  .panel-card {
+    background: #fff;
+    border-radius: var(--radius);
+    padding: 20px 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+  }
+
+  .panel-card h3 {
+    font-size: .8rem;
+    color: #888;
+    letter-spacing: .1em;
+    margin-bottom: 14px;
+    text-align: center;
+  }
+
+  .lights {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    margin-bottom: 8px;
+  }
+
+  .light {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: #D1D5DB;
+    border: 3px solid #9CA3AF;
+    transition: background .4s, border-color .4s, box-shadow .4s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+  }
+
+  .light.on {
+    background: var(--green-bright);
+    border-color: var(--green);
+    box-shadow: 0 0 12px rgba(29,158,117,.5);
+  }
+
+  .lights-label {
+    text-align: center;
+    font-size: .75rem;
+    color: #888;
+  }
+
+  .count-number {
+    font-size: 3rem;
+    font-weight: 800;
+    color: var(--green);
+    text-align: center;
+    line-height: 1;
+    margin-bottom: 8px;
+  }
+
+  .count-dots {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--green-bright);
+  }
+
+  .problem-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+  }
+
+  .problem-list li {
+    font-size: .82rem;
+    color: #333;
+    background: #F0FDF8;
+    border-left: 3px solid var(--green-bright);
+    border-radius: 4px;
+    padding: 6px 10px;
+    line-height: 1.5;
+  }
+
+  .problem-list li .num {
+    font-weight: 700;
+    color: var(--green);
+    margin-right: 4px;
+  }
+
+  /* ===== ユーザーバッジカード ===== */
+  .user-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .user-card-name {
+    font-size: .95rem;
+    font-weight: 700;
+    color: var(--green);
+  }
+
+  .user-card-sub {
+    font-size: .72rem;
+    color: #999;
+    margin-top: 1px;
+  }
+
+  .btn-logout {
+    background: #fff;
+    color: #888;
+    border: 1.5px solid #D0D5D3;
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: .78rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color .15s, color .15s;
+    flex-shrink: 0;
+  }
+  .btn-logout:hover { border-color: #DC2626; color: #DC2626; }
+
+  /* ===== クリア画面 ===== */
+  #screen-clear {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    gap: 28px;
+    padding: 24px;
+  }
+
+  .clear-card {
+    background: #fff;
+    border-radius: 20px;
+    padding: 48px 56px;
+    text-align: center;
+    box-shadow: 0 4px 32px rgba(15,110,86,.15);
+    max-width: 480px;
+    width: 100%;
+  }
+
+  .clear-emoji { font-size: 3.5rem; margin-bottom: 12px; }
+
+  .clear-title {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--green);
+    margin-bottom: 8px;
+  }
+
+  .clear-subtitle {
+    font-size: .95rem;
+    color: #666;
+    margin-bottom: 24px;
+  }
+
+  .clear-lights {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .clear-light {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--green-bright);
+    border: 3px solid var(--green);
+    box-shadow: 0 0 16px rgba(29,158,117,.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+  }
+
+  .clear-problems {
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 28px;
+  }
+
+  .clear-problem-item {
+    background: #F0FDF8;
+    border-left: 4px solid var(--green-bright);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: .88rem;
+    color: #1a3a2e;
+    line-height: 1.6;
+  }
+
+  .clear-problem-item .tag {
+    display: inline-block;
+    background: var(--green);
+    color: #fff;
+    font-size: .7rem;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-right: 6px;
+    vertical-align: middle;
+    font-weight: 700;
+  }
+
+  /* ローディング */
+  .loading-bubble {
+    align-self: flex-start;
+    background: #F3F4F6;
+    border: 1.5px solid var(--gray-border);
+    border-radius: 14px;
+    border-bottom-left-radius: 4px;
+    padding: 12px 18px;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+  .loading-bubble span {
+    width: 7px; height: 7px;
+    background: #9CA3AF;
+    border-radius: 50%;
+    animation: bounce .9s infinite;
+  }
+  .loading-bubble span:nth-child(2) { animation-delay: .15s; }
+  .loading-bubble span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce {
+    0%,80%,100% { transform: translateY(0); }
+    40% { transform: translateY(-6px); }
+  }
+
+  @media (max-width: 640px) {
+    #screen-game { flex-direction: column; padding: 12px 8px; }
+    .meter-panel { flex-direction: row; flex-wrap: wrap; min-width: unset; }
+    .panel-card { flex: 1; min-width: 140px; }
+    .card { padding: 28px 20px; }
+    .clear-card { padding: 32px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 画面1: ログイン -->
+<div id="screen-login" class="screen center-screen active">
+  <div class="card">
+    <div class="card-expression">18 ÷ 3</div>
+    <div class="card-title">作問システム</div>
+    <div class="card-label">出席番号を入力してね</div>
+    <input class="input-id" id="input-id" type="text"
+      maxlength="2" placeholder="00" autocomplete="off" spellcheck="false">
+    <div class="input-hint">半角英数字2桁（例: 01 / ag）</div>
+    <div class="error-msg" id="login-error"></div>
+    <button class="btn btn-primary" id="btn-login">次へ</button>
+  </div>
+</div>
+
+<!-- 画面2: 選択（新規 or 再開） -->
+<div id="screen-choose" class="screen center-screen">
+  <div class="card">
+    <div class="card-expression">18 ÷ 3</div>
+    <div class="card-title">作問システム</div>
+    <div class="card-label" id="choose-label">どうする？</div>
+    <div class="choose-buttons">
+      <button class="btn btn-primary" id="btn-new">新しく始める</button>
+      <button class="btn btn-secondary" id="btn-resume-list">前回の続きから</button>
+    </div>
+  </div>
+</div>
+
+<!-- 画面3: セッション一覧 -->
+<div id="screen-sessions" class="screen center-screen">
+  <div class="card" style="max-width:480px">
+    <div class="card-title" style="margin-bottom:4px">どの時の続きにする？</div>
+    <div class="session-list" id="session-list"></div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button class="btn btn-secondary" id="btn-sessions-back">戻る</button>
+      <button class="btn btn-primary" id="btn-sessions-ok" disabled>この続きにする</button>
+    </div>
+  </div>
+</div>
+
+<!-- 画面4: 作問 -->
+<div id="screen-game" class="screen">
+  <div class="chat-panel">
+    <div class="chat-header">
+      <div class="expression">18 ÷ 3</div>
+      <div class="subtitle">この 式に なる お話を 作ろう</div>
+    </div>
+    <div class="chat-log" id="chat-log"></div>
+    <div class="chat-input-area">
+      <textarea class="chat-input" id="chat-input"
+        rows="2" placeholder="問題をここに書いてね…"></textarea>
+      <button class="btn-send" id="btn-send">送る</button>
+    </div>
+  </div>
+
+  <div class="meter-panel">
+    <div class="panel-card">
+      <div class="user-card">
+        <div>
+          <div class="user-card-name" id="game-user-name"></div>
+          <div class="user-card-sub">出席番号</div>
+        </div>
+        <button class="btn-logout" id="btn-logout">ログアウト</button>
+      </div>
+    </div>
+    <div class="panel-card">
+      <h3>違うお話</h3>
+      <div class="lights">
+        <div class="light" id="light-0">⭐</div>
+        <div class="light" id="light-1">⭐</div>
+        <div class="light" id="light-2">⭐</div>
+      </div>
+      <div class="lights-label" id="lights-label">あと 3 つ</div>
+    </div>
+
+    <div class="panel-card">
+      <h3>作った数</h3>
+      <div class="count-number" id="count-number">0</div>
+      <div class="count-dots" id="count-dots"></div>
+    </div>
+
+    <div class="panel-card">
+      <h3>作った問題</h3>
+      <ul class="problem-list" id="problem-list"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- 画面5: クリア -->
+<div id="screen-clear" class="screen">
+  <div class="clear-card">
+    <div class="clear-emoji">🎉</div>
+    <div class="clear-title">すごい！全部できたね！</div>
+    <div class="clear-subtitle">3つの違うお話を作れたよ！</div>
+    <div class="clear-lights">
+      <div class="clear-light">⭐</div>
+      <div class="clear-light">⭐</div>
+      <div class="clear-light">⭐</div>
+    </div>
+    <div class="clear-problems" id="clear-problems"></div>
+    <button class="btn btn-primary" id="btn-retry">もう一度やる</button>
+  </div>
+</div>
+
+<script>
+  // ===== State =====
+  const state = {
+    userId: null,
+    sessionId: null,
+    sessions: [],        // ログイン時に返ってきた過去セッション一覧
+    selectedSessionId: null,
+    history: [],         // 到達済み構造
+    problems: [],        // {text, structure} 全valid問題
+    sending: false,
+  };
+
+  const STRUCTURE_LABEL = {
+    tobun: "等分除",
+    hougan: "包含除",
+    bai: "倍",
+  };
+
+  // ===== Screen =====
+  function showScreen(id) {
+    document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+    const el = document.getElementById(id);
+    el.classList.add("active");
+  }
+
+  // ===== sessionStorage =====
+  function saveSession() {
+    sessionStorage.setItem("userId", state.userId || "");
+    sessionStorage.setItem("sessionId", state.sessionId != null ? String(state.sessionId) : "");
+  }
+
+  function clearSession() {
+    sessionStorage.removeItem("userId");
+    sessionStorage.removeItem("sessionId");
+  }
+
+  // ===== Validation =====
+  const ID_RE = /^[0-9a-z]{2}$/;
+
+  // ===== Login screen =====
+  const inputId = document.getElementById("input-id");
+  const btnLogin = document.getElementById("btn-login");
+  const loginError = document.getElementById("login-error");
+
+  inputId.addEventListener("input", () => {
+    loginError.textContent = "";
+  });
+
+  btnLogin.addEventListener("click", doLogin);
+  inputId.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doLogin();
+  });
+
+  async function doLogin() {
+    const val = inputId.value.trim().toLowerCase();
+    if (!ID_RE.test(val)) {
+      loginError.textContent = "半角英数字2文字で入力してね";
+      return;
+    }
+    loginError.textContent = "";
+    btnLogin.disabled = true;
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: val }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        loginError.textContent = err.detail || "エラーがおきました";
+        return;
+      }
+      const data = await res.json();
+      state.userId = data.user_id;
+      state.sessions = data.sessions || [];
+
+      if (state.sessions.length === 0) {
+        await startNewSession();
+      } else {
+        document.getElementById("choose-label").textContent =
+          `${val}さんの記録があるよ！`;
+        showScreen("screen-choose");
+      }
+    } catch (e) {
+      loginError.textContent = "つうしんエラーがおきました";
+    } finally {
+      btnLogin.disabled = false;
+    }
+  }
+
+  // ===== Choose screen =====
+  document.getElementById("btn-new").addEventListener("click", async () => {
+    await startNewSession();
+  });
+
+  document.getElementById("btn-resume-list").addEventListener("click", () => {
+    renderSessionList();
+    showScreen("screen-sessions");
+  });
+
+  // ===== Session list screen =====
+  function renderSessionList() {
+    state.selectedSessionId = null;
+    document.getElementById("btn-sessions-ok").disabled = true;
+    const list = document.getElementById("session-list");
+    list.innerHTML = "";
+    state.sessions.forEach(s => {
+      const dt = new Date(s.created_at + "Z");
+      const dateStr = dt.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      const structs = s.structures.map(x => STRUCTURE_LABEL[x] || x).join("・") || "なし";
+      const div = document.createElement("div");
+      div.className = "session-item";
+      div.dataset.sessionId = s.session_id;
+      div.innerHTML = `<div class="s-date">${dateStr}</div>
+        <div class="s-info">問題 ${s.problem_count} 個　／　${structs}</div>`;
+      div.addEventListener("click", () => {
+        document.querySelectorAll(".session-item").forEach(el => el.classList.remove("selected"));
+        div.classList.add("selected");
+        state.selectedSessionId = s.session_id;
+        document.getElementById("btn-sessions-ok").disabled = false;
+      });
+      list.appendChild(div);
+    });
+  }
+
+  document.getElementById("btn-sessions-back").addEventListener("click", () => {
+    showScreen("screen-choose");
+  });
+
+  document.getElementById("btn-sessions-ok").addEventListener("click", async () => {
+    if (state.selectedSessionId == null) return;
+    await resumeSession(state.selectedSessionId);
+  });
+
+  // ===== Start new session =====
+  async function startNewSession() {
+    const res = await fetch("/api/session/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: state.userId }),
+    });
+    const data = await res.json();
+    state.sessionId = data.session_id;
+    saveSession();
+    resetGame();
+    showScreen("screen-game");
+    addAiBubble("こんにちは！「18 ÷ 3」になるお話を書いてね。どんなお話かな？", "normal");
+  }
+
+  // ===== Resume session =====
+  async function resumeSession(sessionId) {
+    const res = await fetch("/api/session/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    const data = await res.json();
+    state.sessionId = data.session_id;
+    saveSession();
+    resetGame();
+
+    // 過去データを復元
+    state.history = data.history || [];
+    data.problems.forEach(p => addProblem(p.text, p.structure));
+    updateMeter();
+
+    showScreen("screen-game");
+    addAiBubble(
+      `おかえり！続きから始めよう。これまで${data.problems.length}個の問題を作ったね！`,
+      "normal"
+    );
+  }
+
+  // ===== Game screen =====
+  function resetGame() {
+    state.history = [];
+    state.problems = [];
+    document.getElementById("chat-log").innerHTML = "";
+    document.getElementById("problem-list").innerHTML = "";
+    document.getElementById("game-user-name").textContent =
+      state.userId ? `${state.userId} さん` : "";
+    updateMeter();
+  }
+
+  document.getElementById("btn-logout").addEventListener("click", () => {
+    clearSession();
+    state.userId = null;
+    state.sessionId = null;
+    state.sessions = [];
+    inputId.value = "";
+    loginError.textContent = "";
+    showScreen("screen-login");
+  });
+
+  function addUserBubble(text) {
+    const log = document.getElementById("chat-log");
+    const el = document.createElement("div");
+    el.className = "bubble bubble-user";
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function addAiBubble(text, displayType) {
+    const log = document.getElementById("chat-log");
+    const el = document.createElement("div");
+    const cls = {
+      new_structure: "new-structure",
+      hint1: "hint", hint2: "hint", hint3: "hint",
+      clear: "clear",
+    }[displayType] || "normal";
+    el.className = `bubble bubble-ai ${cls}`;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function addLoadingBubble() {
+    const log = document.getElementById("chat-log");
+    const el = document.createElement("div");
+    el.className = "loading-bubble";
+    el.innerHTML = "<span></span><span></span><span></span>";
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function updateMeter() {
+    const count = state.history.length;
+    for (let i = 0; i < 3; i++) {
+      document.getElementById(`light-${i}`).classList.toggle("on", i < count);
+    }
+    const remaining = 3 - count;
+    document.getElementById("lights-label").textContent =
+      remaining > 0 ? `あと ${remaining} つ` : "全部できた！";
+
+    document.getElementById("count-number").textContent = state.problems.length;
+    const dots = document.getElementById("count-dots");
+    dots.innerHTML = "";
+    state.problems.forEach(() => {
+      const d = document.createElement("div");
+      d.className = "dot";
+      dots.appendChild(d);
+    });
+  }
+
+  function addProblem(text, structure) {
+    state.problems.push({ text, structure });
+    const list = document.getElementById("problem-list");
+    const li = document.createElement("li");
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = `${state.problems.length}.`;
+    li.appendChild(num);
+    li.appendChild(document.createTextNode(text));
+    list.appendChild(li);
+    list.scrollTop = list.scrollHeight;
+  }
+
+  // ===== Send =====
+  async function sendMessage() {
+    if (state.sending) return;
+    const input = document.getElementById("chat-input");
+    const text = input.value.trim();
+    if (!text) return;
+
+    state.sending = true;
+    document.getElementById("btn-send").disabled = true;
+    input.value = "";
+
+    addUserBubble(text);
+    const loader = addLoadingBubble();
+
+    try {
+      const res = await fetch("/api/judge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: state.sessionId, message: text }),
+      });
+      const data = await res.json();
+      loader.remove();
+
+      if (data.history) state.history = data.history;
+      if (data.valid) addProblem(text, data.structure);
+      updateMeter();
+
+      if (data.display_type === "clear") {
+        addAiBubble(data.message, "clear");
+        setTimeout(() => showClear(), 1800);
+      } else {
+        addAiBubble(data.message, data.display_type);
+      }
+    } catch (e) {
+      loader.remove();
+      addAiBubble("エラーが起きました。もう一度送ってみてね。", "normal");
+    } finally {
+      state.sending = false;
+      document.getElementById("btn-send").disabled = false;
+      input.focus();
+    }
+  }
+
+  document.getElementById("btn-send").addEventListener("click", sendMessage);
+
+  let isComposing = false;
+  const chatInput = document.getElementById("chat-input");
+  chatInput.addEventListener("compositionstart", () => { isComposing = true; });
+  chatInput.addEventListener("compositionend", () => { isComposing = false; });
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !isComposing) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  // ===== Clear screen =====
+  function showClear() {
+    clearSession();
+    const container = document.getElementById("clear-problems");
+    container.innerHTML = "";
+    // is_new=true の問題だけクリア画面に表示（各構造の代表を1件）
+    const shown = new Set();
+    state.problems.forEach(p => {
+      if (!shown.has(p.structure)) {
+        shown.add(p.structure);
+        const div = document.createElement("div");
+        div.className = "clear-problem-item";
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        tag.textContent = STRUCTURE_LABEL[p.structure] || p.structure;
+        div.appendChild(tag);
+        div.appendChild(document.createTextNode(p.text));
+        container.appendChild(div);
+      }
+    });
+    showScreen("screen-clear");
+  }
+
+  document.getElementById("btn-retry").addEventListener("click", () => {
+    inputId.value = "";
+    loginError.textContent = "";
+    state.userId = null;
+    state.sessionId = null;
+    state.sessions = [];
+    showScreen("screen-login");
+  });
+
+  // ===== リロード復元 =====
+  async function tryRestoreSession() {
+    const savedUserId = sessionStorage.getItem("userId");
+    const savedSessionId = sessionStorage.getItem("sessionId");
+    if (!savedUserId || !savedSessionId) return false;
+
+    try {
+      const res = await fetch("/api/session/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: parseInt(savedSessionId, 10) }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+
+      state.userId = savedUserId;
+      state.sessionId = data.session_id;
+      resetGame();
+      state.history = data.history || [];
+      data.problems.forEach(p => addProblem(p.text, p.structure));
+      updateMeter();
+      showScreen("screen-game");
+      addAiBubble("続きだよ！問題を書いてね。", "normal");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ===== Boot =====
+  tryRestoreSession();
+</script>
+</body>
+</html>

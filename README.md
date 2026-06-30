@@ -145,5 +145,5 @@ cd backend && uvicorn main:app --reload --port 8000
 
 | URL | 説明 |
 |-----|------|
-| http://localhost:8000 | 児童向け作問画面 |
-| http://localhost:8000/admin | 管理者画面 |
+| https://sakumon.onrender.com/ | 児童向け作問画面 |
+| https://sakumon.onrender.com/admin | 管理者画面 |

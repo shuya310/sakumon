@@ -1,0 +1,562 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --green: #0F6E56;
+  --green-bright: #1D9E75;
+  --orange: #EF9F27;
+  --gray-bg: #F4F6F5;
+  --gray-border: #D0D5D3;
+  --radius: 12px;
+}
+
+body {
+  font-family: system-ui, "Hiragino Kaku Gothic ProN", sans-serif;
+  background: var(--gray-bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.screen { display: none; width: 100%; }
+.screen.active { display: flex; }
+
+/* ===== 共通カード ===== */
+.center-screen {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 20px;
+  padding: 40px 48px;
+  text-align: center;
+  box-shadow: 0 4px 24px rgba(15,110,86,.12);
+  max-width: 440px;
+  width: 100%;
+}
+
+.card-expression {
+  font-size: 2.8rem;
+  font-weight: 800;
+  color: var(--green);
+  letter-spacing: .08em;
+  margin-bottom: 6px;
+}
+
+.card-title {
+  font-size: 1.1rem;
+  color: #555;
+  margin-bottom: 28px;
+  letter-spacing: .1em;
+}
+
+.card-label {
+  font-size: .88rem;
+  color: #777;
+  margin-bottom: 10px;
+}
+
+/* ===== ログイン入力 ===== */
+.input-id {
+  width: 100%;
+  border: 2px solid var(--gray-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 1.4rem;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: .3em;
+  outline: none;
+  color: var(--green);
+  margin-bottom: 6px;
+  transition: border-color .15s;
+}
+.input-id:focus { border-color: var(--green); }
+
+.input-hint {
+  font-size: .78rem;
+  color: #aaa;
+  margin-bottom: 20px;
+}
+
+.error-msg {
+  font-size: .82rem;
+  color: #DC2626;
+  margin-bottom: 10px;
+  min-height: 1.2em;
+}
+
+/* ===== ボタン共通 ===== */
+.btn {
+  border: none;
+  border-radius: 12px;
+  padding: 13px 36px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: .08em;
+  transition: background .15s, opacity .15s;
+  display: inline-block;
+}
+.btn:disabled { opacity: .45; cursor: default; }
+
+.btn-primary {
+  background: var(--green);
+  color: #fff;
+}
+.btn-primary:not(:disabled):hover { background: var(--green-bright); }
+
+.btn-secondary {
+  background: #fff;
+  color: var(--green);
+  border: 2px solid var(--green);
+}
+.btn-secondary:not(:disabled):hover { background: #E8F5F1; }
+
+/* ===== 選択画面 ===== */
+.choose-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+/* ===== セッション一覧 ===== */
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 24px;
+  max-height: 280px;
+  overflow-y: auto;
+  text-align: left;
+}
+
+.session-item {
+  background: #F0FDF8;
+  border: 1.5px solid var(--gray-border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.session-item:hover {
+  border-color: var(--green-bright);
+  background: #DCFCE7;
+}
+.session-item.selected {
+  border-color: var(--green);
+  background: #DCFCE7;
+  box-shadow: 0 0 0 2px var(--green);
+}
+
+.session-item .s-date {
+  font-size: .82rem;
+  color: #555;
+  margin-bottom: 4px;
+}
+
+.session-item .s-info {
+  font-size: .9rem;
+  font-weight: 700;
+  color: var(--green);
+}
+
+/* ===== 作問画面 ===== */
+#screen-game {
+  flex-direction: row;
+  align-items: stretch;
+  min-height: 100vh;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 16px;
+  gap: 16px;
+}
+
+.chat-panel {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: var(--radius);
+  box-shadow: 0 2px 12px rgba(0,0,0,.07);
+  overflow: hidden;
+}
+
+.chat-header {
+  background: var(--green);
+  color: #fff;
+  padding: 14px 20px;
+  text-align: center;
+}
+
+.chat-header .expression {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+}
+
+.chat-header .subtitle {
+  font-size: .82rem;
+  opacity: .85;
+  margin-top: 2px;
+}
+
+.chat-header .user-badge {
+  font-size: .75rem;
+  opacity: .75;
+  margin-top: 4px;
+}
+
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bubble {
+  max-width: 80%;
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-size: .95rem;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background: #DBEAFE;
+  border: 1.5px solid #93C5FD;
+  color: #1e3a5f;
+  border-bottom-right-radius: 4px;
+}
+
+.bubble-ai {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+}
+.bubble-ai.normal {
+  background: #F3F4F6;
+  border: 1.5px solid var(--gray-border);
+  color: #333;
+}
+.bubble-ai.new-structure {
+  background: #ECFDF5;
+  border: 2.5px solid var(--green-bright);
+  color: #064E3B;
+  font-weight: 600;
+}
+.bubble-ai.hint {
+  background: #FFFBEB;
+  border: 2px solid var(--orange);
+  color: #7C4700;
+}
+.bubble-ai.clear {
+  background: #ECFDF5;
+  border: 2.5px solid var(--green-bright);
+  color: #064E3B;
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
+.chat-input-area {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--gray-border);
+  background: #fff;
+}
+
+.chat-input {
+  flex: 1;
+  border: 1.5px solid var(--gray-border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: .95rem;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  transition: border-color .15s;
+  line-height: 1.5;
+}
+.chat-input:focus { border-color: var(--green); }
+
+.btn-send {
+  background: var(--green);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 20px;
+  font-size: .95rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+  align-self: flex-end;
+}
+.btn-send:hover { background: var(--green-bright); }
+.btn-send:disabled { background: #aaa; cursor: default; }
+
+/* 右パネル */
+.meter-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 200px;
+}
+
+.panel-card {
+  background: #fff;
+  border-radius: var(--radius);
+  padding: 20px 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,.07);
+}
+
+.panel-card h3 {
+  font-size: .8rem;
+  color: #888;
+  letter-spacing: .1em;
+  margin-bottom: 14px;
+  text-align: center;
+}
+
+.lights {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.light {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #D1D5DB;
+  border: 3px solid #9CA3AF;
+  transition: background .4s, border-color .4s, box-shadow .4s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+}
+
+.light.on {
+  background: var(--green-bright);
+  border-color: var(--green);
+  box-shadow: 0 0 12px rgba(29,158,117,.5);
+}
+
+.lights-label {
+  text-align: center;
+  font-size: .75rem;
+  color: #888;
+}
+
+.count-number {
+  font-size: 3rem;
+  font-weight: 800;
+  color: var(--green);
+  text-align: center;
+  line-height: 1;
+  margin-bottom: 8px;
+}
+
+.count-dots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--green-bright);
+}
+
+.problem-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.problem-list li {
+  font-size: .82rem;
+  color: #333;
+  background: #F0FDF8;
+  border-left: 3px solid var(--green-bright);
+  border-radius: 4px;
+  padding: 6px 10px;
+  line-height: 1.5;
+}
+
+.problem-list li .num {
+  font-weight: 700;
+  color: var(--green);
+  margin-right: 4px;
+}
+
+/* ===== ユーザーバッジカード ===== */
+.user-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.user-card-name {
+  font-size: .95rem;
+  font-weight: 700;
+  color: var(--green);
+}
+
+.user-card-sub {
+  font-size: .72rem;
+  color: #999;
+  margin-top: 1px;
+}
+
+.btn-logout {
+  background: #fff;
+  color: #888;
+  border: 1.5px solid #D0D5D3;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: .78rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color .15s, color .15s;
+  flex-shrink: 0;
+}
+.btn-logout:hover { border-color: #DC2626; color: #DC2626; }
+
+/* ===== クリア画面 ===== */
+#screen-clear {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  gap: 28px;
+  padding: 24px;
+}
+
+.clear-card {
+  background: #fff;
+  border-radius: 20px;
+  padding: 48px 56px;
+  text-align: center;
+  box-shadow: 0 4px 32px rgba(15,110,86,.15);
+  max-width: 480px;
+  width: 100%;
+}
+
+.clear-emoji { font-size: 3.5rem; margin-bottom: 12px; }
+
+.clear-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--green);
+  margin-bottom: 8px;
+}
+
+.clear-subtitle {
+  font-size: .95rem;
+  color: #666;
+  margin-bottom: 24px;
+}
+
+.clear-lights {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.clear-light {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--green-bright);
+  border: 3px solid var(--green);
+  box-shadow: 0 0 16px rgba(29,158,117,.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.4rem;
+}
+
+.clear-problems {
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.clear-problem-item {
+  background: #F0FDF8;
+  border-left: 4px solid var(--green-bright);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: .88rem;
+  color: #1a3a2e;
+  line-height: 1.6;
+}
+
+.clear-problem-item .tag {
+  display: inline-block;
+  background: var(--green);
+  color: #fff;
+  font-size: .7rem;
+  border-radius: 4px;
+  padding: 1px 7px;
+  margin-right: 6px;
+  vertical-align: middle;
+  font-weight: 700;
+}
+
+/* ローディング */
+.loading-bubble {
+  align-self: flex-start;
+  background: #F3F4F6;
+  border: 1.5px solid var(--gray-border);
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  padding: 12px 18px;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.loading-bubble span {
+  width: 7px; height: 7px;
+  background: #9CA3AF;
+  border-radius: 50%;
+  animation: bounce .9s infinite;
+}
+.loading-bubble span:nth-child(2) { animation-delay: .15s; }
+.loading-bubble span:nth-child(3) { animation-delay: .3s; }
+@keyframes bounce {
+  0%,80%,100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+
+@media (max-width: 640px) {
+  #screen-game { flex-direction: column; padding: 12px 8px; }
+  .meter-panel { flex-direction: row; flex-wrap: wrap; min-width: unset; }
+  .panel-card { flex: 1; min-width: 140px; }
+  .card { padding: 28px 20px; }
+  .clear-card { padding: 32px 20px; }
+}

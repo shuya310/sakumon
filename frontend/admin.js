@@ -208,12 +208,23 @@ document.getElementById("btn-export-csv").addEventListener("click", async () => 
 // ===== パンくず =====
 function setBreadcrumb(items) {
   const el = document.getElementById("breadcrumb");
-  el.innerHTML = items.map((item, i) => {
+  el.innerHTML = "";
+  items.forEach((item, i) => {
     if (i < items.length - 1 && item.action) {
-      return `<a onclick="(${item.action.toString()})()">${esc(item.label)}</a> <span>›</span>`;
+      const a = document.createElement("a");
+      a.textContent = item.label;
+      a.style.cursor = "pointer";
+      a.addEventListener("click", item.action);
+      el.appendChild(a);
+      const sep = document.createElement("span");
+      sep.textContent = " › ";
+      el.appendChild(sep);
+    } else {
+      const span = document.createElement("span");
+      span.textContent = item.label;
+      el.appendChild(span);
     }
-    return `<span>${esc(item.label)}</span>`;
-  }).join(" ");
+  });
 }
 
 // ===== Helpers =====

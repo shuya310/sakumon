@@ -6,7 +6,8 @@ from datetime import datetime
 
 _env_path = os.environ.get("DATABASE_PATH")
 DB_PATH = Path(_env_path) if _env_path else Path(__file__).parent.parent / "data" / "sakumon.db"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+if not DB_PATH.parent.exists():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _conn():

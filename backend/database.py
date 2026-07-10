@@ -1,13 +1,19 @@
+import os
 import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
 
-DB_PATH = Path(__file__).parent.parent / "data" / "sakumon.db"
+_env_path = os.environ.get("DATABASE_PATH")
+DB_PATH = Path(_env_path) if _env_path else Path(__file__).parent.parent / "data" / "sakumon.db"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _conn():
-    return sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=30000")
+    return con
 
 
 def init_db():

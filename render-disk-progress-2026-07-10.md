@@ -48,50 +48,18 @@ PermissionError: [Errno 13] Permission denied: '/data'
 
 # ゼミ指摘事項への対応まとめ
 
-前回ゼミで指摘された4項目について、原因・対応・確認結果を記録する。
+| # | 指摘内容 | 原因 | 対応 | その後の状態 |
+|---|---|---|---|---|
+| 1 | Render再デプロイでデータが消えるかも | 無料プランのファイルシステムはエフェメラルで、DBファイルがコンテナ内一時領域にしかなかった | Render永続ディスク（`/data`、1GB）を追加し、`DATABASE_PATH`環境変数でDB保存先をディスク側に変更 | 再デプロイ後もデータが残ることをRender Shellから確認済み。**解決** |
+| 2 | ログはどこに保存？構成が伝わらない | コードからしか読み取れず、説明資料がなかった | `sessions`/`chat_logs`テーブルの構成と、ブラウザ→FastAPI→SQLite(永続ディスク)の保存経路を整理（下記詳細参照） | コード変更なし。発表用資料として整理済み |
+| 3 | IME確定のEnterで誤送信される | Mac SafariはIME確定時に`compositionend`が`keydown`より先に発火するため、`isComposing`だけの判定では確定Enterが送信として処理されていた | `compositionend`直後のEnterを無視するフラグを追加（[frontend/index.js:302](frontend/index.js:302)） | Safari特有のイベント順序を再現し、誤送信されないこと・通常送信は正常動作することを確認済み。**解決** |
+| 4 | ログアウトせず前回の記録が残らないことがある | 実際はDB側にログ欠落はなく、ログアウトボタンを押さずタブを閉じた際に`sessionStorage`の残り方がブラウザ依存で不安定だったことが原因 | リロードと新規アクセスをNavigation Timing APIで判別し、リロード以外（タブを閉じて開き直した場合含む）はログアウトと同じ扱いに統一（[frontend/index.js:373](frontend/index.js:373)） | リロード→復元／新規アクセス→ログイン画面、を実機で確認済み。**解決** |
 
-## 2. 学習者ログの保存場所の可視化
+## 2. ログ保存構造（詳細）
 
-### 状況
-- 「ログがどこにどう保存されているか」がコードから読み取れる形になっていなかった
-
-### 調査結果
 - テーブルは2つ（`backend/database.py`）
   - `sessions`：1回のログイン〜作問セッション（`session_id`, `user_id`, `expression`, `created_at`）
   - `chat_logs`：メッセージ単位のログ（`session_id`, `user_id`, `message`, `response_json`, `structure`, `is_new`, `created_at`）
 - 保存経路：`ブラウザ（index.js）→ FastAPI（main.py の /api/judge）→ database.py → data/sakumon.db（Render永続ディスク上）`
 - 管理画面（`/admin`）はこの2テーブルを集計・閲覧するのみで、別の保存先は持たない
 - CSVエクスポート（`/admin/api/export/csv`）で全ログを一括取得可能
-
-### 対応
-- コード変更なし。構成図とテーブル定義を整理し、ゼミ発表用の説明材料として提供
-
-## 3. IME確定のEnterキーで誤送信される
-
-### 原因
-- `frontend/index.js` の送信処理は `isComposing` フラグのみで日本語入力中のEnterを判定していた
-- Mac Safariでは、IME変換確定時に **`compositionend` が `keydown` より先に発火する**（Chromeとは順序が逆）。そのため確定Enterのkeydownが処理される時点で既に`isComposing`が`false`に戻っており、変換確定のつもりのEnterでメッセージが送信されてしまっていた
-
-### 対応（[frontend/index.js:302-315](frontend/index.js:302)）
-- `compositionend`発生直後（次のイベントループまで）のEnterを無視する`compositionJustEnded`フラグを追加
-- 保険として旧ブラウザ向けの`e.keyCode === 229`判定も追加
-
-### 動作確認
-- ブラウザ上でSafari特有のイベント順序（`compositionstart → input → compositionend → keydown(Enter)`）を再現し、誤送信されないことを確認
-- 通常のEnterキーによる送信（IME非経由）が引き続き正常に動作することも確認
-
-## 4. ログアウトすると前回の記録が残らないことがある
-
-### 調査結果
-- ログ書き込み（`save_log`）は`/api/judge`のレスポンスを返す前に同期的に実行されており、ログイン状態やログアウトとは無関係にメッセージ単位で確実に保存される設計だった
-- ログアウトボタンの処理はブラウザの`sessionStorage`をクリアするのみで、DBへの削除処理は一切呼ばれていない（削除は管理画面からの明示操作のみ）
-- 実際の原因は「データ消失」ではなく、**小学生がログアウトボタンを押さずにタブを閉じてしまうケース**で、`sessionStorage`がブラウザの実装によりタブ再訪問時に残ってしまう／残らないことがあり、続き再開の挙動が不安定になっていたこと
-
-### 対応（[frontend/index.js:373-383](frontend/index.js:373)）
-- Navigation Timing APIで「F5リロード」か「新規に開いた（タブを閉じて再度開いた場合を含む）」かを判定
-- リロード時のみ`sessionStorage`から前回の続きを復元し、それ以外（タブを閉じて開き直した場合含む）はセッション情報をクリアしてログイン画面から開始する（＝明示的なログアウトと同じ挙動に統一）
-
-### 動作確認
-- ブラウザで実際にF5リロード（`navigation.type === "reload"`）→続きから復元されることを確認
-- 新規ナビゲーション（`navigation.type === "navigate"`、タブを閉じて再度開いた場合に相当）→ログイン画面に戻ることを確認
-- いずれのケースでもDB上のログ自体は保持されており、データ消失は発生しない

@@ -300,14 +300,21 @@ async function sendMessage() {
 document.getElementById("btn-send").addEventListener("click", sendMessage);
 
 let isComposing = false;
+let compositionJustEnded = false;
 const chatInput = document.getElementById("chat-input");
 chatInput.addEventListener("compositionstart", () => { isComposing = true; });
-chatInput.addEventListener("compositionend", () => { isComposing = false; });
+chatInput.addEventListener("compositionend", () => {
+  isComposing = false;
+  // SafariはEnterでのIME確定時、compositionendがkeydownより先に発火するため、
+  // その直後のEnter keydownは変換確定とみなして送信しない（次のイベントループで解除）
+  compositionJustEnded = true;
+  setTimeout(() => { compositionJustEnded = false; }, 0);
+});
 chatInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !isComposing) {
-    e.preventDefault();
-    sendMessage();
-  }
+  if (e.key !== "Enter" || e.shiftKey) return;
+  if (isComposing || compositionJustEnded || e.keyCode === 229) return;
+  e.preventDefault();
+  sendMessage();
 });
 
 // ===== Clear screen =====
@@ -371,4 +378,14 @@ async function tryRestoreSession() {
 }
 
 // ===== Boot =====
-tryRestoreSession();
+function isReloadNavigation() {
+  const [nav] = performance.getEntriesByType("navigation");
+  return !!nav && nav.type === "reload";
+}
+
+if (isReloadNavigation()) {
+  tryRestoreSession();
+} else {
+  // タブを閉じた（ログアウトせず）→ 次に開いたときはログアウトと同じ扱いにする
+  clearSession();
+}

@@ -79,7 +79,7 @@ def judge(message: str, expression: str, history: list[str], current_stage: int 
 
     try:
         response = _client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             max_tokens=512,
             system=prompt,
             messages=[{"role": "user", "content": user_content}],
@@ -97,7 +97,7 @@ def judge(message: str, expression: str, history: list[str], current_stage: int 
             "structure": "invalid",
             "is_new": False,
             "stage": 0,
-            "message": "はんていちゅうにエラーがおきました。もういちどためしてみてください。",
+            "message": "判定中にエラーが起きました。もう一度ためしてみてください。",
             "display_type": "normal",
             "error": str(e),
         }

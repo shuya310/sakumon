@@ -13,7 +13,7 @@
         ↓
 バックエンド（FastAPI）が受け取る
         ↓
-Claude API（claude-sonnet-4-6）が判定
+Claude API（claude-sonnet-5）が判定
         ↓
 valid / structure / display_type を返す
         ↓
@@ -84,8 +84,12 @@ sakumon-system/
 │   ├── database.py      # SQLite 操作（セッション・ログ管理）
 │   └── requirements.txt
 ├── frontend/
-│   ├── index.html       # 児童向けUI（CSS・JS込み1ファイル）
-│   └── admin.html       # 管理者画面
+│   ├── index.html       # 児童向けUI
+│   ├── index.css
+│   ├── index.js
+│   ├── admin.html       # 管理者画面
+│   ├── admin.css
+│   └── admin.js
 ├── data/
 │   └── sakumon.db       # SQLite データベース（自動生成）
 ├── .env                 # APIキー（Git管理外）
@@ -100,9 +104,9 @@ sakumon-system/
 | 役割 | 技術 |
 |------|------|
 | バックエンド | Python / FastAPI |
-| AI判定 | Anthropic Claude API（claude-sonnet-4-6）|
+| AI判定 | Anthropic Claude API（claude-sonnet-5）|
 | データベース | SQLite |
-| フロントエンド | HTML / CSS / JavaScript（単一ファイル）|
+| フロントエンド | HTML / CSS / JavaScript（画面ごとにファイル分離、FastAPIの`/static`で配信）|
 | 仮想環境 | venv |
 
 ---

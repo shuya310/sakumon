@@ -2,5 +2,8 @@
 __pycache__/
 *.pyc
 *.db
+*.db-shm
+*.db-wal
 venv/
 .venv/
+.claude/

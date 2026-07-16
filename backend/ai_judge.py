@@ -28,7 +28,7 @@ JSON以外の文字は一切出力しないでください。
 - 誤字・脱字・文字化けなどで文章の意味が理解できない
 - 単語の羅列や記号だけで文章になっていない
 - 算数の文章題として必要な要素（誰が／何を／何こ／どうする／何を求めるか）が欠けている
-  → message例：「もじがよめないよ。もう一かいかいてみてね」
+  → message例：「文字が読めないよ。もう一回かいてみてね」
               「もんだいができていないみたい。だれが・なにを・なんこ・どうする、をかいてみよう」
 
 【式の数値・方向が合わない】
@@ -92,6 +92,7 @@ def judge(message: str, expression: str, history: list[str], current_stage: int 
                 raw = raw[4:]
         result = json.loads(raw)
     except Exception as e:
+        print(f"[ai_judge] judge failed: {type(e).__name__}: {e}")
         result = {
             "valid": False,
             "structure": "invalid",

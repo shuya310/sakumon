@@ -9,13 +9,16 @@
 ## システム概要
 
 ```
-児童が文章題を入力
+児童が入力
         ↓
-バックエンド（FastAPI）が受け取る
+バックエンド（FastAPI /api/judge）が受け取る
         ↓
-Claude API（claude-sonnet-5）が判定
+① ai_classify が「作問」か「対話」かを分類（judge を呼ぶ前に1回）
         ↓
-valid / structure / display_type を返す
+   ├─ 作問 → ai_judge が構造同定 → サーバが信号機/display_type を決定 → ai_dialogue が声かけ
+   └─ 対話 → ai_dialogue のみ（judge は通さない）
+        ↓
+valid / structure / display_type / message / figure を返す
         ↓
 フロントエンドがチャット形式でフィードバック表示
 ```
@@ -37,40 +40,43 @@ valid / structure / display_type を返す
 
 ---
 
-## AI判定ロジック
+## AI処理の構成（役割分担）
 
-### 判定フロー
+入力は judge を呼ぶ前に「作問／対話」に分類され、経路が分かれる。児童向けメッセージは
+すべて `ai_dialogue.py` が生成し、`ai_judge.py` は構造同定に専念する。
+
+- **ai_classify.py** … 入力が「作問（新しいお話）」か「対話（質問・つぶやき・こまった）」かを1コールで分類。対話文が構造判定に流れ込むのを防ぐ。分類失敗時は安全側の「対話」に倒す。
+- **ai_judge.py** … 作問文の**構造同定のみ**（`valid` / `structure` / `issue`）。児童向けメッセージやヒントは生成しない。
+- **ai_dialogue.py** … 児童向けの声かけ（称賛・気づかせ・成立不備の問いかけ・クリア）と `figure`・`target_structure` を生成。すべての児童向けメッセージを担当。
+- **main.py（サーバ）** … 構造同定の結果から、信号機の状態・`is_new`・3つ達成・`display_type` を**決定論的に**計算（AIに任せない）。
+
+### 判定フロー（作問経路）
 
 ```
-入力文章題
+作問文
     │
-    ├─ 文章として成立していない → valid=false（normal）
-    ├─ 式（18÷3）が成立しない → valid=false（normal）
+    ├─ 構造として成立しない（issue: not_problem / wrong_number / reversed）→ valid=false（normal）
     │
     └─ valid=true
-            │
             ├─ 新しい構造（is_new=true）
             │       ├─ 3つ揃った → display_type="clear" 🎉
-            │       └─ まだ揃っていない → display_type="new_structure"
-            │
-            └─ 既出の構造（is_new=false）→ ヒント段階を1つ進める
-                    ├─ stage 1 → hint1（気づかせる）
-                    ├─ stage 2 → hint2（観点を与える）
-                    └─ stage 3 → hint3（穴埋め文型を提示）
+            │       └─ まだ → display_type="new_structure"
+            └─ 既出の構造（is_new=false・停滞）→ display_type="hint1"（別の構造へ見方を向ける）
 ```
 
-### ヒント設計（段階的誘導）
+### 図（figure）について — ⚠️ 未確定事項
 
-| stage | display_type | 内容 |
-|-------|-------------|------|
-| 1 | hint1 | 「おなじおはなしがつづいているね」と気づかせる |
-| 2 | hint2 | わけかたを変える観点を与える（数字は出さない）|
-| 3 | hint3 | □を使った穴埋め文型のみ提示（数値禁止）|
+`ai_dialogue.py` は `figure`（描くテープ図の構造名: `tobun`/`hougan`/`bai`/`all`/`null`）を返すが、
+**テープ図の描画処理は未実装**（現状この値は画面に影響しない。フロントが決定論的に描く想定で別途実装予定）。
+
+なお「新しい構造ができたとき」の figure について、仕様上は「**できたばかりの構造**」を出す想定だが、
+実測ではAIが「**次に作らせたい構造**」を返す傾向がある（例: 等分除ができたとき `figure:"hougan"`）。
+バグではなくプロンプト解釈の差。**テープ図描画を実装する際に、どちらの図を出すか改めて確定すること。**
 
 ### ハルシネーション対策
 
-`is_new` および `stage` の確定はAIに任せず、**サーバー側（`ai_judge.py`）で上書き**している。
-AIはメッセージ文のみ生成し、判定ロジックはPythonコードで制御する。
+`is_new` / 3つ達成 / `display_type` の確定はAIに任せず、**サーバー側（`main.py`）で計算・上書き**する。
+AI（judge）は構造の同定のみ、AI（dialogue）はメッセージ文のみを担当し、状態管理はPythonコードで制御する。
 
 ---
 
@@ -79,8 +85,11 @@ AIはメッセージ文のみ生成し、判定ロジックはPythonコードで
 ```
 sakumon-system/
 ├── backend/
-│   ├── main.py          # FastAPI エントリポイント・APIルーティング
-│   ├── ai_judge.py      # Claude API 呼び出し・判定ロジック
+│   ├── main.py          # FastAPI エントリポイント・APIルーティング・作問/対話の分岐
+│   ├── ai_classify.py   # 入力を「作問」か「対話」かに分類
+│   ├── ai_judge.py      # 作問文の構造同定（valid / structure / issue）
+│   ├── ai_dialogue.py   # 児童向けの声かけ・figure・target_structure を生成
+│   ├── kanji_rule.py    # 文字づかい共通ルール（KANJI_RULE）
 │   ├── database.py      # SQLite 操作（セッション・ログ管理）
 │   └── requirements.txt
 ├── frontend/

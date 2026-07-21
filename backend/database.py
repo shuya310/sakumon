@@ -36,9 +36,19 @@ def init_db():
                 response_json TEXT NOT NULL,
                 structure TEXT,
                 is_new INTEGER NOT NULL DEFAULT 0,
+                input_type TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        _migrate(con)
+
+
+def _migrate(con):
+    """既存DBを壊さずにスキーマを更新する（データは保持）。"""
+    cols = [row[1] for row in con.execute("PRAGMA table_info(chat_logs)").fetchall()]
+    if "input_type" not in cols:
+        # 作問(sakumon)/対話(taiwa) の区別を後付けで保存できるようにする
+        con.execute("ALTER TABLE chat_logs ADD COLUMN input_type TEXT")
 
 
 def create_session(user_id: str, expression: str) -> int:
@@ -74,16 +84,39 @@ def get_sessions(user_id: str) -> list[dict]:
     ]
 
 
-def save_log(session_id: int, user_id: str, message: str, response_json: dict, structure: str | None, is_new: bool):
+def save_log(session_id: int, user_id: str, message: str, response_json: dict,
+             structure: str | None, is_new: bool, input_type: str | None = None):
     with _conn() as con:
         con.execute(
             """INSERT INTO chat_logs
-               (session_id, user_id, message, response_json, structure, is_new, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (session_id, user_id, message, response_json, structure, is_new, input_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, message,
              json.dumps(response_json, ensure_ascii=False),
-             structure, int(is_new), datetime.utcnow()),
+             structure, int(is_new), input_type, datetime.utcnow()),
         )
+
+
+def get_recent_turns(session_id: int, limit: int = 6) -> list[dict]:
+    """直近のやりとりを古い順で返す（対話の文脈・「わからない2回」判定用）。"""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT message, response_json, input_type FROM chat_logs
+               WHERE session_id = ? ORDER BY id DESC LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+    turns = []
+    for r in reversed(rows):
+        try:
+            resp = json.loads(r[1])
+        except Exception:
+            resp = {}
+        turns.append({
+            "child": r[0],
+            "ai": resp.get("message", ""),
+            "input_type": r[2],
+        })
+    return turns
 
 
 def get_history(session_id: int) -> list[str]:
@@ -217,7 +250,7 @@ def admin_get_all_logs_csv() -> list[dict]:
         rows = con.execute("""
             SELECT s.user_id, cl.session_id, s.created_at as session_start,
                    cl.created_at, cl.message, cl.response_json,
-                   cl.structure, cl.is_new,
+                   cl.structure, cl.is_new, cl.input_type,
                    (SELECT COUNT(*) FROM chat_logs c2
                     WHERE c2.session_id = cl.session_id AND c2.is_new=1
                     AND c2.structure IS NOT NULL) as session_new_count
@@ -240,6 +273,7 @@ def admin_get_all_logs_csv() -> list[dict]:
             "ai_message": resp.get("message", ""),
             "structure": r[6] or "",
             "is_new": r[7],
-            "session_new_count": r[8],
+            "input_type": r[8] or "",
+            "session_new_count": r[9],
         })
     return result

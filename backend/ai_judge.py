@@ -1,3 +1,12 @@
+"""作問文の構造同定。
+
+責務は「作問された文章の構造同定」に限る。児童向けメッセージ・ヒント・
+表示種別（display_type）・信号機の状態は生成しない（それらは main.py が
+決定論的に計算し、児童向けの声かけは ai_dialogue が生成する）。
+出力はJSONのみ。パース失敗時は1回リトライし、それでも失敗したら
+issue="error" の構造結果を返す（メッセージ生成は呼び出し側に任せる）。
+"""
+
 import json
 import os
 from dotenv import load_dotenv
@@ -7,121 +16,79 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 _client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+MODEL = "claude-sonnet-5"
+
 ALL_STRUCTURES = {"tobun", "hougan", "bai"}
 
-SYSTEM_PROMPT = """あなたは小学4年生の算数文章題を判定するAIです。
-児童が入力した文章題を評価し、必ず以下のJSON形式だけで返答してください。
+SYSTEM_PROMPT = """あなたは小学4年生の算数文章題の「構造」を同定するAIです。
+児童が入力した文章題を読み、それが式 {expression} で解ける文章題として成立しているか、
+成立しているならどの構造かだけを判定します。
+児童向けのメッセージやヒントは書きません。判定結果のJSONだけを返してください。
 JSON以外の文字は一切出力しないでください。
 
 ## 評価する式
 {expression}
 
 ## 3つの構造の定義
-- tobun（等分除）: 全体を等しく分けたとき「1人あたり・1つあたりいくつ」を求める問題。例：「18このあめを3人でわけると1人なんこ？」
-- hougan（包含除）: 全体から一定数ずつ分けると「なん人分・なん組」になるかを求める問題。例：「18このあめを3こずつくばるとなん人にくばれる？」
-- bai（倍）: ある数が別の数の何倍かを求める問題。例：「18mは3mのなんばい？」
+- tobun（等分除）: 全体を等しく分けたとき「1人あたり・1つあたりいくつ」を求める問題。例:「18このあめを3人でわけると1人なんこ？」
+- hougan（包含除）: 全体から一定数ずつ分けると「なん人分・なん組」になるかを求める問題。例:「18このあめを3こずつくばるとなん人にくばれる？」
+- bai（倍）: ある数が別の数の何倍かを求める問題。例:「18mは3mのなんばい？」
 
-## valid=false（invalid）にすべき条件
-以下のいずれかに該当する場合は必ず valid=false にすること。
-
-【文章として成立していない】
-- 誤字・脱字・文字化けなどで文章の意味が理解できない
-- 単語の羅列や記号だけで文章になっていない
+## valid=false（成立していない）にすべき条件
+- 誤字・脱字・文字化けなどで文章の意味が理解できない、または単語の羅列で文章になっていない
 - 算数の文章題として必要な要素（誰が／何を／何こ／どうする／何を求めるか）が欠けている
-  → message例：「文字が読めないよ。もう一回かいてみてね」
-              「もんだいができていないみたい。だれが・なにを・なんこ・どうする、をかいてみよう」
+- 文章を式にしたとき {expression} にならない（数値が違う・演算子が違う）
+- bai（倍）で（大きい数）÷（小さい数）の向きが逆（例:「3こは18この何倍？」→ 3÷18 になる）
 
-【式の数値・方向が合わない】
-- 文章題を式にしたとき {expression} にならない（数値が違う、演算子が違うなど）
-- bai（倍）構造の場合、（大きい数）÷（小さい数）の向きが逆になっている
-  例：「山田さん（3こ）は佐藤さん（18こ）の何倍？」→ 3÷18 になるので invalid
-  → message例：「そのおはなしだと、しきが18÷3にならないよ。どっちがおおきいかな？もう一かいかんがえてみてね」
-
-## 判定ルール
-1. valid: 上記invalid条件に該当せず、{expression} で解ける文章題として成立しているか
-2. structure: tobun / hougan / bai のどれか。validがfalseなら "invalid"
-3. is_new: structureが history に含まれていなければ true、含まれていれば false
-4. stage と display_type の決め方:
-   - validがfalse → stage=0, display_type="normal"
-   - valid かつ is_new=true:
-     - historyにstructureを加えると3つすべて揃う → display_type="clear", stage=0
-     - そうでなければ → display_type="new_structure", stage=0
-   - valid かつ is_new=false（既出）→ stageとdisplay_typeはリクエストで渡された current_stage を1上げる:
-     - current_stage=0 → stage=1, display_type="hint1"
-     - current_stage=1 → stage=2, display_type="hint2"
-     - current_stage=2以上 → stage=3, display_type="hint3"
-5. message: 児童へのやさしいメッセージ（ひらがな・カタカナ多め、小学4年生向け）
-   - normal: なぜ成立していないか優しく説明し、どう書けばよいかを導く
-   - new_structure: 新しい構造を発見したことを称賛する
-   - clear: 3つ全部達成したことを大いに称賛する
-   - hint1: 「おなじおはなしがつづいているね。ちがうわけかたを考えてみよう！」のような気づかせるメッセージ
-   - hint2: 「たとえば、わけかたをかえてみたら？みたいに考えてみて」のような観点を与えるメッセージ（具体的な数字は出さない）
-   - hint3: 穴埋め型（□を使った文型）だけを示す。「□にすきなかずをいれてかいてみよう」で終わる。数字・具体的な個数・人数・長さ等の数値を一切含めてはいけない。式の数字（18や3）も使用禁止。例文として具体的な問題文を出してはいけない。
+## issue（valid=false のときの理由コード。valid=true のときは null）
+- "not_problem": 文章題として成立していない・要素が欠けている・意味が読めない
+- "wrong_number": 式が {expression} にならない（数値・演算子がちがう）
+- "reversed": 倍で大小の向きが逆になっている
 
 ## 返すJSONの形式（必ずこの形式のみ）
 {
   "valid": true or false,
   "structure": "tobun" or "hougan" or "bai" or "invalid",
-  "is_new": true or false,
-  "stage": 0〜3の整数,
-  "message": "児童へのメッセージ",
-  "display_type": "normal" or "new_structure" or "clear" or "hint1" or "hint2" or "hint3"
+  "issue": null or "not_problem" or "wrong_number" or "reversed"
 }"""
 
 
-def judge(message: str, expression: str, history: list[str], current_stage: int = 0) -> dict:
-    prompt = SYSTEM_PROMPT.replace("{expression}", expression)
+def _parse(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw)
 
-    user_content = f"""式: {expression}
-これまでに到達した構造: {history}
-現在の停滞ステージ: {current_stage}
-児童の入力: {message}"""
 
-    try:
-        response = _client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=512,
-            system=prompt,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        raw = response.content[0].text.strip()
-        # モデルがコードブロックで囲む場合を除去
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        result = json.loads(raw)
-    except Exception as e:
-        print(f"[ai_judge] judge failed: {type(e).__name__}: {e}")
-        result = {
-            "valid": False,
-            "structure": "invalid",
-            "is_new": False,
-            "stage": 0,
-            "message": "判定中にエラーが起きました。もう一度ためしてみてください。",
-            "display_type": "normal",
-            "error": str(e),
-        }
+def judge(message: str, expression: str) -> dict:
+    """作問文の構造同定のみを行う。
 
-    # is_new をサーバー側で確定（モデルのハルシネーション防止）
-    structure = result.get("structure", "invalid")
-    if result.get("valid") and structure in ALL_STRUCTURES:
-        result["is_new"] = structure not in history
-        if not result["is_new"]:
-            # 停滞ステージをサーバー側で確定
-            next_stage = min(current_stage + 1, 3)
-            result["stage"] = next_stage
-            result["display_type"] = f"hint{next_stage}"
-        else:
-            new_history = set(history) | {structure}
-            if new_history >= ALL_STRUCTURES:
-                result["display_type"] = "clear"
-            else:
-                result["display_type"] = "new_structure"
-            result["stage"] = 0
-    else:
-        result["is_new"] = False
-        result["stage"] = 0
-        result["display_type"] = "normal"
+    戻り値: {"valid": bool, "structure": str, "issue": str|None}
+    パース失敗が続いた場合は {"valid": False, "structure": "invalid",
+    "issue": "error", "error": ...} を返す。
+    """
+    system = SYSTEM_PROMPT.replace("{expression}", expression)
+    user_content = f"式: {expression}\n児童の入力: {message}"
 
-    return result
+    last_err = None
+    for attempt in range(2):  # 1回リトライ
+        try:
+            response = _client.messages.create(
+                model=MODEL,
+                max_tokens=256,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+            )
+            result = _parse(response.content[0].text)
+            valid = bool(result.get("valid"))
+            structure = result.get("structure", "invalid")
+            if not valid or structure not in ALL_STRUCTURES:
+                return {"valid": False, "structure": "invalid", "issue": result.get("issue") or "not_problem"}
+            return {"valid": True, "structure": structure, "issue": None}
+        except Exception as e:
+            last_err = e
+            print(f"[ai_judge] judge failed (attempt {attempt + 1}): {type(e).__name__}: {e}")
+
+    return {"valid": False, "structure": "invalid", "issue": "error", "error": str(last_err)}

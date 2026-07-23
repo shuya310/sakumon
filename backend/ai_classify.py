@@ -35,6 +35,14 @@ JSON以外の文字は一切出力しないでください。
 { "type": "sakumon" or "taiwa" }"""
 
 
+def _text_from(response) -> str:
+    """応答から最初の text ブロックを取り出す（思考ブロック混入への保険）。"""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ValueError("no text block in response")
+
+
 def _parse(raw: str) -> dict:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -63,10 +71,11 @@ def classify(message: str, recent_turns: list[dict] | None = None) -> str:
             response = _client.messages.create(
                 model=MODEL,
                 max_tokens=64,
+                thinking={"type": "disabled"},  # 分類に思考は不要（sonnet-5は既定でonのため明示off）
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
             )
-            result = _parse(response.content[0].text)
+            result = _parse(_text_from(response))
             t = result.get("type")
             if t in ("sakumon", "taiwa"):
                 return t

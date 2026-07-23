@@ -37,6 +37,7 @@ def init_db():
                 structure TEXT,
                 is_new INTEGER NOT NULL DEFAULT 0,
                 input_type TEXT,
+                stumble TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -49,6 +50,9 @@ def _migrate(con):
     if "input_type" not in cols:
         # 作問(sakumon)/対話(taiwa) の区別を後付けで保存できるようにする
         con.execute("ALTER TABLE chat_logs ADD COLUMN input_type TEXT")
+    if "stumble" not in cols:
+        # つまづきの種類（研究分析用）を後付けで保存できるようにする
+        con.execute("ALTER TABLE chat_logs ADD COLUMN stumble TEXT")
 
 
 def create_session(user_id: str, expression: str) -> int:
@@ -85,16 +89,41 @@ def get_sessions(user_id: str) -> list[dict]:
 
 
 def save_log(session_id: int, user_id: str, message: str, response_json: dict,
-             structure: str | None, is_new: bool, input_type: str | None = None):
+             structure: str | None, is_new: bool, input_type: str | None = None,
+             stumble: str | None = None):
     with _conn() as con:
         con.execute(
             """INSERT INTO chat_logs
-               (session_id, user_id, message, response_json, structure, is_new, input_type, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (session_id, user_id, message, response_json, structure, is_new, input_type, stumble, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, message,
              json.dumps(response_json, ensure_ascii=False),
-             structure, int(is_new), input_type, datetime.utcnow()),
+             structure, int(is_new), input_type, stumble, datetime.utcnow()),
         )
+
+
+def get_conversation(session_id: int) -> list[dict]:
+    """全ターンを時系列で返す（再開時のチャット再描画用）。"""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT message, response_json, input_type FROM chat_logs
+               WHERE session_id = ? ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    turns = []
+    for r in rows:
+        try:
+            resp = json.loads(r[1])
+        except Exception:
+            resp = {}
+        turns.append({
+            "message": r[0],
+            "ai_message": resp.get("message", ""),
+            "display_type": resp.get("display_type", "normal"),
+            "figure": resp.get("figure"),
+            "input_type": r[2],
+        })
+    return turns
 
 
 def get_recent_turns(session_id: int, limit: int = 6) -> list[dict]:
@@ -189,7 +218,9 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
         rows = con.execute("""
             SELECT s.session_id, s.created_at,
                    COUNT(CASE WHEN cl.is_new=1 AND cl.structure IS NOT NULL THEN 1 END) as new_count,
-                   COUNT(cl.id) as total_count,
+                   COUNT(CASE WHEN cl.input_type='sakumon' OR (cl.input_type IS NULL AND cl.id IS NOT NULL)
+                         THEN 1 END) as sakumon_count,
+                   COUNT(CASE WHEN cl.input_type='taiwa' THEN 1 END) as taiwa_count,
                    GROUP_CONCAT(DISTINCT CASE WHEN cl.is_new=1 AND cl.structure IS NOT NULL
                          THEN cl.structure END) as structures
             FROM sessions s
@@ -203,8 +234,9 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
             "session_id": r[0],
             "created_at": r[1],
             "new_count": r[2] or 0,
-            "total_count": r[3] or 0,
-            "structures": [s for s in (r[4] or "").split(",") if s],
+            "sakumon_count": r[3] or 0,
+            "taiwa_count": r[4] or 0,
+            "structures": [s for s in (r[5] or "").split(",") if s],
         }
         for r in rows
     ]
@@ -213,7 +245,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
 def admin_get_session_logs(session_id: int) -> list[dict]:
     with _conn() as con:
         rows = con.execute("""
-            SELECT id, message, response_json, structure, is_new, created_at
+            SELECT id, message, response_json, structure, is_new, input_type, stumble, created_at
             FROM chat_logs WHERE session_id = ? ORDER BY id
         """, (session_id,)).fetchall()
     result = []
@@ -229,7 +261,11 @@ def admin_get_session_logs(session_id: int) -> list[dict]:
             "display_type": resp.get("display_type", ""),
             "structure": r[3],
             "is_new": bool(r[4]),
-            "created_at": r[5],
+            "input_type": r[5],
+            "stumble": r[6],
+            "figure": resp.get("figure"),
+            "state": resp.get("state", ""),
+            "created_at": r[7],
         })
     return result
 
@@ -250,7 +286,7 @@ def admin_get_all_logs_csv() -> list[dict]:
         rows = con.execute("""
             SELECT s.user_id, cl.session_id, s.created_at as session_start,
                    cl.created_at, cl.message, cl.response_json,
-                   cl.structure, cl.is_new, cl.input_type,
+                   cl.structure, cl.is_new, cl.input_type, cl.stumble,
                    (SELECT COUNT(*) FROM chat_logs c2
                     WHERE c2.session_id = cl.session_id AND c2.is_new=1
                     AND c2.structure IS NOT NULL) as session_new_count
@@ -274,6 +310,9 @@ def admin_get_all_logs_csv() -> list[dict]:
             "structure": r[6] or "",
             "is_new": r[7],
             "input_type": r[8] or "",
-            "session_new_count": r[9],
+            "stumble": r[9] or "",
+            "figure": resp.get("figure") or "",
+            "state": resp.get("state", ""),
+            "session_new_count": r[10],
         })
     return result

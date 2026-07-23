@@ -53,6 +53,16 @@ JSON以外の文字は一切出力しないでください。
 }"""
 
 
+def _text_from(response) -> str:
+    """応答から最初の text ブロックを取り出す。
+    claude-sonnet-5 は思考を明示offにしても content[0] が思考ブロックに
+    なり得るため、content[0] 決め打ちではなく type=="text" を探す。"""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ValueError("no text block in response")
+
+
 def _parse(raw: str) -> dict:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -78,10 +88,11 @@ def judge(message: str, expression: str) -> dict:
             response = _client.messages.create(
                 model=MODEL,
                 max_tokens=256,
+                thinking={"type": "disabled"},  # 構造判定に思考は不要（sonnet-5は既定でonのため明示off）
                 system=system,
                 messages=[{"role": "user", "content": user_content}],
             )
-            result = _parse(response.content[0].text)
+            result = _parse(_text_from(response))
             valid = bool(result.get("valid"))
             structure = result.get("structure", "invalid")
             if not valid or structure not in ALL_STRUCTURES:

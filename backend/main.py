@@ -18,6 +18,33 @@ EXPRESSION = "18 ÷ 3"
 STRUCTURES = {"tobun", "hougan", "bai"}
 USER_ID_PATTERN = re.compile(r"^[0-9a-z]{2}$")
 
+# 対話文からつまづきの種類を判定するための語彙（決定論・研究の再現性のため単純なキーワード）
+_MATERIAL_CONFUSION_KW = ("同じ話", "おなじ話", "おなじはなし", "同じお話",
+                          "同じじゃ", "おなじじゃ", "変わらない", "かわらない", "いっしょ", "一緒")
+_HELP_KW = ("わからない", "わかんない", "わからん", "こまった", "困った",
+            "むずかしい", "難しい", "図", "おしえて", "教えて", "できない", "ヒント", "たすけ", "助け")
+
+
+def _taiwa_stumble(message: str) -> str | None:
+    """対話入力のつまづき種別。題材混同 > 助け求め > なし の順で判定。"""
+    if any(k in message for k in _MATERIAL_CONFUSION_KW):
+        return "material_confusion"
+    if any(k in message for k in _HELP_KW):
+        return "help_request"
+    return None
+
+
+def _sakumon_signals(valid: bool, is_new: bool, completes_all: bool, issue: str | None):
+    """作問の判定結果から (stumble, support_level, display_type) を決定論的に導く。"""
+    if not valid:
+        stumble = {"reversed": "reversed", "wrong_number": "wrong_expression"}.get(issue, "incomplete")
+        return stumble, "form", "normal"
+    if completes_all:
+        return None, "goal", "clear"
+    if is_new:
+        return None, "discover", "new_structure"
+    return "repeat_structure", "concrete", "hint1"  # 既出構造のくり返し（停滞）
+
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 app = FastAPI()
@@ -79,11 +106,13 @@ def resume_session(req: ResumeSessionRequest):
         raise HTTPException(status_code=404, detail="session not found")
     history = database.get_history(req.session_id)
     problems = database.get_session_problems(req.session_id)
+    conversation = database.get_conversation(req.session_id)
     return {
         "session_id": req.session_id,
         "expression": EXPRESSION,
         "history": history,
         "problems": problems,
+        "conversation": conversation,
     }
 
 
@@ -111,7 +140,11 @@ def judge(req: JudgeRequest):
 
 def _handle_taiwa(req: JudgeRequest, user_id: str, history: list[str], recent: list[dict]) -> dict:
     """対話経路: judge は通さず ai_dialogue のみ。信号機は変化しない。"""
-    dlg = ai_dialogue.dialogue(req.message, "taiwa", None, history, recent)
+    stumble = _taiwa_stumble(req.message)
+    # 助けを求めている／題材混同 → 具体的な見方を示す段階。それ以外は軽く受け止める。
+    support_level = "concrete" if stumble else "talk"
+
+    dlg = ai_dialogue.dialogue(req.message, "taiwa", None, history, recent, support_level)
     result = {
         "valid": False,
         "structure": None,
@@ -125,7 +158,8 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, history: list[str], recent: l
     }
     database.save_log(
         session_id=req.session_id, user_id=user_id, message=req.message,
-        response_json=result, structure=None, is_new=False, input_type="taiwa",
+        response_json=result, structure=None, is_new=False,
+        input_type="taiwa", stumble=stumble,
     )
     return result
 
@@ -144,28 +178,23 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent:
         }
         database.save_log(
             session_id=req.session_id, user_id=user_id, message=req.message,
-            response_json=result, structure=None, is_new=False, input_type="sakumon",
+            response_json=result, structure=None, is_new=False,
+            input_type="sakumon", stumble=None,
         )
         return result
 
-    # 信号機の状態・表示種別はサーバが決定論的に計算する（AIに任せない）
+    # 信号機の状態・表示種別・支援段階・つまづきはサーバが決定論的に計算する（AIに任せない）
     valid = jr.get("valid", False)
     structure = jr.get("structure", "invalid")
     is_new = valid and structure in STRUCTURES and structure not in history
     completes_all = is_new and (set(history) | {structure}) >= STRUCTURES
+    stumble, support_level, display_type = _sakumon_signals(
+        valid, is_new, completes_all, jr.get("issue")
+    )
 
-    if not valid:
-        display_type = "normal"
-    elif completes_all:
-        display_type = "clear"
-    elif is_new:
-        display_type = "new_structure"
-    else:
-        display_type = "hint1"  # 既出構造のくり返し（停滞）。フロントの hint スタイルに対応
-
-    # 児童向けの声かけ・図・次の目標は ai_dialogue が生成
+    # 児童向けの声かけ・図・次の目標は ai_dialogue が生成（支援段階を渡す）
     jr_for_dialogue = {**jr, "is_new": is_new, "completes_all": completes_all}
-    dlg = ai_dialogue.dialogue(req.message, "sakumon", jr_for_dialogue, history, recent)
+    dlg = ai_dialogue.dialogue(req.message, "sakumon", jr_for_dialogue, history, recent, support_level)
 
     result = {
         "valid": valid,
@@ -181,7 +210,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent:
     database.save_log(
         session_id=req.session_id, user_id=user_id, message=req.message,
         response_json=result, structure=structure if valid else None,
-        is_new=is_new, input_type="sakumon",
+        is_new=is_new, input_type="sakumon", stumble=stumble,
     )
     return result
 
@@ -240,7 +269,8 @@ def admin_export_csv():
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=[
         "user_id", "session_id", "session_start", "created_at",
-        "message", "ai_message", "structure", "is_new", "input_type", "session_new_count",
+        "message", "ai_message", "structure", "is_new", "input_type",
+        "stumble", "figure", "state", "session_new_count",
     ])
     writer.writeheader()
     writer.writerows(rows)

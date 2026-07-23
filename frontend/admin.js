@@ -91,7 +91,7 @@ function buildSessionBlock(session, userId) {
     <div class="session-head-left">
       <div>
         <div class="s-date">${fmtDate(session.created_at)}</div>
-        <div class="s-stat">作問 ${session.new_count} 件（計 ${session.total_count} 回）　${structs}</div>
+        <div class="s-stat">違う構造 ${session.new_count} ／ 作問 ${session.sakumon_count ?? 0}回・対話 ${session.taiwa_count ?? 0}回　${structs}</div>
       </div>
     </div>
     <div class="session-head-right">
@@ -141,11 +141,13 @@ function buildLogsTable(logs) {
   tbl.innerHTML = `
     <thead>
       <tr>
-        <th style="width:130px">日時</th>
+        <th style="width:120px">日時</th>
+        <th style="width:56px">種別</th>
         <th>入力 / AIの返答</th>
-        <th style="width:90px">構造</th>
-        <th style="width:60px">新規</th>
-        <th style="width:60px"></th>
+        <th style="width:80px">構造</th>
+        <th style="width:52px">新規</th>
+        <th style="width:96px">つまづき</th>
+        <th style="width:56px"></th>
       </tr>
     </thead>
   `;
@@ -166,11 +168,29 @@ function buildLogRow(log) {
     clear: "clear",
   }[log.display_type] || "";
 
+  // 種別（旧データは input_type=null → 作問扱い）
+  const isTaiwa = log.input_type === "taiwa";
+  const inputBadge = isTaiwa
+    ? '<span class="badge badge-purple">対話</span>'
+    : '<span class="badge badge-blue">作問</span>';
+
+  // figure（出したテープ図）を返答の下に小タグ表示
+  const figureTag = log.figure
+    ? `<div class="figure-tag">📊 図: ${log.figure === "all" ? "3つ" : (STRUCT_LABEL[log.figure] || log.figure)}</div>`
+    : "";
+
+  // つまづき
+  const stumbleCell = log.stumble
+    ? `<span class="badge ${STUMBLE_CLS[log.stumble] || "badge-gray"}">${STUMBLE_LABEL[log.stumble] || log.stumble}</span>`
+    : '<span style="color:#ccc">—</span>';
+
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>
+    <td>${inputBadge}</td>
     <td>
       <div class="msg-user">${esc(log.message)}</div>
       <div class="msg-ai ${aiCls}">${esc(log.ai_message)}</div>
+      ${figureTag}
     </td>
     <td>${log.structure
       ? `<span class="badge badge-blue">${STRUCT_LABEL[log.structure] || log.structure}</span>`
@@ -178,6 +198,7 @@ function buildLogRow(log) {
     <td>${log.is_new
       ? '<span class="badge badge-green">新規</span>'
       : '<span style="color:#ccc">—</span>'}</td>
+    <td>${stumbleCell}</td>
     <td>
       <button class="btn btn-danger btn-sm">削除</button>
     </td>
@@ -228,7 +249,24 @@ function setBreadcrumb(items) {
 }
 
 // ===== Helpers =====
-const STRUCT_LABEL = { tobun: "とうぶんじょ", hougan: "ほうがんじょ", bai: "ばい" };
+const STRUCT_LABEL = { tobun: "等分除", hougan: "包含除", bai: "倍" };
+
+const STUMBLE_LABEL = {
+  incomplete: "要素不足",
+  wrong_expression: "式ちがい",
+  reversed: "向き逆",
+  repeat_structure: "停滞(同構造)",
+  material_confusion: "題材混同",
+  help_request: "助け求め",
+};
+const STUMBLE_CLS = {
+  incomplete: "badge-orange",
+  wrong_expression: "badge-orange",
+  reversed: "badge-orange",
+  repeat_structure: "badge-orange",
+  material_confusion: "badge-purple",
+  help_request: "badge-purple",
+};
 
 function fmtDate(str) {
   if (!str) return "—";

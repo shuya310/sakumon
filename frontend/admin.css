@@ -133,6 +133,13 @@ tr.clickable:hover td { background: #F0FDF8; }
 .badge-orange { background: #FEF3C7; color: #92400E; }
 .badge-gray { background: #F3F4F6; color: #6B7280; }
 .badge-blue { background: #DBEAFE; color: #1e3a5f; }
+.badge-purple { background: #EDE9FE; color: #5B21B6; }
+
+.figure-tag {
+  font-size: .72rem;
+  color: var(--green);
+  margin-top: 4px;
+}
 
 /* ===== チャットログ ===== */
 .log-row td { vertical-align: top; }

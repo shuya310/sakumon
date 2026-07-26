@@ -132,27 +132,6 @@ sakumon-system/
 
 ---
 
-## セットアップ
-
-```bash
-# 仮想環境の作成と有効化
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 依存パッケージのインストール
-pip install -r backend/requirements.txt
-
-# 環境変数の設定
-cp .env.example .env
-# .env を編集して ANTHROPIC_API_KEY を設定する
-```
-
-## 起動
-
-```bash
-cd backend && uvicorn main:app --reload --port 8000
-```
-
 ## アクセス
 
 | URL | 説明 |

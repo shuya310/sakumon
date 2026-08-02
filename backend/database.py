@@ -170,21 +170,28 @@ def get_session_problems(session_id: int) -> list[dict]:
     return [{"text": r[0], "structure": r[1], "is_new": bool(r[2])} for r in rows]
 
 
-def get_current_stage(session_id: int) -> int:
+_STUCK_STUMBLES = {"repeat_structure", "material_confusion", "help_request"}
+
+
+def get_stuck_streak(session_id: int) -> int:
+    """直近の新構造発見（is_new=1）より後で、足踏みシグナル
+    （くり返し／同じ話混乱／ヘルプ要求）が何回起きたかを数える。
+    段階的ヒント（hint1〜3）の水準決定に使う。連続でなくてもよく、
+    間に雑談などの無関係なターンが挟まっても数え続ける。
+    """
     with _conn() as con:
-        row = con.execute(
-            "SELECT response_json FROM chat_logs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+        rows = con.execute(
+            """SELECT is_new, stumble FROM chat_logs
+               WHERE session_id = ? ORDER BY id DESC""",
             (session_id,),
-        ).fetchone()
-    if not row:
-        return 0
-    try:
-        last = json.loads(row[0])
-        if not last.get("is_new", True):
-            return last.get("stage", 0)
-    except Exception:
-        pass
-    return 0
+        ).fetchall()
+    streak = 0
+    for is_new, stumble in rows:
+        if is_new:
+            break
+        if stumble in _STUCK_STUMBLES:
+            streak += 1
+    return streak
 
 
 def get_session_user(session_id: int) -> str | None:

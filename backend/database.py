@@ -121,6 +121,7 @@ def get_conversation(session_id: int) -> list[dict]:
             "ai_message": resp.get("message", ""),
             "display_type": resp.get("display_type", "normal"),
             "figure": resp.get("figure"),
+            "tape_diagram": resp.get("tape_diagram"),
             "input_type": r[2],
         })
     return turns
@@ -170,7 +171,29 @@ def get_session_problems(session_id: int) -> list[dict]:
     return [{"text": r[0], "structure": r[1], "is_new": bool(r[2])} for r in rows]
 
 
-_STUCK_STUMBLES = {"repeat_structure", "material_confusion", "help_request"}
+_STUCK_STUMBLES = {"hint1", "hint2", "hint3", "material_confusion", "help_request"}
+
+
+def get_stall_count(session_id: int) -> int:
+    """段階的支援（hint1〜3）の水準決定に使う「反復」カウント。
+
+    成立した作問ログ（structure IS NOT NULL）だけを新しい順に見て、
+    直近の新構造到達（is_new=1）より後に同じ構造をくり返した回数を数える。
+    対話（taiwa）のターンは structure が NULL なので数えない。
+    """
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT is_new FROM chat_logs
+               WHERE session_id = ? AND structure IS NOT NULL
+               ORDER BY id DESC""",
+            (session_id,),
+        ).fetchall()
+    count = 0
+    for (is_new,) in rows:
+        if is_new:
+            break
+        count += 1
+    return count
 
 
 def get_stuck_streak(session_id: int) -> int:
@@ -271,6 +294,7 @@ def admin_get_session_logs(session_id: int) -> list[dict]:
             "input_type": r[5],
             "stumble": r[6],
             "figure": resp.get("figure"),
+            "tape_diagram": resp.get("tape_diagram"),
             "state": resp.get("state", ""),
             "created_at": r[7],
         })

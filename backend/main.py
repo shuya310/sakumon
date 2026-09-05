@@ -35,20 +35,26 @@ def _taiwa_stumble(message: str) -> str | None:
 
 
 def _stuck_level(session_id: int, floor: int = 1) -> int:
-    """段階的ヒント（hint1〜3）の水準を決定論的に決める。
+    """対話（taiwa）経路での段階的ヒント（hint1〜3）の水準を決定論的に決める。
 
     直近の新構造発見以降に積み上がった「足踏み」シグナル数（+今回の1回）を
     1〜3にクランプして返す。floor は「同じ話じゃないの？」「わからない」等、
-    子どもが自分から混乱・ヘルプを表明したときに、いきなりhint1（問いかけのみ・
-    図なし）から始めず、最低でも図を伴うhint2からにするための下限。
+    子どもが自分から混乱・ヘルプを表明したときに、いきなりhint1（問いかけのみ）
+    から始めず、最低でもhint2（比較の軸を示す）からにするための下限。
+    作問（sakumon）経路の水準は stall_count（database.get_stall_count）で
+    決めるため、こちらは使わない。
     """
     streak = database.get_stuck_streak(session_id) + 1
     return min(3, max(floor, streak))
 
 
 def _sakumon_signals(valid: bool, is_new: bool, completes_all: bool, issue: str | None,
-                      stuck_level: int = 1):
-    """作問の判定結果から (stumble, support_level, display_type) を決定論的に導く。"""
+                      stall_count: int = 0):
+    """作問の判定結果から (stumble, support_level, display_type) を決定論的に導く。
+
+    stall_count は database.get_stall_count() + 1（今回の反復ぶんを含む）。
+    1→hint1（気づきの問い）／2→hint2（比較の軸の転換）／3以上→hint3（テープ図）。
+    """
     if not valid:
         stumble = {"reversed": "reversed", "wrong_number": "wrong_expression"}.get(issue, "incomplete")
         return stumble, "form", "normal"
@@ -56,8 +62,8 @@ def _sakumon_signals(valid: bool, is_new: bool, completes_all: bool, issue: str 
         return None, "goal", "clear"
     if is_new:
         return None, "discover", "new_structure"
-    level = f"hint{stuck_level}"  # 既出構造のくり返し（停滞）。水準は段階的に上げる
-    return "repeat_structure", level, level
+    level = f"hint{min(3, stall_count)}"  # 既出構造のくり返し（停滞）。水準は段階的に上げる
+    return level, level, level  # つまづき種別に段階名そのものを記録し、管理者画面から追える
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -156,7 +162,7 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, history: list[str], recent: l
     """対話経路: judge は通さず ai_dialogue のみ。信号機は変化しない。"""
     stumble = _taiwa_stumble(req.message)
     # 助けを求めている／題材混同 → 自分から混乱を表明しているので、最低でもhint2
-    # （今できている構造を図示して比べさせる）から入る。それ以外は軽く受け止める。
+    # （比較の軸を示す）から入る。それ以外は軽く受け止める。
     if stumble:
         support_level = f"hint{_stuck_level(req.session_id, floor=2)}"
     else:
@@ -172,6 +178,7 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, history: list[str], recent: l
         "figure": dlg.get("figure"),
         "target_structure": dlg.get("target_structure"),
         "state": dlg.get("state"),
+        "tape_diagram": dlg.get("tape_diagram"),
         "input_type": "taiwa",
     }
     database.save_log(
@@ -192,6 +199,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent:
             "valid": False, "structure": None, "is_new": False,
             "display_type": "normal", "message": ai_dialogue.FALLBACK_MESSAGE,
             "figure": None, "target_structure": None, "state": "judge_error",
+            "tape_diagram": None,
             "input_type": "sakumon",
         }
         database.save_log(
@@ -206,9 +214,13 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent:
     structure = jr.get("structure", "invalid")
     is_new = valid and structure in STRUCTURES and structure not in history
     completes_all = is_new and (set(history) | {structure}) >= STRUCTURES
-    stuck_level = _stuck_level(req.session_id) if (valid and not is_new and not completes_all) else 1
+    # stall_count: 直近の新構造到達より後、同じ構造をくり返した回数（今回ぶんを含む）。
+    # 1→hint1／2→hint2／3以上→hint3。ai_judgeの判定は変えず、既出構造への「反復」だけを数える。
+    stall_count = (database.get_stall_count(req.session_id) + 1) if (
+        valid and not is_new and not completes_all
+    ) else 0
     stumble, support_level, display_type = _sakumon_signals(
-        valid, is_new, completes_all, jr.get("issue"), stuck_level
+        valid, is_new, completes_all, jr.get("issue"), stall_count
     )
 
     # 児童向けの声かけ・図・次の目標は ai_dialogue が生成（支援段階を渡す）
@@ -224,6 +236,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent:
         "figure": dlg.get("figure"),
         "target_structure": dlg.get("target_structure"),
         "state": dlg.get("state"),
+        "tape_diagram": dlg.get("tape_diagram"),
         "input_type": "sakumon",
     }
     database.save_log(

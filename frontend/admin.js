@@ -177,6 +177,8 @@ function buildLogRow(log) {
   // figure（出したテープ図）を返答の下に小タグ表示
   const figureTag = log.figure
     ? `<div class="figure-tag">📊 図: ${log.figure === "all" ? "3つ" : (STRUCT_LABEL[log.figure] || log.figure)}</div>`
+    : log.tape_diagram
+    ? `<div class="figure-tag">📊 テープ図: ${log.tape_diagram.structure}（未到達構造の提示）</div>`
     : "";
 
   // つまづき
@@ -255,7 +257,9 @@ const STUMBLE_LABEL = {
   incomplete: "要素不足",
   wrong_expression: "式ちがい",
   reversed: "向き逆",
-  repeat_structure: "停滞(同構造)",
+  hint1: "停滞1(気づきの問い)",
+  hint2: "停滞2(比較の軸)",
+  hint3: "停滞3(テープ図)",
   material_confusion: "題材混同",
   help_request: "助け求め",
 };
@@ -263,7 +267,9 @@ const STUMBLE_CLS = {
   incomplete: "badge-orange",
   wrong_expression: "badge-orange",
   reversed: "badge-orange",
-  repeat_structure: "badge-orange",
+  hint1: "badge-orange",
+  hint2: "badge-orange",
+  hint3: "badge-red",
   material_confusion: "badge-purple",
   help_request: "badge-purple",
 };

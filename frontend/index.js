@@ -306,6 +306,103 @@ function addFigureCard(structure) {
   log.scrollTop = log.scrollHeight;
 }
 
+// ===== テープ図（tape_diagram、hint3専用）=====
+// ai_dialogue がコード側で決定論的に生成した {type, structure, known, unknown} を
+// SVGで描く。物語文を一切ふくまないJSONなので、ここでも文章は生成しない。
+//
+// 「？」の描き方は unknown が“長さ型”か“個数型”かで変える（同じ描き方をすると
+// 個数の未知を長さの未知として見せてしまい、たし算型の図に誤読される）。
+// - 等分除（unknown=1あたり量＝長さ）：既知の「いくつ分」で全体を均等分割し、
+//   各区画に？を置く（区画数＝既知なので見せてよい。中身の大きさだけが未知）。
+// - 包含除（unknown=いくつ分＝個数）：既知の「1あたり量」を実寸1個だけ示し、
+//   残りは「同じ大きさのくり返し・個数はふめい」を点線でしめす（実寸の
+//   区画をいくつも並べて見せると、数えるだけで答えがわかってしまうため）。
+
+function equalSplitTapeDiagramSvg(td) {
+  // 等分除：全体量を「いくつ分」個の同じ大きさに分ける。区画数は既知でよいが
+  // 各区画の大きさ（1あたり量）は未知なので、すべての区画に？を置く。
+  const whole = td.known["全体量"];
+  const n = Math.max(2, td.known["いくつ分"]);
+  const x0 = 24, y0 = 28, w = 272, h = 46;
+  const segW = w / n;
+
+  let lines = "", labels = "";
+  for (let i = 1; i < n; i++) {
+    const x = x0 + segW * i;
+    lines += `<line x1="${x}" y1="${y0}" x2="${x}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="2"/>`;
+  }
+  for (let i = 0; i < n; i++) {
+    const cx = x0 + segW * (i + 0.5);
+    labels += `<text x="${cx}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>`;
+  }
+
+  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="等分除のテープ図">
+    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
+    <rect x="${x0}" y="${y0}" width="${w}" height="${h}" rx="6" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
+    ${lines}
+    ${labels}
+    <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">${n}つに 同じ大きさで分ける</text>
+    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
+  </svg>`;
+}
+
+function repeatedUnitTapeDiagramSvg(td) {
+  // 包含除：全体量の中に「1あたり量」がいくつ入るかが未知。既知の1あたり量は
+  // 実寸で1個だけ示し、残りは点線＋くり返し記号で「同じ大きさが何個か続く
+  // （個数はふめい）」を表す。実寸で区画を並べると数えるだけで答えが
+  // わかってしまうため、残りは区画に分けない。
+  const whole = td.known["全体量"];
+  const unit = td.known["1あたり量"];
+  const x0 = 24, y0 = 28, w = 272, h = 46;
+  const unitW = Math.max(30, Math.min(w * 0.4, (unit / whole) * w));
+  const restX = x0 + unitW, restW = w - unitW;
+  const tick1 = restX + restW * 0.33, tick2 = restX + restW * 0.66;
+
+  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="包含除のテープ図">
+    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
+    <rect x="${x0}" y="${y0}" width="${unitW}" height="${h}" rx="6" fill="#D1FAE5" stroke="#0F6E56" stroke-width="2"/>
+    <text x="${x0 + unitW / 2}" y="${y0 + h / 2 + 6}" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${unit}</text>
+    <rect x="${restX}" y="${y0}" width="${restW}" height="${h}" rx="6" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
+    <line x1="${tick1}" y1="${y0}" x2="${tick1}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="1.2" stroke-dasharray="2,4"/>
+    <line x1="${tick2}" y1="${y0}" x2="${tick2}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="1.2" stroke-dasharray="2,4"/>
+    <text x="${restX + restW / 2}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>
+    <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">同じ ${unit} が くり返される（数はふめい）</text>
+    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
+  </svg>`;
+}
+
+function baiTapeDiagramSvg(td) {
+  const base = td.known["基準量"];
+  const baseW = 90; // 基準量は実寸比で描く（枠の基準）
+  // 比較量は「？」の点線枠のみ。実際の数値比率（何倍か）で長さを描くと
+  // 答えを図示してしまうため、長さは固定幅にする。
+  return `<svg viewBox="0 0 320 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="倍のテープ図">
+    <text x="24" y="14" text-anchor="start" font-size="11" fill="#6B7280">基準量</text>
+    <rect x="24" y="20" width="${baseW}" height="32" rx="5" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
+    <text x="${24 + baseW / 2}" y="41" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${base}</text>
+    <text x="24" y="74" text-anchor="start" font-size="11" fill="#6B7280">比較量</text>
+    <rect x="24" y="80" width="272" height="32" rx="5" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
+    <text x="160" y="102" text-anchor="middle" font-size="20" font-weight="800" fill="#EF9F27">？</text>
+    <text x="160" y="132" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">基準量の 何ばい？</text>
+  </svg>`;
+}
+
+function tapeDiagramSvg(td) {
+  if (td.structure === "倍") return baiTapeDiagramSvg(td);
+  if (td.unknown === "1あたり量") return equalSplitTapeDiagramSvg(td);
+  return repeatedUnitTapeDiagramSvg(td); // unknown === "いくつ分"
+}
+
+function addTapeDiagramCard(td) {
+  if (!td || td.type !== "tape_diagram") return;
+  const log = document.getElementById("chat-log");
+  const card = document.createElement("div");
+  card.className = "figure-card";
+  card.innerHTML = `<div class="figure-title">テープ図（${td.structure}）</div>${tapeDiagramSvg(td)}`;
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+}
+
 // 保存済みの会話を再描画（続きから／リロード復元時）。何か描いたら true。
 function renderConversation(conversation) {
   if (!conversation || conversation.length === 0) return false;
@@ -313,6 +410,7 @@ function renderConversation(conversation) {
     if (turn.message) addUserBubble(turn.message);
     if (turn.ai_message) addAiBubble(turn.ai_message, turn.display_type || "normal");
     if (turn.figure) addFigureCard(turn.figure);
+    if (turn.tape_diagram) addTapeDiagramCard(turn.tape_diagram);
   });
   return true;
 }
@@ -383,6 +481,7 @@ async function sendMessage() {
     } else {
       addAiBubble(data.message, data.display_type);
       if (data.figure) addFigureCard(data.figure);
+      if (data.tape_diagram) addTapeDiagramCard(data.tape_diagram);
     }
   } catch (e) {
     loader.remove();

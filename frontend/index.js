@@ -1,17 +1,26 @@
+// ===== 設定フラグ =====
+// テープ図・構造図は今回すべて無効化（数量関係そのものを図で渡してしまうため）。
+// 描画コードは末尾に残してあるが、このフラグが false の間は呼ばれない。
+const ENABLE_FIGURES = false;
+
+const LIGHT_INDEX = { tobun: 0, hougan: 1, bai: 2 };   // 到達構造 → 灯の位置（ラベルは求める量）
+
 const state = {
   userId: null,
   sessionId: null,
-  sessions: [],
-  selectedSessionId: null,
+  phase: null,
+  runId: null,
+  expression: "",
+  showSupport: false,
   history: [],
   problems: [],
+  uiLevel: 0,
+  allReached: false,
   sending: false,
-};
-
-const STRUCTURE_LABEL = {
-  tobun: "等分除",
-  hougan: "包含除",
-  bai: "倍",
+  buttonPressed: [],      // 直近の送信までに押された2択ボタンの値（順に）
+  pollTimer: null,
+  pollSeconds: 5,
+  switching: false,
 };
 
 // ===== Screen =====
@@ -23,30 +32,33 @@ function showScreen(id) {
 // ===== sessionStorage =====
 function saveSession() {
   sessionStorage.setItem("userId", state.userId || "");
-  sessionStorage.setItem("sessionId", state.sessionId != null ? String(state.sessionId) : "");
 }
-
 function clearSession() {
   sessionStorage.removeItem("userId");
   sessionStorage.removeItem("sessionId");
 }
 
-// ===== Validation =====
-const ID_RE = /^[0-9a-z]{2}$/;
+// ===== API =====
+async function postJson(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* noop */ }
+  return { ok: res.ok, status: res.status, data };
+}
 
 // ===== Login screen =====
+const ID_RE = /^[0-9a-z]{2}$/;
 const inputId = document.getElementById("input-id");
 const btnLogin = document.getElementById("btn-login");
 const loginError = document.getElementById("login-error");
 
-inputId.addEventListener("input", () => {
-  loginError.textContent = "";
-});
-
+inputId.addEventListener("input", () => { loginError.textContent = ""; });
 btnLogin.addEventListener("click", doLogin);
-inputId.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") doLogin();
-});
+inputId.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 
 async function doLogin() {
   const val = inputId.value.trim().toLowerCase();
@@ -57,27 +69,12 @@ async function doLogin() {
   loginError.textContent = "";
   btnLogin.disabled = true;
   try {
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: val }),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      loginError.textContent = err.detail || "エラーがおきました";
+    const { ok, data } = await postJson("/api/login", { user_id: val });
+    if (!ok) {
+      loginError.textContent = (data && data.detail) || "エラーがおきました";
       return;
     }
-    const data = await res.json();
-    state.userId = data.user_id;
-    state.sessions = data.sessions || [];
-
-    if (state.sessions.length === 0) {
-      await startNewSession();
-    } else {
-      document.getElementById("choose-label").textContent =
-        `${val}さんの記録があるよ！`;
-      showScreen("screen-choose");
-    }
+    enter(data);
   } catch (e) {
     loginError.textContent = "つうしんエラーがおきました";
   } finally {
@@ -85,112 +82,124 @@ async function doLogin() {
   }
 }
 
-// ===== Choose screen =====
-document.getElementById("btn-new").addEventListener("click", async () => {
-  await startNewSession();
-});
-
-document.getElementById("btn-resume-list").addEventListener("click", () => {
-  renderSessionList();
-  showScreen("screen-sessions");
-});
-
-// ===== Session list screen =====
-function renderSessionList() {
-  state.selectedSessionId = null;
-  document.getElementById("btn-sessions-ok").disabled = true;
-  const list = document.getElementById("session-list");
-  list.innerHTML = "";
-  state.sessions.forEach(s => {
-    const dt = new Date(s.created_at + "Z");
-    const dateStr = dt.toLocaleDateString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
-    const structs = s.structures.map(x => STRUCTURE_LABEL[x] || x).join("・") || "なし";
-    const div = document.createElement("div");
-    div.className = "session-item";
-    div.dataset.sessionId = s.session_id;
-    div.innerHTML = `<div class="s-date">${dateStr}</div>
-      <div class="s-info">問題 ${s.problem_count} 個　／　${structs}</div>`;
-    div.addEventListener("click", () => {
-      document.querySelectorAll(".session-item").forEach(el => el.classList.remove("selected"));
-      div.classList.add("selected");
-      state.selectedSessionId = s.session_id;
-      document.getElementById("btn-sessions-ok").disabled = false;
-    });
-    list.appendChild(div);
-  });
-}
-
-document.getElementById("btn-sessions-back").addEventListener("click", () => {
-  showScreen("screen-choose");
-});
-
-document.getElementById("btn-sessions-ok").addEventListener("click", async () => {
-  if (state.selectedSessionId == null) return;
-  await resumeSession(state.selectedSessionId);
-});
-
-// ===== Start new session =====
-async function startNewSession() {
-  const res = await fetch("/api/session/new", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: state.userId }),
-  });
-  const data = await res.json();
-  state.sessionId = data.session_id;
-  saveSession();
-  resetGame();
-  showScreen("screen-game");
-  addAiBubble("こんにちは！「18 ÷ 3」になるお話を書いてね。どんなお話かな？", "normal");
-}
-
-// ===== Resume session =====
-async function resumeSession(sessionId) {
-  const res = await fetch("/api/session/resume", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  const data = await res.json();
-  state.sessionId = data.session_id;
-  saveSession();
-  resetGame();
-
-  state.history = data.history || [];
-  data.problems.forEach(p => addProblem(p.text, p.structure));
-  updateMeter();
-
-  showScreen("screen-game");
-  if (renderConversation(data.conversation)) {
-    addAiBubble("つづきからどうぞ！新しいお話を書いてね。", "normal");
-  } else {
-    addAiBubble(
-      `おかえり！続きから始めよう。これまで${data.problems.length}個の問題を作ったね！`,
-      "normal"
-    );
-  }
-}
-
-// ===== Game screen =====
-function resetGame() {
-  state.history = [];
+// ===== 入場（ログイン／フェーズ切替後の再入場） =====
+function enter(payload) {
+  state.userId = payload.user_id;
+  state.sessionId = payload.session_id;
+  state.phase = payload.phase;
+  state.runId = payload.run_id;
+  state.expression = payload.expression;
+  state.showSupport = !!payload.show_support;
+  state.history = payload.history || [];
+  state.uiLevel = payload.ui_level || 0;
+  state.allReached = !!payload.all_reached;
   state.problems = [];
+  state.buttonPressed = [];
+  state.pollSeconds = payload.poll_seconds || 5;
+  saveSession();
+
+  resetGame();
+  (payload.problems || []).forEach(p => addProblem(p.text, p.structure));
+  renderConversation(payload.conversation || []);
+  addNotice(kickoffText(state.phase, state.expression));
+  updatePanels();
+  showScreen("screen-game");
+  document.getElementById("chat-input").focus();
+  startPolling();
+}
+
+function kickoffText(phase, expression) {
+  if (phase === 2) return `ここからは、おくった お話に 返事が 来るよ。「${expression}」になる お話を 作ろう。`;
+  if (phase === 3) return `新しい式だよ。「${expression}」になる お話を 作って おくってね。`;
+  return `「${expression}」になる お話を 作って おくってね。`;
+}
+
+function resetGame() {
   document.getElementById("chat-log").innerHTML = "";
   document.getElementById("problem-list").innerHTML = "";
-  document.getElementById("game-user-name").textContent =
-    state.userId ? `${state.userId} さん` : "";
-  updateMeter();
+  document.getElementById("game-user-name").textContent = state.userId ? `${state.userId} さん` : "";
+  document.getElementById("game-expression").textContent = state.expression || "";
+  document.getElementById("chat-input").value = "";
 }
 
 document.getElementById("btn-logout").addEventListener("click", () => {
+  stopPolling();
   clearSession();
   state.userId = null;
   state.sessionId = null;
-  state.sessions = [];
   inputId.value = "";
   loginError.textContent = "";
   showScreen("screen-login");
 });
+
+// ===== フェーズのポーリング =====
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(pollConfig, state.pollSeconds * 1000);
+}
+function stopPolling() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
+}
+
+async function pollConfig() {
+  if (!state.userId || state.switching) return;
+  try {
+    const q = new URLSearchParams({ user_id: state.userId, session_id: state.sessionId || "" });
+    const res = await fetch(`/api/config?${q}`);
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.phase !== state.phase || cfg.run_id !== state.runId) {
+      await handlePhaseChange(cfg);
+    } else if (cfg.expression !== state.expression) {
+      state.expression = cfg.expression;
+      document.getElementById("game-expression").textContent = cfg.expression;
+    }
+  } catch (e) { /* 次の周期で再試行 */ }
+}
+
+// フェーズが変わったら：入力中のものは破棄し、「いったん おしまい」を見せてから
+// 現在のフェーズのセッションに入り直す（1→2は同一セッション、→3は新セッション）。
+async function handlePhaseChange(cfg) {
+  state.switching = true;
+  stopPolling();
+  document.getElementById("chat-input").value = "";
+  state.buttonPressed = [];
+  disableChoiceButtons();
+  showPhaseBanner(cfg);
+  await new Promise(r => setTimeout(r, 2600));
+  try {
+    const { ok, data } = await postJson("/api/session/new", { user_id: state.userId });
+    if (ok) {
+      enter(data);
+    } else {
+      addNotice("もう一度 ログインしてね");
+      startPolling();
+    }
+  } catch (e) {
+    startPolling();
+  } finally {
+    hidePhaseBanner();
+    state.switching = false;
+  }
+}
+
+function showPhaseBanner(cfg) {
+  const sub = document.getElementById("phase-banner-sub");
+  sub.textContent = cfg.phase === 3
+    ? `つぎは「${cfg.expression}」で 作るよ`
+    : `つづきは このあと`;
+  document.getElementById("phase-banner").hidden = false;
+}
+function hidePhaseBanner() {
+  document.getElementById("phase-banner").hidden = true;
+}
+
+// ===== チャット描画 =====
+function scrollLog() {
+  const log = document.getElementById("chat-log");
+  log.scrollTop = log.scrollHeight;
+}
 
 function addUserBubble(text) {
   const log = document.getElementById("chat-log");
@@ -198,22 +207,72 @@ function addUserBubble(text) {
   el.className = "bubble bubble-user";
   el.textContent = text;
   log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  scrollLog();
 }
+
+// フェーズ1・3の最小表示（AIの吹き出しではなく、小さな確認表示）
+function addAckLine(text) {
+  const log = document.getElementById("chat-log");
+  const el = document.createElement("div");
+  el.className = "ack-line";
+  el.textContent = text || "おくったよ";
+  log.appendChild(el);
+  scrollLog();
+}
+
+// 画面上の案内（ログには残らない）
+function addNotice(text) {
+  const log = document.getElementById("chat-log");
+  const el = document.createElement("div");
+  el.className = "notice-line";
+  el.textContent = text;
+  log.appendChild(el);
+  scrollLog();
+}
+
+const BUBBLE_CLASS = {
+  new_structure: "new-structure",
+  level1: "hint", level2: "hint", level3: "hint", level4: "hint",
+  hint1: "hint", hint2: "hint", hint3: "hint",
+  goal: "clear", clear: "clear",
+};
 
 function addAiBubble(text, displayType) {
   const log = document.getElementById("chat-log");
   const el = document.createElement("div");
-  const cls = {
-    new_structure: "new-structure",
-    hint1: "hint", hint2: "hint", hint3: "hint",
-    clear: "clear",
-  }[displayType] || "normal";
-  el.className = `bubble bubble-ai ${cls}`;
+  el.className = `bubble bubble-ai ${BUBBLE_CLASS[displayType] || "normal"}`;
   el.textContent = text;
   log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  scrollLog();
   return el;
+}
+
+// 水準2の2択ボタン。押すと入力欄にプリフィルされるだけで、送信はしない。
+function addChoiceButtons(labels) {
+  disableChoiceButtons();
+  const log = document.getElementById("chat-log");
+  const wrap = document.createElement("div");
+  wrap.className = "choice-buttons";
+  labels.forEach(label => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-choice";
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      const input = document.getElementById("chat-input");
+      input.value = label;
+      state.buttonPressed.push(label);
+      wrap.querySelectorAll(".btn-choice").forEach(x => x.classList.toggle("selected", x === b));
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    wrap.appendChild(b);
+  });
+  log.appendChild(wrap);
+  scrollLog();
+}
+function disableChoiceButtons() {
+  document.querySelectorAll(".choice-buttons .btn-choice").forEach(b => { b.disabled = true; });
 }
 
 function addLoadingBubble() {
@@ -222,216 +281,45 @@ function addLoadingBubble() {
   el.className = "loading-bubble";
   el.innerHTML = "<span></span><span></span><span></span>";
   log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  scrollLog();
   return el;
 }
 
-// ===== テープ図（figure）=====
-// ai_dialogue が返した構造名から、フロントが決定論的にテープ図(SVG)を描く。
-// 18 ÷ 3 の3構造を、言葉の補助として図示する。
-const FIGURE_TITLE = {
-  tobun: "分ける話：1つ分をさがす（等分除）",
-  hougan: "分ける話：何こ分をさがす（包含除）",
-  bai: "くらべる話：何ばい？（倍）",
-};
-
-function figureSvg(structure) {
-  switch (structure) {
-    case "tobun":
-      // 全体18を3等分。分ける数(3)は既知、1つ分(？)が未知。
-      return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="等分除のテープ図">
-        <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">ぜんぶで 18</text>
-        <rect x="24" y="28" width="272" height="46" rx="6" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="114.7" y1="28" x2="114.7" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="205.3" y1="28" x2="205.3" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <text x="69.3" y="59" text-anchor="middle" font-size="22" font-weight="800" fill="#EF9F27">？</text>
-        <text x="160" y="59" text-anchor="middle" font-size="22" font-weight="800" fill="#EF9F27">？</text>
-        <text x="250.7" y="59" text-anchor="middle" font-size="22" font-weight="800" fill="#EF9F27">？</text>
-        <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">3つに分ける</text>
-        <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">1つ分は いくつ？</text>
-      </svg>`;
-    case "hougan":
-      // 全体18を3ずつに分ける。1つ分(3)は既知、何こ分(？)が未知。実寸で6マス。
-      return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="包含除のテープ図">
-        <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">ぜんぶで 18</text>
-        <rect x="24" y="28" width="272" height="46" rx="6" fill="#D1FAE5" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="69.3" y1="28" x2="69.3" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="114.7" y1="28" x2="114.7" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="160" y1="28" x2="160" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="205.3" y1="28" x2="205.3" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <line x1="250.7" y1="28" x2="250.7" y2="74" stroke="#0F6E56" stroke-width="2"/>
-        <text x="46.7" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="92" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="137.3" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="182.7" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="228" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="273.3" y="57" text-anchor="middle" font-size="16" font-weight="700" fill="#064E3B">3</text>
-        <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">3ずつに分ける</text>
-        <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">？こ分</text>
-      </svg>`;
-    case "bai":
-      // 2つの大きさをくらべる。もとにする量(3)と、くらべる量(18)。何ばい(？)が未知。
-      return `<svg viewBox="0 0 320 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="倍のテープ図">
-        <text x="24" y="14" text-anchor="start" font-size="11" fill="#6B7280">もとにする 大きさ</text>
-        <rect x="24" y="20" width="45.3" height="32" rx="5" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
-        <text x="46.7" y="41" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">3</text>
-        <text x="24" y="74" text-anchor="start" font-size="11" fill="#6B7280">くらべる 大きさ</text>
-        <rect x="24" y="80" width="272" height="32" rx="5" fill="#D1FAE5" stroke="#0F6E56" stroke-width="2"/>
-        <text x="160" y="101" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">18</text>
-        <text x="160" y="132" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">18は 3の 何ばい？</text>
-      </svg>`;
-    default:
-      return "";
-  }
-}
-
-function addFigureCard(structure) {
-  const log = document.getElementById("chat-log");
-  const card = document.createElement("div");
-  card.className = "figure-card";
-
-  if (structure === "all") {
-    let html = `<div class="figure-title">3つのお話のちがい（答えはどれも同じ）</div>`;
-    ["tobun", "hougan", "bai"].forEach(s => {
-      html += `<div class="figure-mini"><div class="figure-mini-label">${FIGURE_TITLE[s]}</div>${figureSvg(s)}</div>`;
-    });
-    card.innerHTML = html;
-  } else {
-    const title = FIGURE_TITLE[structure];
-    if (!title) return;  // 未知の構造名は描かない
-    card.innerHTML = `<div class="figure-title">${title}</div>${figureSvg(structure)}`;
-  }
-
-  log.appendChild(card);
-  log.scrollTop = log.scrollHeight;
-}
-
-// ===== テープ図（tape_diagram、hint3専用）=====
-// ai_dialogue がコード側で決定論的に生成した {type, structure, known, unknown} を
-// SVGで描く。物語文を一切ふくまないJSONなので、ここでも文章は生成しない。
-//
-// 「？」の描き方は unknown が“長さ型”か“個数型”かで変える（同じ描き方をすると
-// 個数の未知を長さの未知として見せてしまい、たし算型の図に誤読される）。
-// - 等分除（unknown=1あたり量＝長さ）：既知の「いくつ分」で全体を均等分割し、
-//   各区画に？を置く（区画数＝既知なので見せてよい。中身の大きさだけが未知）。
-// - 包含除（unknown=いくつ分＝個数）：既知の「1あたり量」を実寸1個だけ示し、
-//   残りは「同じ大きさのくり返し・個数はふめい」を点線でしめす（実寸の
-//   区画をいくつも並べて見せると、数えるだけで答えがわかってしまうため）。
-
-function equalSplitTapeDiagramSvg(td) {
-  // 等分除：全体量を「いくつ分」個の同じ大きさに分ける。区画数は既知でよいが
-  // 各区画の大きさ（1あたり量）は未知なので、すべての区画に？を置く。
-  const whole = td.known["全体量"];
-  const n = Math.max(2, td.known["いくつ分"]);
-  const x0 = 24, y0 = 28, w = 272, h = 46;
-  const segW = w / n;
-
-  let lines = "", labels = "";
-  for (let i = 1; i < n; i++) {
-    const x = x0 + segW * i;
-    lines += `<line x1="${x}" y1="${y0}" x2="${x}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="2"/>`;
-  }
-  for (let i = 0; i < n; i++) {
-    const cx = x0 + segW * (i + 0.5);
-    labels += `<text x="${cx}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>`;
-  }
-
-  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="等分除のテープ図">
-    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
-    <rect x="${x0}" y="${y0}" width="${w}" height="${h}" rx="6" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
-    ${lines}
-    ${labels}
-    <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">${n}つに 同じ大きさで分ける</text>
-    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
-  </svg>`;
-}
-
-function repeatedUnitTapeDiagramSvg(td) {
-  // 包含除：全体量の中に「1あたり量」がいくつ入るかが未知。既知の1あたり量は
-  // 実寸で1個だけ示し、残りは点線＋くり返し記号で「同じ大きさが何個か続く
-  // （個数はふめい）」を表す。実寸で区画を並べると数えるだけで答えが
-  // わかってしまうため、残りは区画に分けない。
-  const whole = td.known["全体量"];
-  const unit = td.known["1あたり量"];
-  const x0 = 24, y0 = 28, w = 272, h = 46;
-  const unitW = Math.max(30, Math.min(w * 0.4, (unit / whole) * w));
-  const restX = x0 + unitW, restW = w - unitW;
-  const tick1 = restX + restW * 0.33, tick2 = restX + restW * 0.66;
-
-  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="包含除のテープ図">
-    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
-    <rect x="${x0}" y="${y0}" width="${unitW}" height="${h}" rx="6" fill="#D1FAE5" stroke="#0F6E56" stroke-width="2"/>
-    <text x="${x0 + unitW / 2}" y="${y0 + h / 2 + 6}" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${unit}</text>
-    <rect x="${restX}" y="${y0}" width="${restW}" height="${h}" rx="6" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
-    <line x1="${tick1}" y1="${y0}" x2="${tick1}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="1.2" stroke-dasharray="2,4"/>
-    <line x1="${tick2}" y1="${y0}" x2="${tick2}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="1.2" stroke-dasharray="2,4"/>
-    <text x="${restX + restW / 2}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>
-    <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">同じ ${unit} が くり返される（数はふめい）</text>
-    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
-  </svg>`;
-}
-
-function baiTapeDiagramSvg(td) {
-  const base = td.known["基準量"];
-  const baseW = 90; // 基準量は実寸比で描く（枠の基準）
-  // 比較量は「？」の点線枠のみ。実際の数値比率（何倍か）で長さを描くと
-  // 答えを図示してしまうため、長さは固定幅にする。
-  return `<svg viewBox="0 0 320 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="倍のテープ図">
-    <text x="24" y="14" text-anchor="start" font-size="11" fill="#6B7280">基準量</text>
-    <rect x="24" y="20" width="${baseW}" height="32" rx="5" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
-    <text x="${24 + baseW / 2}" y="41" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${base}</text>
-    <text x="24" y="74" text-anchor="start" font-size="11" fill="#6B7280">比較量</text>
-    <rect x="24" y="80" width="272" height="32" rx="5" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
-    <text x="160" y="102" text-anchor="middle" font-size="20" font-weight="800" fill="#EF9F27">？</text>
-    <text x="160" y="132" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">基準量の 何ばい？</text>
-  </svg>`;
-}
-
-function tapeDiagramSvg(td) {
-  if (td.structure === "倍") return baiTapeDiagramSvg(td);
-  if (td.unknown === "1あたり量") return equalSplitTapeDiagramSvg(td);
-  return repeatedUnitTapeDiagramSvg(td); // unknown === "いくつ分"
-}
-
-function addTapeDiagramCard(td) {
-  if (!td || td.type !== "tape_diagram") return;
-  const log = document.getElementById("chat-log");
-  const card = document.createElement("div");
-  card.className = "figure-card";
-  card.innerHTML = `<div class="figure-title">テープ図（${td.structure}）</div>${tapeDiagramSvg(td)}`;
-  log.appendChild(card);
-  log.scrollTop = log.scrollHeight;
-}
-
-// 保存済みの会話を再描画（続きから／リロード復元時）。何か描いたら true。
+// 保存済みの会話を再描画。フェーズ2のターンだけAIの吹き出しを出し、それ以外は「おくったよ」。
 function renderConversation(conversation) {
   if (!conversation || conversation.length === 0) return false;
-  conversation.forEach(turn => {
+  const lastIdx = conversation.length - 1;
+  conversation.forEach((turn, i) => {
     if (turn.message) addUserBubble(turn.message);
-    if (turn.ai_message) addAiBubble(turn.ai_message, turn.display_type || "normal");
-    if (turn.figure) addFigureCard(turn.figure);
-    if (turn.tape_diagram) addTapeDiagramCard(turn.tape_diagram);
+    if (turn.phase === 2 && state.showSupport) {
+      if (turn.ai_message) addAiBubble(turn.ai_message, turn.display_type || "normal");
+      if (ENABLE_FIGURES && turn.figure) addFigureCard(turn.figure);
+      if (ENABLE_FIGURES && turn.tape_diagram) addTapeDiagramCard(turn.tape_diagram);
+      if (i === lastIdx && Array.isArray(turn.buttons) && turn.buttons.length) addChoiceButtons(turn.buttons);
+    } else {
+      addAckLine("おくったよ");
+    }
   });
   return true;
 }
 
-function updateMeter() {
-  const count = state.history.length;
-  for (let i = 0; i < 3; i++) {
-    document.getElementById(`light-${i}`).classList.toggle("on", i < count);
-  }
-  const remaining = 3 - count;
-  document.getElementById("lights-label").textContent =
-    remaining > 0 ? `あと ${remaining} つ` : "全部できた！";
+// ===== 右パネル =====
+function updatePanels() {
+  const show = state.showSupport;
+  // 信号機は水準3（求める量の明示）到達後、または3つそろった後だけ見せる
+  document.getElementById("lights-card").hidden = !(show && (state.uiLevel >= 3 || state.allReached));
+  // 作った問題リストは水準1（産出一覧）到達後だけ見せる
+  document.getElementById("problems-card").hidden = !(show && state.uiLevel >= 1);
 
-  document.getElementById("count-number").textContent = state.problems.length;
-  const dots = document.getElementById("count-dots");
-  dots.innerHTML = "";
-  state.problems.forEach(() => {
-    const d = document.createElement("div");
-    d.className = "dot";
-    dots.appendChild(d);
+  for (let i = 0; i < 3; i++) document.getElementById(`light-${i}`).classList.remove("on");
+  state.history.forEach(s => {
+    const idx = LIGHT_INDEX[s];
+    if (idx !== undefined) document.getElementById(`light-${idx}`).classList.add("on");
   });
+  const remaining = 3 - state.history.filter(s => LIGHT_INDEX[s] !== undefined).length;
+  document.getElementById("lights-label").textContent =
+    remaining > 0 ? `あと ${remaining} つ` : "3つとも できた！";
+  document.getElementById("count-number").textContent = state.problems.length;
 }
 
 function addProblem(text, structure) {
@@ -449,7 +337,7 @@ function addProblem(text, structure) {
 
 // ===== Send =====
 async function sendMessage() {
-  if (state.sending) return;
+  if (state.sending || state.switching) return;
   const input = document.getElementById("chat-input");
   const text = input.value.trim();
   if (!text) return;
@@ -457,35 +345,46 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
+  const pressed = state.buttonPressed.length ? state.buttonPressed.join(",") : null;
+  state.buttonPressed = [];
+  disableChoiceButtons();
 
   addUserBubble(text);
   const loader = addLoadingBubble();
 
   try {
-    const res = await fetch("/api/judge", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: state.sessionId, message: text }),
+    const { ok, status, data } = await postJson("/api/judge", {
+      session_id: state.sessionId, user_id: state.userId, message: text, button_pressed: pressed,
     });
-    const data = await res.json();
     loader.remove();
-
-    if (data.history) state.history = data.history;
-    if (data.valid) addProblem(text, data.structure);
-    updateMeter();
-
-    if (data.display_type === "clear") {
-      addAiBubble(data.message, "clear");
-      if (data.figure) addFigureCard(data.figure);
-      setTimeout(() => showClear(), data.figure ? 3200 : 1800);
-    } else {
-      addAiBubble(data.message, data.display_type);
-      if (data.figure) addFigureCard(data.figure);
-      if (data.tape_diagram) addTapeDiagramCard(data.tape_diagram);
+    if (!ok) {
+      if (status === 403 || status === 404) {
+        addNotice("もう一度 ログインしてね");
+      } else {
+        addNotice("エラーが起きました。もう一度送ってみてね。");
+      }
+      return;
     }
+
+    // サーバが判断したフェーズに従って描く（切替の瞬間に送った場合でもログと表示がずれない）
+    if (!data.show_support) {
+      addAckLine("おくったよ");
+      if (data.phase !== state.phase) pollConfig();
+      return;
+    }
+    if (data.history) state.history = data.history;
+    if (typeof data.ui_level === "number") state.uiLevel = data.ui_level;
+    state.allReached = !!data.all_reached;
+    if (data.valid) addProblem(text, data.structure);
+    updatePanels();
+
+    addAiBubble(data.message, data.display_type);
+    if (Array.isArray(data.buttons) && data.buttons.length) addChoiceButtons(data.buttons);
+    if (ENABLE_FIGURES && data.figure) addFigureCard(data.figure);
+    if (ENABLE_FIGURES && data.tape_diagram) addTapeDiagramCard(data.tape_diagram);
   } catch (e) {
     loader.remove();
-    addAiBubble("エラーが起きました。もう一度送ってみてね。", "normal");
+    addNotice("エラーが起きました。もう一度送ってみてね。");
   } finally {
     state.sending = false;
     document.getElementById("btn-send").disabled = false;
@@ -513,79 +412,133 @@ chatInput.addEventListener("keydown", (e) => {
   sendMessage();
 });
 
-// ===== Clear screen =====
-function showClear() {
-  clearSession();
-  const container = document.getElementById("clear-problems");
-  container.innerHTML = "";
-  const shown = new Set();
-  state.problems.forEach(p => {
-    if (!shown.has(p.structure)) {
-      shown.add(p.structure);
-      const div = document.createElement("div");
-      div.className = "clear-problem-item";
-      const tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = STRUCTURE_LABEL[p.structure] || p.structure;
-      div.appendChild(tag);
-      div.appendChild(document.createTextNode(p.text));
-      container.appendChild(div);
+// ===== Boot =====
+async function showLoginExpression() {
+  try {
+    const res = await fetch("/api/config");
+    if (res.ok) {
+      const cfg = await res.json();
+      document.getElementById("login-expression").textContent = cfg.expression;
     }
-  });
-  showScreen("screen-clear");
+  } catch (e) { /* noop */ }
 }
 
-document.getElementById("btn-retry").addEventListener("click", () => {
-  inputId.value = "";
-  loginError.textContent = "";
-  state.userId = null;
-  state.sessionId = null;
-  state.sessions = [];
-  showScreen("screen-login");
-});
-
-// ===== リロード復元 =====
-async function tryRestoreSession() {
+async function tryRestore() {
   const savedUserId = sessionStorage.getItem("userId");
-  const savedSessionId = sessionStorage.getItem("sessionId");
-  if (!savedUserId || !savedSessionId) return false;
-
+  if (!savedUserId) return false;
   try {
-    const res = await fetch("/api/session/resume", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: parseInt(savedSessionId, 10) }),
-    });
-    if (!res.ok) return false;
-    const data = await res.json();
-
-    state.userId = savedUserId;
-    state.sessionId = data.session_id;
-    resetGame();
-    state.history = data.history || [];
-    data.problems.forEach(p => addProblem(p.text, p.structure));
-    updateMeter();
-    showScreen("screen-game");
-    if (renderConversation(data.conversation)) {
-      addAiBubble("つづきだよ！新しいお話を書いてね。", "normal");
-    } else {
-      addAiBubble("続きだよ！問題を書いてね。", "normal");
-    }
+    const { ok, data } = await postJson("/api/login", { user_id: savedUserId });
+    if (!ok) return false;
+    enter(data);
     return true;
   } catch (e) {
     return false;
   }
 }
 
-// ===== Boot =====
 function isReloadNavigation() {
   const [nav] = performance.getEntriesByType("navigation");
   return !!nav && nav.type === "reload";
 }
 
+showLoginExpression();
 if (isReloadNavigation()) {
-  tryRestoreSession();
+  tryRestore();
 } else {
   // タブを閉じた（ログアウトせず）→ 次に開いたときはログアウトと同じ扱いにする
   clearSession();
+}
+
+// ===== 以下、図の描画（ENABLE_FIGURES=false のため呼ばれない。後から戻せるように残す） =====
+const FIGURE_TITLE = {
+  tobun: "分ける話：1つ分をさがす",
+  hougan: "分ける話：何こ分をさがす",
+  bai: "くらべる話：何ばい？",
+};
+
+function figureSvg(structure) {
+  if (!ENABLE_FIGURES) return "";
+  // 旧実装は 18÷3 固定の SVG だった。式が可変になったため、有効化する場合は
+  // tapeDiagramSvg() 系（数値を受け取る）に寄せること。
+  return "";
+}
+
+function addFigureCard(structure) {
+  if (!ENABLE_FIGURES) return;
+  const log = document.getElementById("chat-log");
+  const card = document.createElement("div");
+  card.className = "figure-card";
+  const title = FIGURE_TITLE[structure];
+  if (!title) return;
+  card.innerHTML = `<div class="figure-title">${title}</div>${figureSvg(structure)}`;
+  log.appendChild(card);
+  scrollLog();
+}
+
+function equalSplitTapeDiagramSvg(td) {
+  const whole = td.known["全体量"];
+  const n = Math.max(2, td.known["いくつ分"]);
+  const x0 = 24, y0 = 28, w = 272, h = 46;
+  const segW = w / n;
+  let lines = "", labels = "";
+  for (let i = 1; i < n; i++) {
+    const x = x0 + segW * i;
+    lines += `<line x1="${x}" y1="${y0}" x2="${x}" y2="${y0 + h}" stroke="#0F6E56" stroke-width="2"/>`;
+  }
+  for (let i = 0; i < n; i++) {
+    const cx = x0 + segW * (i + 0.5);
+    labels += `<text x="${cx}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>`;
+  }
+  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img">
+    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
+    <rect x="${x0}" y="${y0}" width="${w}" height="${h}" rx="6" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
+    ${lines}${labels}
+    <text x="160" y="97" text-anchor="middle" font-size="12" fill="#0F6E56">${n}つに 同じ大きさで分ける</text>
+    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
+  </svg>`;
+}
+
+function repeatedUnitTapeDiagramSvg(td) {
+  const whole = td.known["全体量"];
+  const unit = td.known["1あたり量"];
+  const x0 = 24, y0 = 28, w = 272, h = 46;
+  const unitW = Math.max(30, Math.min(w * 0.4, (unit / whole) * w));
+  const restX = x0 + unitW, restW = w - unitW;
+  return `<svg viewBox="0 0 320 126" xmlns="http://www.w3.org/2000/svg" role="img">
+    <text x="160" y="18" text-anchor="middle" font-size="13" font-weight="700" fill="#064E3B">全体量 ${whole}</text>
+    <rect x="${x0}" y="${y0}" width="${unitW}" height="${h}" rx="6" fill="#D1FAE5" stroke="#0F6E56" stroke-width="2"/>
+    <text x="${x0 + unitW / 2}" y="${y0 + h / 2 + 6}" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${unit}</text>
+    <rect x="${restX}" y="${y0}" width="${restW}" height="${h}" rx="6" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
+    <text x="${restX + restW / 2}" y="${y0 + h / 2 + 7}" text-anchor="middle" font-size="18" font-weight="800" fill="#EF9F27">？</text>
+    <text x="160" y="117" text-anchor="middle" font-size="15" font-weight="700" fill="#EF9F27">${td.unknown}は？</text>
+  </svg>`;
+}
+
+function baiTapeDiagramSvg(td) {
+  const base = td.known["基準量"];
+  return `<svg viewBox="0 0 320 140" xmlns="http://www.w3.org/2000/svg" role="img">
+    <text x="24" y="14" text-anchor="start" font-size="11" fill="#6B7280">基準量</text>
+    <rect x="24" y="20" width="90" height="32" rx="5" fill="#ECFDF5" stroke="#0F6E56" stroke-width="2"/>
+    <text x="69" y="41" text-anchor="middle" font-size="15" font-weight="700" fill="#064E3B">${base}</text>
+    <text x="24" y="74" text-anchor="start" font-size="11" fill="#6B7280">比較量</text>
+    <rect x="24" y="80" width="272" height="32" rx="5" fill="#fff" stroke="#0F6E56" stroke-width="2" stroke-dasharray="6,5"/>
+    <text x="160" y="102" text-anchor="middle" font-size="20" font-weight="800" fill="#EF9F27">？</text>
+  </svg>`;
+}
+
+function tapeDiagramSvg(td) {
+  if (td.structure === "倍") return baiTapeDiagramSvg(td);
+  if (td.unknown === "1あたり量") return equalSplitTapeDiagramSvg(td);
+  return repeatedUnitTapeDiagramSvg(td);
+}
+
+function addTapeDiagramCard(td) {
+  if (!ENABLE_FIGURES) return;
+  if (!td || td.type !== "tape_diagram") return;
+  const log = document.getElementById("chat-log");
+  const card = document.createElement("div");
+  card.className = "figure-card";
+  card.innerHTML = `<div class="figure-title">テープ図</div>${tapeDiagramSvg(td)}`;
+  log.appendChild(card);
+  scrollLog();
 }

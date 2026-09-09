@@ -221,3 +221,84 @@ tr.clickable:hover td { background: #F0FDF8; }
   color: #aaa;
   font-size: .85rem;
 }
+
+/* ===== 追加（9/18 授業実践版）===== */
+.tabs { display: flex; gap: 6px; }
+.tab {
+  background: rgba(255,255,255,.12);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: .85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.tab.active { background: #fff; color: var(--green); border-color: #fff; }
+
+.phase-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+@media (max-width: 760px) { .phase-grid { grid-template-columns: 1fr; } }
+
+.phase-card { padding: 20px 22px; }
+.phase-now { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
+.phase-big { font-size: 2rem; font-weight: 800; color: var(--green); }
+.phase-desc { font-size: .85rem; color: #555; }
+
+.phase-buttons { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.btn-phase {
+  background: #fff;
+  color: var(--green);
+  border: 2px solid var(--green);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+  min-width: 120px;
+}
+.btn-phase small { font-size: .7rem; font-weight: 500; opacity: .8; margin-top: 2px; }
+.btn-phase.active { background: var(--green); color: #fff; }
+.btn-phase:not(.active):hover { background: #E8F5F1; }
+
+.phase-meta { display: flex; gap: 18px; font-size: .8rem; color: #666; }
+
+.expr-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.expr-row label { width: 150px; font-size: .82rem; color: #555; }
+.expr-input {
+  flex: 1;
+  border: 1.5px solid var(--gray-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--green);
+  letter-spacing: .08em;
+}
+.expr-actions { display: flex; align-items: center; gap: 12px; }
+.expr-msg { font-size: .8rem; }
+.expr-msg.ok { color: #166534; }
+.expr-msg.err { color: var(--red); }
+.sep { border: none; border-top: 1px solid #eee; margin: 16px 0 8px; }
+.help { font-size: .8rem; color: #666; line-height: 1.6; margin-bottom: 10px; }
+
+.muted { color: #888; font-weight: 500; }
+.small { font-size: .75rem; }
+.legend-zero { color: #FCA5A5; }
+
+.live-table th small { display: block; font-weight: 500; font-size: .68rem; color: #999; }
+.live-table tr.row-zero td { background: #FEF2F2; }
+.live-table td.zero { color: var(--red); }
+.dot-on, .dot-off {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 2px;
+}
+.dot-on { background: #16A34A; box-shadow: 0 0 6px rgba(22,163,74,.6); }
+.dot-off { background: #D1D5DB; }
+
+.lamps { display: inline-flex; gap: 6px; font-size: 1.1rem; }
+.lamp { color: #D1D5DB; }
+.lamp.on { color: #1D9E75; text-shadow: 0 0 6px rgba(29,158,117,.6); }
+
+.logs-table td { font-size: .82rem; }

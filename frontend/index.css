@@ -171,7 +171,7 @@ body {
 #screen-game {
   flex-direction: row;
   align-items: stretch;
-  min-height: 100vh;
+  height: 100vh;            /* 高さを固定し、チャット欄は内側でスクロールさせる */
   max-width: 1100px;
   margin: 0 auto;
   padding: 20px 16px;
@@ -180,6 +180,7 @@ body {
 
 .chat-panel {
   flex: 2;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: #fff;
@@ -215,6 +216,7 @@ body {
 
 .chat-log {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 16px;
   display: flex;
@@ -229,6 +231,7 @@ body {
   font-size: .95rem;
   line-height: 1.6;
   word-break: break-all;
+  white-space: pre-line;
 }
 
 .bubble-user {
@@ -312,6 +315,8 @@ body {
   flex-direction: column;
   gap: 16px;
   min-width: 200px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .panel-card {
@@ -334,6 +339,20 @@ body {
   justify-content: center;
   gap: 14px;
   margin-bottom: 8px;
+}
+
+.light-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.light-label {
+  font-size: .72rem;
+  color: #555;
+  font-weight: 700;
+  letter-spacing: .02em;
 }
 
 .light {
@@ -590,9 +609,75 @@ body {
 }
 
 @media (max-width: 640px) {
-  #screen-game { flex-direction: column; padding: 12px 8px; }
+  #screen-game { flex-direction: column; padding: 12px 8px; height: auto; min-height: 100vh; }
+  .chat-panel { min-height: 60vh; }
   .meter-panel { flex-direction: row; flex-wrap: wrap; min-width: unset; }
   .panel-card { flex: 1; min-width: 140px; }
   .card { padding: 28px 20px; }
   .clear-card { padding: 32px 20px; }
 }
+
+
+/* ===== 追加（9/18 授業実践版） ===== */
+[hidden] { display: none !important; }
+
+/* フェーズ1・3の最小表示：小さな確認テキスト */
+.ack-line {
+  align-self: flex-end;
+  font-size: .75rem;
+  color: #8a8f8c;
+  margin-top: -6px;
+  padding-right: 6px;
+}
+
+/* 画面上の案内（ログには残らない） */
+.notice-line {
+  align-self: center;
+  font-size: .82rem;
+  color: #556;
+  background: #EEF2F0;
+  border-radius: 999px;
+  padding: 6px 14px;
+  max-width: 90%;
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* 水準2の2択ボタン */
+.choice-buttons {
+  align-self: flex-start;
+  display: flex;
+  gap: 10px;
+  margin-top: -4px;
+  padding-left: 4px;
+}
+.btn-choice {
+  background: #fff;
+  color: var(--green);
+  border: 2px solid var(--green);
+  border-radius: 999px;
+  padding: 8px 22px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background .15s, color .15s, opacity .15s;
+}
+.btn-choice:hover:not(:disabled) { background: #E8F5F1; }
+.btn-choice.selected { background: var(--green); color: #fff; }
+.btn-choice:disabled { opacity: .4; cursor: default; }
+
+/* フェーズ切替の合図 */
+.phase-banner {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 110, 86, .92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.phase-banner-inner { text-align: center; color: #fff; padding: 24px; }
+.phase-banner-title { font-size: 2rem; font-weight: 800; letter-spacing: .06em; margin-bottom: 12px; }
+.phase-banner-sub { font-size: 1.05rem; opacity: .9; }
+
+.panel-card h3 span { color: var(--green); font-size: 1rem; margin-left: 4px; }

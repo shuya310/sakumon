@@ -322,6 +322,16 @@ function updatePanels() {
   document.getElementById("count-number").textContent = state.problems.length;
 }
 
+// 水準1・2は産出一覧を右パネルで読ませる。チャットに列挙せず、カードを光らせて視線を送る。
+function flashProblems() {
+  const card = document.getElementById("problems-card");
+  if (!card || card.hidden) return;
+  card.classList.remove("flash");
+  void card.offsetWidth;          // アニメーションを再生し直すためのリフロー
+  card.classList.add("flash");
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 function addProblem(text, structure) {
   state.problems.push({ text, structure });
   const list = document.getElementById("problem-list");
@@ -379,6 +389,7 @@ async function sendMessage() {
     updatePanels();
 
     addAiBubble(data.message, data.display_type);
+    if (data.highlight_problems) flashProblems();
     if (Array.isArray(data.buttons) && data.buttons.length) addChoiceButtons(data.buttons);
     if (ENABLE_FIGURES && data.figure) addFigureCard(data.figure);
     if (ENABLE_FIGURES && data.tape_diagram) addTapeDiagramCard(data.tape_diagram);

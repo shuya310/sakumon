@@ -681,3 +681,13 @@ body {
 .phase-banner-sub { font-size: 1.05rem; opacity: .9; }
 
 .panel-card h3 span { color: var(--green); font-size: 1rem; margin-left: 4px; }
+
+/* 水準1・2：産出一覧をチャットに列挙せず、右パネルを光らせて読ませる */
+#problems-card.flash { animation: card-flash 2.4s ease-out 1; }
+@keyframes card-flash {
+  0%, 100% { box-shadow: 0 2px 12px rgba(0,0,0,.07); transform: scale(1); }
+  12%      { box-shadow: 0 0 0 4px rgba(15,110,86,.45); transform: scale(1.035); }
+  30%      { box-shadow: 0 0 0 3px rgba(15,110,86,.18); transform: scale(1); }
+  46%      { box-shadow: 0 0 0 4px rgba(15,110,86,.45); transform: scale(1.025); }
+  70%      { box-shadow: 0 0 0 3px rgba(15,110,86,.16); transform: scale(1); }
+}

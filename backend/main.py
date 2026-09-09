@@ -4,6 +4,7 @@
 - フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す。
 - フェーズ2：学習者状態（S0〜S3）と支援水準（form / level1〜4 / discover / goal / talk）を
   ここで決定論的に算出し、ai_dialogue に声かけを組み立てさせる。AIには判定させない。
+  水準を上げるのは「成立作問の反復」と「対話での困り表明」の2つ（どちらも停滞のシグナル）。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
 """
 
@@ -247,6 +248,39 @@ def _answer_kind(text: str, button: str | None) -> str | None:
     return None
 
 
+# ===== 困り表明の検出 =====
+
+# 児童が「進めない」と言葉で訴えている状態。作問の提出と同じく停滞のシグナルとして扱い、
+# 支援水準を1段上げる（talk のままだと「自分で考えてみよう」を繰り返すだけで前に進まないため）。
+_STUCK_RE = re.compile(
+    r"わからな|わかんな|分からな|わからん|わかりませ|"
+    r"むずかし|難し|できな|できませ|むり|無理|"
+    r"どうしたら|どうすれば|どうやって|どうすると|どうする|どうしよう|どういう|"
+    r"思いつか|おもいつか|うかばな|浮かばな|"
+    r"ヒント|たすけて|助けて|おしえて|教えて|こまった|困った|"
+    r"[なに何](を|に)(すれ|したら|書|かけ|かい)"
+)
+
+
+def _is_stuck(text: str) -> bool:
+    return bool(_STUCK_RE.search((text or "").strip()))
+
+
+def _stuck_support_level(session_id: int, history: list, learner_state: str,
+                         has_problems: bool) -> str:
+    """困り表明を受けたときに返す支援水準。
+
+    3構造そろっていれば上げる先がないので talk のまま。
+    まだ1問も成立していない／不成立が続いている（S0）ときは、産出の比較（水準1・2）が
+    成り立たないので場面想起（水準4）へ直行する。それ以外は作問の反復と同じく1段上げる。
+    """
+    if set(history) >= STRUCTURES:
+        return "talk"
+    if not has_problems or learner_state == "S0":
+        return "level4"
+    return f"level{min(4, database.get_current_level(session_id, 2) + 1)}"
+
+
 # ===== Routes（児童） =====
 
 @app.get("/api/config")
@@ -331,6 +365,7 @@ def _finish(result: dict, session_id: int, phase: int) -> dict:
         # フェーズ1・3では判定結果を画面に出さない（ログには残っている）
         for k in ("valid", "structure", "unknown", "is_new", "buttons", "target_structure"):
             result[k] = None
+        result["highlight_problems"] = False
     return result
 
 
@@ -339,6 +374,7 @@ def _base_result(message: str, display_type: str, input_type: str, **extra) -> d
         "valid": None, "structure": None, "unknown": None, "is_new": False,
         "display_type": display_type, "message": message, "buttons": None,
         "figure": None, "tape_diagram": None, "target_structure": None,
+        "highlight_problems": False,
         "state": None, "input_type": input_type, **extra,
     }
 
@@ -364,18 +400,38 @@ def _handle_level2_answer(req: JudgeRequest, user_id: str, message: str, kind: s
 
 
 def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
-    """対話経路：judge は通さない。フェーズ2のみ talk の声かけ、フェーズ1・3は「おくったよ」。"""
-    phase = ctx["phase"]
-    support_level = "talk" if phase == 2 else "none"
-    dlg = ai_dialogue.dialogue(message, "taiwa", None, ctx["history"], ctx["recent"], support_level, ctx["expression"])
-    learner_state = _learner_state(req.session_id, None, set(ctx["history"]), False, phase, ctx["last"])
-    result = _base_result(dlg["message"], "normal" if phase == 2 else "ack", "taiwa", state=dlg.get("state"))
+    """対話経路：judge は通さない。フェーズ1・3は「おくったよ」。
+
+    フェーズ2では、困り表明（「わからない」「どうしたら」等）を作問の反復と同じ停滞シグナルとして
+    扱い、支援水準を1段上げて構造支援を返す。それ以外のつぶやき・質問は従来どおり talk。
+    """
+    phase, history = ctx["phase"], ctx["history"]
+    learner_state = _learner_state(req.session_id, None, set(history), False, phase, ctx["last"])
+
+    problems = [{"text": p["text"], "structure": p["structure"]}
+                for p in database.get_valid_problems(req.session_id)]
+    target = None
+    if phase != 2:
+        support_level, display_type = "none", "ack"
+    elif _is_stuck(message):
+        support_level = _stuck_support_level(req.session_id, history, learner_state, bool(problems))
+        display_type = "normal" if support_level == "talk" else support_level
+        if support_level == "level4":
+            target = ai_dialogue.pick_unreached_structure(history)
+    else:
+        support_level, display_type = "talk", "normal"
+
+    dlg = ai_dialogue.dialogue(message, "taiwa", None, history, ctx["recent"], support_level,
+                               ctx["expression"], problems=problems, target_structure=target)
+    result = _base_result(dlg["message"], display_type, "taiwa", state=dlg.get("state"))
+    result.update({"buttons": dlg.get("buttons"), "target_structure": target,
+                   "highlight_problems": bool(dlg.get("highlight_problems"))})
     database.save_log(
         session_id=req.session_id, user_id=user_id, message=message, response_json=result,
         structure=None, is_new=False, input_type="taiwa",
         phase=phase, support_level=support_level, learner_state=learner_state,
         unknown=None, issue=None, button_pressed=ctx["button"],
-        stall_count=database.get_stall_count(req.session_id), target_structure=None,
+        stall_count=database.get_stall_count(req.session_id), target_structure=target,
         expression=ctx["expression"],
     )
     return result
@@ -441,6 +497,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     result.update({
         "valid": valid, "structure": structure, "unknown": unknown, "is_new": is_new,
         "buttons": dlg.get("buttons"), "target_structure": target,
+        "highlight_problems": bool(dlg.get("highlight_problems")),
     })
     database.save_log(
         session_id=req.session_id, user_id=user_id, message=message, response_json=result,

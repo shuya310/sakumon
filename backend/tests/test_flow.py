@@ -145,15 +145,17 @@ with client:
     assert a3["show_support"] is True and a3["history"] == ["tobun"] and a3["ui_level"] == 0
     assert len(a3["problems"]) == 2
 
-    # 反復 → level1（産出一覧：フェーズ1の2問＋今回）
+    # 反復 → level1（産出一覧は右パネルに誘導。チャットには列挙しない）
     r = judge(sidA, "01", "T: ジュース24Lを4人で")
     assert r["display_type"] == "level1", r
-    assert r["message"].startswith("今までに作ったお話だよ。") and "③ T: ジュース" in r["message"]
+    assert r["message"] == "今までに 作った お話が、右に ならんでいるよ。\nもう一度 読みかえしてみよう。"
+    assert r["highlight_problems"] is True
     assert "1つ分" not in r["message"] and r["ui_level"] == 1
     # 反復 → level2（2択ボタン）
     r = judge(sidA, "01", "T: えんぴつ24本を4人で")
     assert r["display_type"] == "level2" and r["buttons"] == ["同じ", "ちがう"]
     assert "この4つは、聞いていることが 同じかな？ ちがうかな？" in r["message"]
+    assert r["highlight_problems"] is True
     # 「同じ」→ 水準は上がらない
     r = judge(sidA, "01", "同じ", button="同じ")
     assert r["display_type"] == "level2" and "ちがうことを聞くお話" in r["message"]
@@ -176,7 +178,7 @@ with client:
     assert r["display_type"] == "level1"
     # 複数構造がまじった状態の level2 は反復した構造の番号を名指しする
     r = judge(sidA, "01", "H: ジュース24Lを4Lずつ")
-    assert r["display_type"] == "level2" and "⑧と⑨と⑩は、聞いていることが" in r["message"], r["message"]
+    assert r["display_type"] == "level2" and "8ばんと9ばんと10ばんは、聞いていることが" in r["message"], r["message"]
     # 「ちがう」→ 即時 level3（テキスト優先。ボタンは「同じ」を押してから書き換えた想定）
     r = judge(sidA, "01", "ちがうと思う", button="同じ")
     assert r["display_type"] == "level3"
@@ -186,9 +188,12 @@ with client:
     # 不成立 → form（水準は動かない）
     r = judge(sidA, "01", "X: だめ")
     assert r["display_type"] == "normal" and r["message"] == "[form] llm" and r["valid"] is False
-    # 対話 → talk
+    # 対話（困り表明）→ 水準を1段上げる。ここは上限なので level4
     r = judge(sidA, "01", "むずかしい")
-    assert r["message"] == "[talk] llm"
+    assert r["display_type"] == "level4" and r["message"] == "[level4] llm"
+    # 対話（困りではないつぶやき）→ talk のまま
+    r = judge(sidA, "01", "きゅうしょく おいしかった")
+    assert r["display_type"] == "normal" and r["message"] == "[talk] llm"
     # 3つ目 → goal（構造名は出さない）
     r = judge(sidA, "01", "B: 24人は4人の何倍")
     assert r["display_type"] == "goal" and "3つとも作れたね" in r["message"] and r["all_reached"] is True
@@ -202,7 +207,8 @@ with client:
     p2 = [l for l in logs if l["phase"] == 2]
     seq = [(l["input_type"], l["support_level"], l["is_new"]) for l in p2]
     assert [s[1] for s in seq] == ["level1", "level2", "level2", "level3", "level4", "level4", "discover",
-                                   "level1", "level2", "level3", "level4", "form", "talk", "goal", "goal"], seq
+                                   "level1", "level2", "level3", "level4", "form", "level4", "talk",
+                                   "goal", "goal"], seq
     same_turn = p2[2]
     assert same_turn["button_pressed"] == "同じ" and same_turn["message"] == "同じ"
     diff_turn = p2[9]
@@ -262,6 +268,36 @@ with client:
     a6 = post("/api/login", user_id="01").json()
     assert a6["session_id"] not in (sidA, a4["session_id"]), "新しい回では旧セッションを拾わない"
     print("OK 新しい回: run_id が進み、旧セッションを再開しない（データは残る）")
+
+    # ===== 困り表明で支援水準が上がる（対話も停滞シグナルとして扱う） =====
+    admin_post("/admin/api/phase", phase=2)
+    sidS = post("/api/login", user_id="09").json()["session_id"]
+    # 1問も作れていないうちの困り → 産出の比較は成り立たないので場面想起（水準4）
+    r = judge(sidS, "09", "わからない")
+    assert r["display_type"] == "level4" and r["target_structure"] == "tobun", r
+    # 1問成立 → discover で水準リセット
+    r = judge(sidS, "09", "T: あめ24こを4人で")
+    assert r["display_type"] == "new_structure"
+    # 以降の困りは作問の反復と同じ段（1→2→3）を上がる
+    r = judge(sidS, "09", "どうしたらいいの")
+    assert r["display_type"] == "level1" and r["highlight_problems"] is True, r
+    r = judge(sidS, "09", "思いつかない")
+    assert r["display_type"] == "level2" and r["buttons"] == ["同じ", "ちがう"], r
+    r = judge(sidS, "09", "やっぱりむずかしい")
+    assert r["display_type"] == "level3", r
+    # 3構造そろったあとの困りは上げる先がないので talk
+    judge(sidS, "09", "H: あめ24こを4こずつ")
+    judge(sidS, "09", "B: 24本は4本の何倍")
+    r = judge(sidS, "09", "わからない")
+    assert r["display_type"] == "normal" and r["message"] == "[talk] llm", r
+    # 困りではないつぶやきは水準を動かさない
+    before = client.get(f"/admin/api/sessions/{sidS}", headers=AUTH).json()
+    r = judge(sidS, "09", "きょうは 雨だね")
+    logsS = client.get(f"/admin/api/sessions/{sidS}", headers=AUTH).json()
+    assert logsS[-1]["support_level"] == "talk" and len(logsS) == len(before) + 1
+    assert [l["support_level"] for l in logsS] == [
+        "level4", "discover", "level1", "level2", "level3", "discover", "goal", "talk", "talk"], logsS
+    print("OK 困り表明: 対話でも水準が1段ずつ上がる（産出なしは水準4・3つそろえば talk）")
 
     # ===== CSV =====
     r = client.get("/admin/api/export/csv", headers=AUTH)

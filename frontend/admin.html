@@ -8,17 +8,91 @@
 </head>
 <body>
 
-<!-- メイン画面 -->
 <div id="screen-main">
   <div class="page-header">
     <h1>作問システム 管理者画面</h1>
+    <div class="right">
+      <nav class="tabs">
+        <button class="tab active" id="tab-phase">フェーズ管理</button>
+        <button class="tab" id="tab-students">児童一覧・ログ</button>
+      </nav>
+    </div>
   </div>
 
   <div class="page-body">
-    <div class="breadcrumb" id="breadcrumb"></div>
 
-    <!-- 児童一覧 -->
-    <div id="view-students">
+    <!-- ===== フェーズ管理 ===== -->
+    <div id="view-phase">
+      <div class="phase-grid">
+        <div class="card phase-card">
+          <div class="section-title">現在のフェーズ</div>
+          <div class="phase-now">
+            <div class="phase-big" id="phase-big">–</div>
+            <div class="phase-desc" id="phase-desc"></div>
+          </div>
+          <div class="phase-buttons">
+            <button class="btn btn-phase" data-phase="1">フェーズ1<small>事前・支援なし</small></button>
+            <button class="btn btn-phase" data-phase="2">フェーズ2<small>支援あり</small></button>
+            <button class="btn btn-phase" data-phase="3">フェーズ3<small>事後・別の式</small></button>
+          </div>
+          <div class="phase-meta">
+            <span>回（run）: <strong id="run-id">–</strong></span>
+            <span>更新: <span id="cfg-updated">–</span></span>
+          </div>
+        </div>
+
+        <div class="card phase-card">
+          <div class="section-title">式</div>
+          <div class="expr-row">
+            <label>式A（フェーズ1・2）</label>
+            <input id="expr-a" class="expr-input" placeholder="24 ÷ 4">
+          </div>
+          <div class="expr-row">
+            <label>式B（フェーズ3）</label>
+            <input id="expr-b" class="expr-input" placeholder="18 ÷ 3">
+          </div>
+          <div class="expr-actions">
+            <button class="btn btn-primary btn-sm" id="btn-save-expr">式を保存</button>
+            <span class="expr-msg" id="expr-msg"></span>
+          </div>
+          <hr class="sep">
+          <div class="section-title" style="margin-top:8px">新しい回を始める</div>
+          <p class="help">
+            run 番号を進めてフェーズ1に戻します。児童は次のログインから新しいセッションになります
+            （リハーサルのデータを本番で拾わないため）。過去のデータは消えません。
+          </p>
+          <button class="btn btn-ghost btn-sm" id="btn-new-run">新しい回を始める</button>
+        </div>
+      </div>
+
+      <div class="action-bar" style="margin-top:22px">
+        <div class="section-title" style="margin-bottom:0">
+          児童の状態 <span class="muted" id="live-summary"></span>
+        </div>
+        <div class="muted small">5秒ごとに更新 ／ <span class="legend-zero">■</span> 提出0問</div>
+      </div>
+      <div class="card">
+        <table class="live-table">
+          <thead>
+            <tr>
+              <th>学籍番号</th>
+              <th>接続</th>
+              <th>提出<small>（今のフェーズ）</small></th>
+              <th>成立</th>
+              <th>到達<small>（1つ分・いくつ分・何倍）</small></th>
+              <th>支援水準</th>
+              <th>学習者状態</th>
+              <th>最終活動</th>
+            </tr>
+          </thead>
+          <tbody id="live-tbody"><tr><td colspan="8" class="empty">読み込み中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== 児童一覧 ===== -->
+    <div id="view-students" style="display:none">
+      <div class="breadcrumb" id="breadcrumb"></div>
       <div class="action-bar">
         <div class="section-title">児童一覧</div>
         <button class="btn btn-ghost btn-sm" id="btn-export-csv">CSVダウンロード</button>
@@ -28,7 +102,8 @@
           <thead>
             <tr>
               <th>学籍番号</th>
-              <th>最終ログイン</th>
+              <th>最終セッション作成</th>
+              <th>セッション数</th>
               <th>達成構造数</th>
             </tr>
           </thead>
@@ -37,8 +112,9 @@
       </div>
     </div>
 
-    <!-- 児童詳細 -->
+    <!-- ===== 児童詳細 ===== -->
     <div id="view-student-detail" style="display:none">
+      <div class="breadcrumb" id="breadcrumb-detail"></div>
       <div class="section-title" id="detail-title"></div>
       <div id="sessions-container"></div>
     </div>

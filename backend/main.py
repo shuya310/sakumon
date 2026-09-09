@@ -1,77 +1,58 @@
+"""作問支援システム API。
+
+- 式・フェーズは app_config（database.get_config）から取得する。ハードコードしない。
+- フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す。
+- フェーズ2：学習者状態（S0〜S3）と支援水準（form / level1〜4 / discover / goal / talk）を
+  ここで決定論的に算出し、ai_dialogue に声かけを組み立てさせる。AIには判定させない。
+- 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
+"""
+
 import csv
 import io
 import re
+import secrets
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import config
 import database
 import ai_judge
 import ai_classify
 import ai_dialogue
 
-EXPRESSION = "18 ÷ 3"
+if not config.ADMIN_PASSWORD:
+    raise RuntimeError(
+        "ADMIN_PASSWORD が未設定です。ローカルは .env に、本番は Render の Environment に設定してください。"
+    )
+
 STRUCTURES = {"tobun", "hougan", "bai"}
+LEVEL_NAMES = database.LEVEL_NAMES
 USER_ID_PATTERN = re.compile(r"^[0-9a-z]{2}$")
-
-# 対話文からつまづきの種類を判定するための語彙（決定論・研究の再現性のため単純なキーワード）
-_MATERIAL_CONFUSION_KW = ("同じ話", "おなじ話", "おなじはなし", "同じお話",
-                          "同じじゃ", "おなじじゃ", "変わらない", "かわらない", "いっしょ", "一緒")
-_HELP_KW = ("わからない", "わかんない", "わからん", "こまった", "困った",
-            "むずかしい", "難しい", "図", "おしえて", "教えて", "できない", "ヒント", "たすけ", "助け")
-
-
-def _taiwa_stumble(message: str) -> str | None:
-    """対話入力のつまづき種別。題材混同 > 助け求め > なし の順で判定。"""
-    if any(k in message for k in _MATERIAL_CONFUSION_KW):
-        return "material_confusion"
-    if any(k in message for k in _HELP_KW):
-        return "help_request"
-    return None
-
-
-def _stuck_level(session_id: int, floor: int = 1) -> int:
-    """対話（taiwa）経路での段階的ヒント（hint1〜3）の水準を決定論的に決める。
-
-    直近の新構造発見以降に積み上がった「足踏み」シグナル数（+今回の1回）を
-    1〜3にクランプして返す。floor は「同じ話じゃないの？」「わからない」等、
-    子どもが自分から混乱・ヘルプを表明したときに、いきなりhint1（問いかけのみ）
-    から始めず、最低でもhint2（比較の軸を示す）からにするための下限。
-    作問（sakumon）経路の水準は stall_count（database.get_stall_count）で
-    決めるため、こちらは使わない。
-    """
-    streak = database.get_stuck_streak(session_id) + 1
-    return min(3, max(floor, streak))
-
-
-def _sakumon_signals(valid: bool, is_new: bool, completes_all: bool, issue: str | None,
-                      stall_count: int = 0):
-    """作問の判定結果から (stumble, support_level, display_type) を決定論的に導く。
-
-    stall_count は database.get_stall_count() + 1（今回の反復ぶんを含む）。
-    1→hint1（気づきの問い）／2→hint2（比較の軸の転換）／3以上→hint3（テープ図）。
-    """
-    if not valid:
-        stumble = {"reversed": "reversed", "wrong_number": "wrong_expression"}.get(issue, "incomplete")
-        return stumble, "form", "normal"
-    if completes_all:
-        return None, "goal", "clear"
-    if is_new:
-        return None, "discover", "new_structure"
-    level = f"hint{min(3, stall_count)}"  # 既出構造のくり返し（停滞）。水準は段階的に上げる
-    return level, level, level  # つまづき種別に段階名そのものを記録し、管理者画面から追える
-
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
-app = FastAPI()
+# 児童側の設定ポーリングを心拍として使う（user_id → 最終受信）。単一プロセス前提のメモリ保持。
+_last_seen: dict[str, dict] = {}
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    database.init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,170 +60,358 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
-@app.on_event("startup")
-def startup():
-    database.init_db()
-
-
-# --- Models ---
+# ===== Models =====
 
 class LoginRequest(BaseModel):
     user_id: str
 
+
 class NewSessionRequest(BaseModel):
     user_id: str
 
+
 class ResumeSessionRequest(BaseModel):
     session_id: int
+    user_id: str
+
 
 class JudgeRequest(BaseModel):
     session_id: int
+    user_id: str
     message: str
+    button_pressed: str | None = None
 
 
+class PhaseRequest(BaseModel):
+    phase: int
 
-# --- Routes ---
+
+class ExpressionsRequest(BaseModel):
+    expression_a: str
+    expression_b: str
+
+
+# ===== 共通ヘルパ =====
+
+def _normalize_user_id(user_id: str) -> str:
+    uid = (user_id or "").strip().lower()
+    if not USER_ID_PATTERN.match(uid):
+        raise HTTPException(status_code=400, detail="学籍番号は半角英数字2桁で入力してください")
+    return uid
+
+
+def _touch(user_id: str, session_id: int | None):
+    _last_seen[user_id] = {"session_id": session_id, "ts": time.time()}
+
+
+def _cfg_public(cfg: dict) -> dict:
+    phase = cfg["current_phase"]
+    dividend, divisor = config.parse_expression(database.expression_for_phase(cfg, phase))
+    return {
+        "phase": phase,
+        "expression": f"{dividend} ÷ {divisor}",
+        "dividend": dividend,
+        "divisor": divisor,
+        "run_id": cfg["run_id"],
+        "updated_at": cfg["updated_at"],
+        "poll_seconds": config.CONFIG_POLL_SECONDS,
+    }
+
+
+def _owned_session(session_id: int, user_id: str) -> dict:
+    """セッションの存在と所有権（user_id 一致）を検証する。"""
+    session = database.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if session["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="このセッションはあなたのものではありません")
+    return session
+
+
+def _enter_payload(session_id: int, cfg: dict) -> dict:
+    """ログイン／再入場時にクライアントへ返す一式。フェーズ1・3では支援に関わる情報を伏せる。"""
+    session = database.get_session(session_id)
+    phase = cfg["current_phase"]
+    show = phase == 2
+    history = database.get_history(session_id)
+    return {
+        "user_id": session["user_id"],
+        "session_id": session_id,
+        "phase": phase,
+        "run_id": cfg["run_id"],
+        "expression": _cfg_public(cfg)["expression"],
+        "show_support": show,
+        "history": history if show else [],
+        "problems": ([{"text": p["text"], "structure": p["structure"]} for p in database.get_valid_problems(session_id)]
+                     if show else []),
+        "conversation": database.get_conversation(session_id),
+        "ui_level": database.get_max_level(session_id, 2) if show else 0,
+        "all_reached": show and set(history) >= STRUCTURES,
+        "poll_seconds": config.CONFIG_POLL_SECONDS,
+    }
+
+
+def _enter_current(user_id: str) -> dict:
+    """現在の run・フェーズに対応するセッションを探し（無ければ作り）、入場情報を返す。"""
+    cfg = database.get_config()
+    expression = database.expression_for_phase(cfg, cfg["current_phase"])
+    session_id, _created = database.find_or_create_session(user_id, cfg["run_id"], cfg["current_phase"], expression)
+    _touch(user_id, session_id)
+    return _enter_payload(session_id, cfg)
+
+
+# ===== 学習者状態（決定論） =====
+
+def _learner_state(session_id: int, current_valid: bool | None, history_after: set,
+                   is_new: bool, phase: int, last_turn: dict | None) -> str:
+    """S0〜S3。S2/S3 の区別はリアルタイムには暫定値（事後にログから判定する）。
+
+    S0: 今回の作問が不成立で、直前2問のうち1問以上が不成立（＝直近2問連続不成立、または直近3問中2問不成立）。
+        今回が成立なら必ず脱出（構造支援へ）。対話ターンは直近の作問提出の並びで判定する。
+    S1: 到達構造が1以下。  S2: 2以上。
+    S3: 2以上で、フェーズ2の水準1以上の声かけ直後の提出で新構造が出たことがある（暫定）。
+    """
+    if current_valid is False:
+        recent = database.get_recent_sakumon_validity(session_id, 2)
+        if any(not v for v in recent):
+            return "S0"
+    elif current_valid is None:
+        recent = database.get_recent_sakumon_validity(session_id, 3)
+        if len(recent) >= 2 and not recent[0] and not recent[1]:
+            return "S0"
+        if len(recent) >= 3 and sum(1 for v in recent if not v) >= 2:
+            return "S0"
+    if len(history_after) <= 1:
+        return "S1"
+    if database.has_intentional_evidence(session_id):
+        return "S3"
+    if is_new and phase == 2 and last_turn and last_turn.get("support_level") in LEVEL_NAMES:
+        return "S3"
+    return "S2"
+
+
+# ===== 水準2の問いへの応答検出 =====
+
+_DIFF_RE = re.compile(r"ちがう|違う|ちがい|違い|べつ|別")
+_SAME_RE = re.compile(r"同じ|おなじ|おんなじ|いっしょ|一緒")
+_NEG_RE = re.compile(r"じゃない|ではない|くない|ない")
+
+
+def _answer_kind(text: str, button: str | None) -> str | None:
+    """「同じ」「ちがう」のどちらの応答か。送信テキストを優先し、決められなければボタン値。"""
+    t = (text or "").strip()
+    if _DIFF_RE.search(t) or (_SAME_RE.search(t) and _NEG_RE.search(t)):
+        return "different"
+    if _SAME_RE.search(t):
+        return "same"
+    if button == "同じ":
+        return "same"
+    if button == "ちがう":
+        return "different"
+    return None
+
+
+# ===== Routes（児童） =====
+
+@app.get("/api/config")
+def get_public_config(user_id: str | None = None, session_id: int | None = None):
+    """現在のフェーズと式（認証不要）。児童側はこれを5秒間隔でポーリングする（心拍にもなる）。"""
+    if user_id and USER_ID_PATTERN.match(user_id):
+        _touch(user_id, session_id)
+    return _cfg_public(database.get_config())
+
 
 @app.post("/api/login")
 def login(req: LoginRequest):
-    if not USER_ID_PATTERN.match(req.user_id):
-        raise HTTPException(status_code=400, detail="学籍番号は半角英数字2桁で入力してください")
-    sessions = database.get_sessions(req.user_id)
-    return {"user_id": req.user_id, "sessions": sessions}
+    """出席番号でログイン。現在のフェーズに対応するセッションを探すか作って返す。"""
+    return _enter_current(_normalize_user_id(req.user_id))
 
 
 @app.post("/api/session/new")
 def new_session(req: NewSessionRequest):
-    if not USER_ID_PATTERN.match(req.user_id):
-        raise HTTPException(status_code=400, detail="invalid user_id")
-    session_id = database.create_session(req.user_id, EXPRESSION)
-    return {"session_id": session_id, "expression": EXPRESSION}
+    """フェーズ切替時にクライアントが呼ぶ。現在フェーズのセッションを探すか作る（重複作成しない）。"""
+    return _enter_current(_normalize_user_id(req.user_id))
 
 
 @app.post("/api/session/resume")
 def resume_session(req: ResumeSessionRequest):
-    user_id = database.get_session_user(req.session_id)
-    if user_id is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    history = database.get_history(req.session_id)
-    problems = database.get_session_problems(req.session_id)
-    conversation = database.get_conversation(req.session_id)
-    return {
-        "session_id": req.session_id,
-        "expression": EXPRESSION,
-        "history": history,
-        "problems": problems,
-        "conversation": conversation,
-    }
+    user_id = _normalize_user_id(req.user_id)
+    _owned_session(req.session_id, user_id)
+    cfg = database.get_config()
+    _touch(user_id, req.session_id)
+    return _enter_payload(req.session_id, cfg)
 
 
 @app.post("/api/judge")
 def judge(req: JudgeRequest):
-    user_id = database.get_session_user(req.session_id)
-    if user_id is None:
-        raise HTTPException(status_code=404, detail="session not found")
+    user_id = _normalize_user_id(req.user_id)
+    session = _owned_session(req.session_id, user_id)
+    _touch(user_id, req.session_id)
 
-    # 到達済み構造（信号機）と直近のやりとりを取得
+    cfg = database.get_config()
+    phase = cfg["current_phase"]
+    expression = database.expression_for_phase(cfg, phase)
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="empty message")
+    button = (req.button_pressed or "").strip() or None
+
     history = database.get_history(req.session_id)
     recent = database.get_recent_turns(req.session_id)
+    last = database.get_last_turn(req.session_id)
+    ctx = dict(session=session, phase=phase, expression=expression, history=history,
+               recent=recent, last=last, button=button)
 
-    # judge を呼ぶ前に「作問か対話か」を1回だけ分類（対話文が judge に流れ込むのを防ぐ）
-    kind = ai_classify.classify(req.message, recent)
+    # 水準2の問いに、ボタン押下＋短い応答で答えた場合は classify を通さない
+    if phase == 2 and button in ai_dialogue.LEVEL2_BUTTONS and len(message) <= 8:
+        kind = _answer_kind(message, button)
+        if kind:
+            result = _handle_level2_answer(req, user_id, message, kind, ctx)
+            return _finish(result, req.session_id, phase)
 
-    if kind == "sakumon":
-        result = _handle_sakumon(req, user_id, history, recent)
+    input_kind = ai_classify.classify(message, recent, expression)
+    if input_kind == "sakumon":
+        result = _handle_sakumon(req, user_id, message, ctx)
     else:
-        result = _handle_taiwa(req, user_id, history, recent)
+        kind = None
+        if phase == 2 and last and last.get("support_level") == "level2":
+            kind = _answer_kind(message, button)
+        if kind:
+            result = _handle_level2_answer(req, user_id, message, kind, ctx)
+        else:
+            result = _handle_taiwa(req, user_id, message, ctx)
+    return _finish(result, req.session_id, phase)
 
-    result["history"] = database.get_history(req.session_id)
+
+def _finish(result: dict, session_id: int, phase: int) -> dict:
+    show = phase == 2
+    history = database.get_history(session_id)
+    result["phase"] = phase
+    result["show_support"] = show
+    result["history"] = history if show else []
+    result["ui_level"] = database.get_max_level(session_id, 2) if show else 0
+    result["all_reached"] = show and set(history) >= STRUCTURES
+    if not show:
+        # フェーズ1・3では判定結果を画面に出さない（ログには残っている）
+        for k in ("valid", "structure", "unknown", "is_new", "buttons", "target_structure"):
+            result[k] = None
     return result
 
 
-def _handle_taiwa(req: JudgeRequest, user_id: str, history: list[str], recent: list[dict]) -> dict:
-    """対話経路: judge は通さず ai_dialogue のみ。信号機は変化しない。"""
-    stumble = _taiwa_stumble(req.message)
-    # 助けを求めている／題材混同 → 自分から混乱を表明しているので、最低でもhint2
-    # （比較の軸を示す）から入る。それ以外は軽く受け止める。
-    if stumble:
-        support_level = f"hint{_stuck_level(req.session_id, floor=2)}"
-    else:
-        support_level = "talk"
-
-    dlg = ai_dialogue.dialogue(req.message, "taiwa", None, history, recent, support_level)
-    result = {
-        "valid": False,
-        "structure": None,
-        "is_new": False,
-        "display_type": support_level if stumble else "normal",
-        "message": dlg["message"],
-        "figure": dlg.get("figure"),
-        "target_structure": dlg.get("target_structure"),
-        "state": dlg.get("state"),
-        "tape_diagram": dlg.get("tape_diagram"),
-        "input_type": "taiwa",
+def _base_result(message: str, display_type: str, input_type: str, **extra) -> dict:
+    return {
+        "valid": None, "structure": None, "unknown": None, "is_new": False,
+        "display_type": display_type, "message": message, "buttons": None,
+        "figure": None, "tape_diagram": None, "target_structure": None,
+        "state": None, "input_type": input_type, **extra,
     }
+
+
+def _handle_level2_answer(req: JudgeRequest, user_id: str, message: str, kind: str, ctx: dict) -> dict:
+    """水準2の問い「同じ？ちがう？」への応答。
+    同じ → 気づけている：水準は上げず挑戦を促す。 ちがう → 気づけていない：即時に水準3へ。"""
+    if kind == "same":
+        support_level, text = "level2", ai_dialogue.level2_same_reply()
+    else:
+        support_level, text = "level3", ai_dialogue.level3_message()
+    learner_state = _learner_state(req.session_id, None, set(ctx["history"]), False, ctx["phase"], ctx["last"])
+    result = _base_result(text, support_level, "taiwa", state=f"level2_answer_{kind}")
     database.save_log(
-        session_id=req.session_id, user_id=user_id, message=req.message,
-        response_json=result, structure=None, is_new=False,
-        input_type="taiwa", stumble=stumble,
+        session_id=req.session_id, user_id=user_id, message=message, response_json=result,
+        structure=None, is_new=False, input_type="taiwa",
+        phase=ctx["phase"], support_level=support_level, learner_state=learner_state,
+        unknown=None, issue=None, button_pressed=ctx["button"],
+        stall_count=database.get_stall_count(req.session_id), target_structure=None,
+        expression=ctx["expression"],
     )
     return result
 
 
-def _handle_sakumon(req: JudgeRequest, user_id: str, history: list[str], recent: list[dict]) -> dict:
-    """作問経路: ai_judge で構造同定 → サーバで信号機/表示種別を決定 → ai_dialogue で声かけ。"""
-    jr = ai_judge.judge(req.message, EXPRESSION)
+def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
+    """対話経路：judge は通さない。フェーズ2のみ talk の声かけ、フェーズ1・3は「おくったよ」。"""
+    phase = ctx["phase"]
+    support_level = "talk" if phase == 2 else "none"
+    dlg = ai_dialogue.dialogue(message, "taiwa", None, ctx["history"], ctx["recent"], support_level, ctx["expression"])
+    learner_state = _learner_state(req.session_id, None, set(ctx["history"]), False, phase, ctx["last"])
+    result = _base_result(dlg["message"], "normal" if phase == 2 else "ack", "taiwa", state=dlg.get("state"))
+    database.save_log(
+        session_id=req.session_id, user_id=user_id, message=message, response_json=result,
+        structure=None, is_new=False, input_type="taiwa",
+        phase=phase, support_level=support_level, learner_state=learner_state,
+        unknown=None, issue=None, button_pressed=ctx["button"],
+        stall_count=database.get_stall_count(req.session_id), target_structure=None,
+        expression=ctx["expression"],
+    )
+    return result
 
-    # 構造同定が技術的に失敗（リトライ後もパース不可）→ 対話に回さず児童向けフォールバック
+
+def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
+    """作問経路：ai_judge で同定 → サーバが学習者状態・支援水準を決定 → ai_dialogue が声かけ。"""
+    phase, expression, history, last = ctx["phase"], ctx["expression"], ctx["history"], ctx["last"]
+    show = phase == 2
+    jr = ai_judge.judge(message, expression)
+
+    # 技術的失敗（リトライ後もパース不可）→ 児童向けフォールバック。児童の責任ではないので S0 判定にも数えない。
     if jr.get("issue") == "error":
-        result = {
-            "valid": False, "structure": None, "is_new": False,
-            "display_type": "normal", "message": ai_dialogue.FALLBACK_MESSAGE,
-            "figure": None, "target_structure": None, "state": "judge_error",
-            "tape_diagram": None,
-            "input_type": "sakumon",
-        }
+        learner_state = _learner_state(req.session_id, None, set(history), False, phase, last)
+        result = _base_result(ai_dialogue.FALLBACK_MESSAGE if show else ai_dialogue.ACK_MESSAGE,
+                              "normal" if show else "ack", "sakumon", state="judge_error")
         database.save_log(
-            session_id=req.session_id, user_id=user_id, message=req.message,
-            response_json=result, structure=None, is_new=False,
-            input_type="sakumon", stumble=None,
+            session_id=req.session_id, user_id=user_id, message=message, response_json=result,
+            structure=None, is_new=False, input_type="sakumon",
+            phase=phase, support_level="error", learner_state=learner_state,
+            unknown=None, issue="error", button_pressed=ctx["button"],
+            stall_count=None, target_structure=None, expression=expression,
         )
         return result
 
-    # 信号機の状態・表示種別・支援段階・つまづきはサーバが決定論的に計算する（AIに任せない）
-    valid = jr.get("valid", False)
-    structure = jr.get("structure", "invalid")
-    is_new = valid and structure in STRUCTURES and structure not in history
+    valid = jr["valid"]
+    structure = jr["structure"] if valid else None
+    unknown = jr["unknown"]
+    issue = jr["issue"]
+    is_new = bool(valid and structure in STRUCTURES and structure not in history)
+    all_before = set(history) >= STRUCTURES
     completes_all = is_new and (set(history) | {structure}) >= STRUCTURES
-    # stall_count: 直近の新構造到達より後、同じ構造をくり返した回数（今回ぶんを含む）。
-    # 1→hint1／2→hint2／3以上→hint3。ai_judgeの判定は変えず、既出構造への「反復」だけを数える。
-    stall_count = (database.get_stall_count(req.session_id) + 1) if (
-        valid and not is_new and not completes_all
-    ) else 0
-    stumble, support_level, display_type = _sakumon_signals(
-        valid, is_new, completes_all, jr.get("issue"), stall_count
+    stall_count = (database.get_stall_count(req.session_id) + 1) if (valid and not is_new) else 0
+    history_after = set(history) | ({structure} if valid else set())
+    learner_state = _learner_state(req.session_id, valid, history_after, is_new, phase, last)
+
+    target = None
+    if not show:
+        support_level, display_type = "none", "ack"
+    elif not valid:
+        support_level, display_type = "form", "normal"          # 水準0（S0は構造支援に進まない）
+    elif completes_all or all_before:
+        support_level, display_type = "goal", "goal"
+    elif is_new:
+        support_level, display_type = "discover", "new_structure"  # 水準を1にリセット（次の反復が level1）
+    else:
+        level = min(4, database.get_current_level(req.session_id, 2) + 1)  # 1提出につき最大1段階
+        support_level = display_type = f"level{level}"
+        if level == 4:
+            target = ai_dialogue.pick_unreached_structure(history)
+
+    problems = [{"text": p["text"], "structure": p["structure"]} for p in database.get_valid_problems(req.session_id)]
+    if valid:
+        problems.append({"text": message, "structure": structure})
+
+    dlg = ai_dialogue.dialogue(
+        message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
+        history, ctx["recent"], support_level, expression,
+        problems=problems, target_structure=target, first_goal=completes_all,
     )
 
-    # 児童向けの声かけ・図・次の目標は ai_dialogue が生成（支援段階を渡す）
-    jr_for_dialogue = {**jr, "is_new": is_new, "completes_all": completes_all}
-    dlg = ai_dialogue.dialogue(req.message, "sakumon", jr_for_dialogue, history, recent, support_level)
-
-    result = {
-        "valid": valid,
-        "structure": structure if valid else None,
-        "is_new": is_new,
-        "display_type": display_type,
-        "message": dlg["message"],
-        "figure": dlg.get("figure"),
-        "target_structure": dlg.get("target_structure"),
-        "state": dlg.get("state"),
-        "tape_diagram": dlg.get("tape_diagram"),
-        "input_type": "sakumon",
-    }
+    result = _base_result(dlg["message"], display_type, "sakumon", state=dlg.get("state"))
+    result.update({
+        "valid": valid, "structure": structure, "unknown": unknown, "is_new": is_new,
+        "buttons": dlg.get("buttons"), "target_structure": target,
+    })
     database.save_log(
-        session_id=req.session_id, user_id=user_id, message=req.message,
-        response_json=result, structure=structure if valid else None,
-        is_new=is_new, input_type="sakumon", stumble=stumble,
+        session_id=req.session_id, user_id=user_id, message=message, response_json=result,
+        structure=structure, is_new=is_new, input_type="sakumon",
+        phase=phase, support_level=support_level, learner_state=learner_state,
+        unknown=unknown, issue=issue, button_pressed=ctx["button"],
+        stall_count=stall_count, target_structure=target, expression=expression,
     )
     return result
 
@@ -255,9 +424,23 @@ def index():
     return FileResponse(html)
 
 
-# ===== 管理者 =====
+# ===== 管理者（HTTP Basic 認証） =====
 
-@app.get("/admin")
+_security = HTTPBasic(realm="sakumon-admin")
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(_security)):
+    ok = secrets.compare_digest(credentials.password.encode("utf-8"), config.ADMIN_PASSWORD.encode("utf-8"))
+    if not ok:
+        raise HTTPException(status_code=401, detail="認証に失敗しました",
+                            headers={"WWW-Authenticate": 'Basic realm="sakumon-admin"'})
+    return True
+
+
+admin = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
+
+
+@admin.get("")
 def admin_page():
     html = FRONTEND_DIR / "admin.html"
     if not html.exists():
@@ -265,50 +448,89 @@ def admin_page():
     return FileResponse(html)
 
 
-@app.get("/admin/api/students")
+@admin.get("/api/config")
+def admin_config():
+    cfg = database.get_config()
+    return {**cfg, "public": _cfg_public(cfg)}
+
+
+@admin.post("/api/phase")
+def admin_set_phase(req: PhaseRequest):
+    if req.phase not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="phase は 1 / 2 / 3")
+    cfg = database.set_phase(req.phase)
+    return {**cfg, "public": _cfg_public(cfg)}
+
+
+@admin.post("/api/expressions")
+def admin_set_expressions(req: ExpressionsRequest):
+    try:
+        a = config.normalize_expression(req.expression_a)
+        b = config.normalize_expression(req.expression_b)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    cfg = database.set_expressions(a, b)
+    return {**cfg, "public": _cfg_public(cfg)}
+
+
+@admin.post("/api/new_run")
+def admin_new_run():
+    cfg = database.start_new_run()
+    _last_seen.clear()
+    return {**cfg, "public": _cfg_public(cfg)}
+
+
+@admin.get("/api/live")
+def admin_live():
+    cfg = database.get_config()
+    rows = database.admin_live_status(cfg["run_id"], cfg["current_phase"])
+    now = time.time()
+    for r in rows:
+        seen = _last_seen.get(r["user_id"])
+        r["online"] = bool(seen and now - seen["ts"] <= config.ONLINE_WINDOW_SECONDS)
+        r["last_seen_seconds"] = int(now - seen["ts"]) if seen else None
+    return {"config": _cfg_public(cfg), "students": rows}
+
+
+@admin.get("/api/students")
 def admin_students():
     return database.admin_get_all_students()
 
 
-@app.get("/admin/api/students/{user_id}")
+@admin.get("/api/students/{user_id}")
 def admin_student_detail(user_id: str):
-    return {
-        "user_id": user_id,
-        "sessions": database.admin_get_student_sessions(user_id),
-    }
+    return {"user_id": user_id, "sessions": database.admin_get_student_sessions(user_id)}
 
 
-@app.get("/admin/api/sessions/{session_id}")
+@admin.get("/api/sessions/{session_id}")
 def admin_session_logs(session_id: int):
     return database.admin_get_session_logs(session_id)
 
 
-@app.delete("/admin/api/sessions/{session_id}")
+@admin.delete("/api/sessions/{session_id}")
 def admin_delete_session(session_id: int):
     database.admin_delete_session(session_id)
     return {"ok": True}
 
 
-@app.delete("/admin/api/logs/{log_id}")
+@admin.delete("/api/logs/{log_id}")
 def admin_delete_log(log_id: int):
     database.admin_delete_log(log_id)
     return {"ok": True}
 
 
-@app.get("/admin/api/export/csv")
+@admin.get("/api/export/csv")
 def admin_export_csv():
     rows = database.admin_get_all_logs_csv()
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=[
-        "user_id", "session_id", "session_start", "created_at",
-        "message", "ai_message", "structure", "is_new", "input_type",
-        "stumble", "figure", "state", "session_new_count",
-    ])
+    writer = csv.DictWriter(buf, fieldnames=database.CSV_FIELDS)
     writer.writeheader()
     writer.writerows(rows)
-    buf.seek(0)
     return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="text/csv",
+        iter(["﻿" + buf.getvalue()]),  # BOM 付き（Excel で開いたときの文字化け防止）
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=sakumon_export.csv"},
     )
+
+
+app.include_router(admin)

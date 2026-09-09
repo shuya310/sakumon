@@ -1,176 +1,186 @@
-"""児童の作問を支援する対話AI。
+"""児童の作問を支援する対話AI（支援水準 0〜4）。
 
-児童向けの声かけ（称賛・気づかせ・成立不備の問いかけ・クリア）と、図の指示
-（figure）・次に作ってほしい構造（target_structure）をすべてここで生成する。
-構造同定は ai_judge が行い、その結果を受け取る（ここでは判定しない）。
+支援水準は main.py が決定論的に決めて渡す。ここでは水準ごとに声かけを組み立てる。
 
-支援は「段階的支援」。新しい構造ができた直後は次の構造を名指しせず問いかけで
-気づかせ、停滞（同じ構造のくり返し＝stall_count）が続くほどhint1→hint2→hint3と
-少しずつ具体的にしていく（hint1:気づきを促す問いかけのみ／hint2:題材ではなく
-数量関係で比べるよう“比較の軸”を言葉で転換させる／hint3:まだ作っていない構造の
-テープ図を提示する）。段階（stall_countから導いたsupport_level）は main.py が
-決定論的に決めて渡す。
+  form     【水準0・不成立作問】成立性のフィードバック（LLM＋コード側ガード、失敗時は定型文）
+  level1   産出一覧を見せる（定型・LLM不使用）
+  level2   産出一覧＋「聞いていることは同じ？ちがう？」＋2択ボタン（定型・LLM不使用）
+  level3   求める量の明示（定型・LLM不使用。信号機の空欄提示はフロント側）
+  level4   場面想起の足場かけ（LLM＋コード側ガード、失敗時は定型文）
+  discover 新構造が出た（称賛のみ。LLM＋ガード、失敗時は定型文）
+  goal     3構造そろった（定型）
+  talk     作問以外の入力（LLM＋ガード、失敗時は定型文）
+  none     フェーズ1・3。表示しないので LLM は呼ばず「おくったよ」だけ返す
 
-hint3は物語文の生成を一切ともなわない安全境界のため、LLMを呼ばずコード側
-（_build_tape_diagram）だけで生成する。known/unknownの数値は18÷3固定。
+絶対に守る境界（コード側でも検査する）：
+  - 完成した問題文・その骨格を渡さない
+  - 構造名（等分除・包含除・倍）を児童に見せない。返すのは常に「求める量」の言葉
+  - 数量関係（{dividend}こを{divisor}こずつ 等）を渡さない
+  - 答え（数値）を教えない
 
-出力はJSONのみ。パース失敗時は1回リトライし、それでも失敗したら児童向け
-フォールバック文言を返す。
+テープ図・構造図（figure / tape_diagram）は config.ENABLE_FIGURES=False で全面無効化。
+コードは残すが呼ばれない。
 """
 
 import json
 import os
-from dotenv import load_dotenv
+import re
+
 import anthropic
 
+from config import MODEL, ENABLE_FIGURES, parse_expression
 from kanji_rule import KANJI_RULE
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 _client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-MODEL = "claude-sonnet-5"
-
 FALLBACK_MESSAGE = "もう一度 おくってみてね"
+ACK_MESSAGE = "おくったよ"          # フェーズ1・3の最小表示
 
-STRUCTURE_JP = {
-    "tobun": "等分除（分ける話・1人分をさがす）",
-    "hougan": "包含除（分ける話・何人分をさがす）",
-    "bai": "倍（くらべる話）",
+STRUCTURE_ORDER = ("tobun", "hougan", "bai")
+
+# 児童に返してよい言葉は「求める量」だけ。構造名は使わない。
+QUESTION_JA = {
+    "tobun": "1つ分はいくつ？",
+    "hougan": "いくつ分ある？",
+    "bai": "何倍？",
+}
+UNKNOWN_JA = {
+    "one_unit": "1つ分", "num_units": "いくつ分",
+    "ratio": "何倍", "base": "もとの大きさ", "rate": "1つあたり",
 }
 
-STRUCTURE_LABEL_JA = {"tobun": "等分除", "hougan": "包含除", "bai": "倍"}
+LEVEL2_BUTTONS = ["同じ", "ちがう"]
 
-# 18÷3 固定（main.py の EXPRESSION と対応）。hint3のテープ図はこの2値のみで組み立てる。
-DIVIDEND = 18
-DIVISOR = 3
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 
-TAPE_DIAGRAM_MESSAGE = "このテープ図に合うお話を考えてみよう。"
 
-# main.py が決める支援の段階。プロンプトはこの値で声かけを変える。
-SUPPORT_LEVEL_JP = {
-    "form": "form（お話が成立していない：足りない要素を1つだけ問いかける）",
-    "discover": "discover（新しい構造ができた：称賛＋意味づけ。★次の構造は名指しせず、問いかけで気づかせる）",
-    "hint1": "hint1（同じ構造を1回くり返した：図はまだ出さない。前と同じかどうかに気づかせる問いかけのみ）",
-    "hint2": "hint2（くり返しが続く、または『同じ話じゃないの？』『わからない』と言われた："
-             "図はまだ出さない。かわりに“比べる軸”を転換させる。題材（りんご／えんぴつ等）で"
-             "比べるのをやめて、「何をさがしているか（数量関係）」で比べるよう、比較の軸を"
-             "言葉ではっきり示す）",
-    "hint3": "hint3（hint2でも変化がない／混乱がくり返される：テープ図を提示する段階。"
-             "このメッセージ・図はコード側が決定論的に生成するため、通常ここにはこない）",
-    "goal": "goal（3つの構造ができた：さがすものの違いを確認する）",
-    "talk": "talk（その他の質問・つぶやき：やさしく短く受け止め、作問にもどれるようにうながす）",
+def _circled(i: int) -> str:
+    return _CIRCLED[i] if i < len(_CIRCLED) else f"({i + 1})"
+
+
+# ===== 定型文（LLM不使用） =====
+
+def _problem_lines(problems: list[dict]) -> str:
+    return "\n".join(f"{_circled(i)} {p['text']}" for i, p in enumerate(problems))
+
+
+def level1_message(problems: list[dict]) -> str:
+    """そのセッションで成立した作問の問題文だけを並べる。求める量も構造名も添えない。"""
+    return "今までに作ったお話だよ。\n" + _problem_lines(problems)
+
+
+def level2_message(problems: list[dict], current_structure: str | None) -> str:
+    """産出一覧を再掲し、「聞いていることは同じ？ちがう？」と問う。
+
+    全部が同じ構造なら「この3つは」、複数構造がまじっていれば反復した構造の番号を名指しする
+    （「①と③は」）。正解が「ちがう」になる問いを出さないため。
+    """
+    n = len(problems)
+    same_idx = [i for i, p in enumerate(problems) if p.get("structure") == current_structure]
+    if current_structure and 2 <= len(same_idx) < n:
+        subject = "と".join(_circled(i) for i in same_idx) + "は"
+    else:
+        subject = f"この{n}つは"
+    return (level1_message(problems)
+            + f"\n\n{subject}、聞いていることが 同じかな？ ちがうかな？")
+
+
+def level2_same_reply() -> str:
+    return "そうだね、聞いていることは 同じだね。じゃあ、ちがうことを聞くお話は 作れるかな？"
+
+
+def level3_message() -> str:
+    return ("わり算のお話で聞けることは、3つあるよ。\n"
+            "「1つ分はいくつ？」「いくつ分ある？」「何倍？」\n"
+            "まだ 聞いていないものがあるね。作れそうかな？")
+
+
+def goal_message(first_time: bool) -> str:
+    if first_time:
+        return "すごい！3つとも作れたね！ 聞いていることが ちがうお話が 3つそろったよ。"
+    return "もう3つとも作れているよ。ほかにも ちがうお話が 作れそうかな？"
+
+
+FORM_FALLBACK = {
+    "scene_contradiction": "お話の中に、聞いている答えが もう書いてあるみたいだよ。もう一度 読んでみよう。",
+    "wrong_number": "そのお話、{expression} の式になるかな？ 数を たしかめてみよう。",
+    "wrong_operation": "そのお話は わり算で答えが出るかな？ たしかめてみよう。",
+    "incomplete_text": "お話が とちゅうで 切れているみたい。つづきを 書いてみよう。",
+    "no_question": "何を聞くお話かな？ 聞きたいことを 最後に 書いてみよう。",
+    "not_problem": "{expression} になる お話を 作ってみよう。",
 }
+DISCOVER_FALLBACK = "いいね！新しいお話が できたね！"
+TALK_FALLBACK = "そうなんだね。またお話を 作ってみてね。"
+LEVEL4_FALLBACK = "身近なところで、{dividend}こ あるものは何かな？ 教室や きゅうしょくの時間を 思い出してみよう。"
+
+
+def pick_unreached_structure(history: list[str]) -> str | None:
+    """信号機がまだ点いていない構造をひとつ、決定論的な固定順で選ぶ。"""
+    for s in STRUCTURE_ORDER:
+        if s not in history:
+            return s
+    return None
+
+
+# ===== LLM（form / discover / level4 / talk） =====
 
 _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（作問）」をするのを助ける先生です。
-子どもが同じ式（例：18÷3）から、いろいろな種類のお話を作れるように導きます。
+子どもは、式 {expression} になるお話を作っています。
 
-# あなたのゴール
-子どもに「数量関係の構造的理解」を深めさせること。
-具体的には、同じ式でも【分ける話（等分除）】【分ける話（包含除）】
-【くらべる話（倍）】という3つの違う構造があることに気づかせ、
-まだ作っていない構造のお話を、子ども自身の力で作れるように促すこと。
+# 絶対に守る境界（これを破ると研究が成立しない）
+- 完成した問題文、またはその骨格を渡さない。そのまま書き写せば問題文になる一文を出してはならない。
+- 「だれが・なにを・なんこ・どうする」のような穴うめの型を与えない。
+- 構造の名前（等分除・包含除・倍）を子どもに見せない。「どんな種類のお話か」を分類して伝えない。
+- 数量関係（だれが何をどう分けるか・何と何を比べるか）を渡さない。
+  「{dividend}こを{divisor}こずつ」「{divisor}人で分ける」のように、数と数の関係を含む言い方は禁止。
+- 「何を求めたか」「1つ分」「いくつ分」「何倍」などの言葉は、level4 以外では使わない。
+- 答え（数値 {quotient}）を教えない。
+- 1〜2文で短く。やさしく、はげます口調。
 
-# 3つの構造
-- 等分除：全体を何人かに同じ数ずつ分けて「1人分」をさがす（□×3=18の□）
-- 包含除：全体を何こずつかに分けて「何人分」をさがす（3×□=18の□）
-- 倍　　：2つの大きさをくらべて「何倍」かをさがす（くらべる話）
+# 支援の段階（main.py が決めて渡す。これに従う）
+- form：お話が成立していない。足りていない点を1つだけ、問いかけの形で返す。
+  判定理由を参考に「何を聞いているのかが書いてあるかな？」「そのお話、{expression} の式になるかな？」のように
+  直し方の方向だけを示す。正しい問題文の例は書かない。子どもの文の一部（「〜」と書いてあるね）を引いてもよい。
+- discover：新しい種類のお話ができた。称賛だけを返す。お話の題材（あめ・リボン・班 など）に触れてほめてよいが、
+  「何を求めたか」「どんな種類か」「次は何を作るか」は一切言わない。次の構造を名指ししない。
+  ★「分ける」「配る」「くらべる」「〜ずつ」「何倍」など、お話の中の操作や数量関係を言い当てる言葉も使わない
+  （「4人に分けるところがいいね」「長さをくらべるお話だね」は不可）。ほめるのは題材と、作れたこと自体だけ。
+- level4：目標（3つの聞き方があること）は伝わったが、場面が思い浮かばない状態。
+  「場面」を【素材（何の話か）】と【数量関係（だれが何をどう分けるか）】に分け、素材にだけ触れる。
+  子どもの身近な場面（教室・きゅうしょく・体育・家・お店・遠足）から、素材を思い出させる問いかけをする。
+  OK例：「教室にあるもので、{dividend}こあるものって何かな？」「きゅうしょくの時間だと、どんな場面が思いつく？」
+  NG例：「{dividend}このあめを1人に{divisor}こずつ配ったら…みたいなお話はどう？」（数量関係を丸ごと渡している）
+  まだ作れていない聞き方（下に示す）を意識して素材を選んでよいが、数量関係は書かない。
+- talk：作問以外の入力（質問・つぶやき・こまった・あいさつ）。やさしく短く受け止め、作問にもどれるよう軽くうながす。
+  構造の名前や「何を求めるか」は教えない。「どんなさがし方がある？」と聞かれても具体的には答えず、自分で考えるよう返す。
 
-# あなたが受け取る情報
-- 子どもの発話
-- この発話が「作問」か「対話」かの区別
-- 直近の作問の判定結果（成立しているか／どの構造か／向きが正しいか）
-- これまでに作れた構造のリスト（信号機の点灯状態）
-- 直近のやりとりの履歴
-- いまの「支援の段階」（下記のどれか）
-
-# 支援の段階（最重要・これに従って声かけを変える）
-- discover（新しい構造ができた）：まず称賛し、「何をさがしたか」を短い言葉で意味づける。
-  ★ここでは、次に作る構造を絶対に名指ししない。答えの方向を渡さない。
-  かわりに「ほかにどんなさがし方があるかな？」のように問いかけ、子ども自身に気づかせる。
-- hint1（同じ構造を1回くり返した）：図はまだ出さない。
-  「前のお話と、さがしているものは同じかな？」のように、くり返しに気づかせる
-  問いかけだけにとどめる。次の構造の名前や求め方には触れない。
-- hint2（くり返しが続く／「同じ話じゃないの？」「わからない」等）：図はまだ出さない。
-  かわりに“比べる軸”そのものを転換させる。子どもは題材（りんご→えんぴつ等、話の
-  中身）で「違うお話のつもり」になっていることが多い。題材ではなく「何をさがして
-  いるか（数量関係）」で比べればさっきと同じだと気づけるよう、比較の軸を
-  はっきり言葉で示す（例：「題材は変わったけど、さがしているものは同じかな？
-  ちがうかな？」のように、比べる対象を“話の中身”から“さがしているもの”へ
-  はっきり切りかえて問いかける）。次に何をさがせばよいかはまだ名指ししない。
-- hint3（hint2でも変化がない／混乱がくり返される）：テープ図を提示する段階。
-  この段階のメッセージと図はコード側が決定論的に生成するため、あなたが
-  呼ばれることは通常ない。万一この段階であなたが呼ばれた場合も、図は出さず、
-  hint2と同様に短く問いかけるだけにとどめる。
-- form（お話が成立していない）：足りない要素を1つだけ問いかける。
-- goal（3つの構造ができた）：3つとも答えは同じでも「さがすもの」が違うことを確認する。
-- talk（その他の質問・つぶやき）：やさしく短く受け止め、作問にもどれるよう軽くうながす。
-  ★ここで構造の名前や「何をさがすか」を教えてはいけない（それはhint1〜3の役目）。
-  「どんな探し方がある？」と聞かれても、具体的には答えず、自分で考えるよう返す。
-
-# 「同じ話じゃないの？」と言われたとき
-題材で区別しようとして、構造で区別できていないサイン。support_levelは
-通常hint2以上になっている。図は使わず、「何をさがしているか（さがし方）」で見れば
-同じだと気づかせる問いかけで、比較の軸を題材から数量関係へ切りかえる。
-
-# 向きが逆（倍の逆立式など）のとき
-構造は合うが基準量と比較量を取りちがえている。どちらをもとにするかに気づかせる。
-
-# 図を出す判断（figureフィールド）
-支援は【言葉が主役・図は補助】。基本は短い言葉で導く。次のときだけ figure に構造名を入れる。
-- discover：今できた構造（"tobun"/"hougan"/"bai"）を入れる。
-- hint1：null（図はまだ出さない）。
-- hint2：null（図はまだ出さない。この段階は図ではなく“比較の軸”を言葉で転換させる段階）。
-- hint3：null（この段階のテープ図はコード側が決定論的に生成する。あなたは出さない）。
-- goal："all"。
-- form / talk：常に null。図を出すかどうかはmain.pyが決めるhint1〜3にまかせ、
-  ここでは絶対に出さない。
-
-# 文字づかいのルール
+# 文字づかい
 {KANJI_RULE}
 
-# その他のルール（厳守）
-- 1〜2文で短く。長い説明はしない。
-- 答え（数や、完成した問題文そのもの）は絶対に教えない。
-- 「だれが・なにを・なんこ・どうする」のような穴うめの型を与えない。
-- hint3でも、そのまま書き写せば問題文になってしまうような完成した一文は渡さない。
-  「何をさがすか」という視点のちがいだけを短く示し、文づくりは子どもに残す。
-- やさしく、はげます口調。
-
-# 出力（JSONのみ）
+# 出力（JSONのみ。JSON以外の文字は出力しない）
 {
   "message": "子どもへの声かけ（1〜2文）",
-  "figure": "tobun" | "hougan" | "bai" | "all" | null,
-  "target_structure": "次に作ってほしい構造（tobun/hougan/bai）または null",
-  "state": "読み取った子どもの状態（ログ用）"
+  "state": "読み取った子どもの状態（ログ用・短く）"
 }"""
 
-SYSTEM_PROMPT = _RAW_PROMPT.replace("{KANJI_RULE}", KANJI_RULE)
+_ISSUE_JA = {
+    "scene_contradiction": "場面矛盾：問いの答えが場面の中ですでに与えられている、または場面と問いの向きがずれている",
+    "wrong_number": "式が {expression} にならない（数値がちがう・逆になっている）",
+    "wrong_operation": "わり算ではなく、かけ算・たし算・ひき算の問題になっている",
+    "incomplete_text": "文が途中で切れていて、求める量が特定できない",
+    "no_question": "場面だけで、何を求めるかが書かれていない",
+    "not_problem": "場面の記述がなく、文章題として成立していない",
+}
 
 
-def _history_labels(history: list[str]) -> str:
-    if not history:
-        return "まだ何も作れていない"
-    return "・".join(STRUCTURE_JP.get(h, h) for h in history)
-
-
-def _build_situation(input_kind: str, jr: dict | None) -> str:
-    """直近の作問の判定結果を、モデルが読める説明文にする。"""
-    if input_kind == "taiwa" or not jr:
-        return "これは対話（質問・つぶやき・こまった等）です。新しい作問ではありません。"
-    if not jr.get("valid"):
-        issue = jr.get("issue")
-        if issue == "reversed":
-            return "作問したが、倍の向きが逆（基準量と比較量を取りちがえている）。式が18÷3にならない。"
-        if issue == "wrong_number":
-            return "作問したが、式が18÷3にならない（数値や演算がちがう）。"
-        return "作問したが、文章題として成立していない（要素が欠けている・意味が読めない）。"
-    label = STRUCTURE_JP.get(jr.get("structure"), jr.get("structure"))
-    if jr.get("completes_all"):
-        return f"作問成立。構造は{label}。これで3つの構造がすべてそろった（ゴール到達）。"
-    if jr.get("is_new"):
-        return f"作問成立。構造は{label}。これは新しく作れた構造。"
-    return f"作問成立。構造は{label}。ただしこの構造はすでに作ったことがある（同じ構造のくり返し・停滞）。"
+def _build_system(expression: str) -> str:
+    dividend, divisor = parse_expression(expression)
+    return (_RAW_PROMPT
+            .replace("{KANJI_RULE}", KANJI_RULE)
+            .replace("{expression}", f"{dividend} ÷ {divisor}")
+            .replace("{dividend}", str(dividend))
+            .replace("{divisor}", str(divisor))
+            .replace("{quotient}", str(dividend // divisor)))
 
 
 def _build_history(recent_turns: list[dict] | None) -> str:
@@ -186,7 +196,6 @@ def _build_history(recent_turns: list[dict] | None) -> str:
 
 
 def _text_from(response) -> str:
-    """応答から最初の text ブロックを取り出す（思考ブロック混入への保険）。"""
     for block in response.content:
         if getattr(block, "type", None) == "text":
             return block.text
@@ -202,117 +211,177 @@ def _parse(raw: str) -> dict:
     return json.loads(raw)
 
 
-_STRUCTURE_ORDER = ("tobun", "hougan", "bai")
+# ---- コード側ガード ----
+_BANNED_ALWAYS = ("等分除", "包含除", "倍の話", "倍のお話", "くらべる話", "分ける話", "構造", "何を求め", "求める量")
+_BANNED_UNKNOWN_WORDS = ("1つ分", "１つ分", "一つ分", "1人分", "１人分", "一人分", "いくつ分",
+                         "何倍", "なんばい", "もとの大きさ", "もとにする", "1つあたり", "１つあたり",
+                         "何人分", "何こ分", "さがしているもの", "さがすもの")
+_BANNED_LEVEL4 = ("ずつ",)
+# discover では操作・数量関係を言い当てる言葉も禁止（種類の分類を暗に伝えてしまうため）
+_BANNED_DISCOVER = ("分け", "配", "くらべ", "比べ", "ずつ", "等分", "まとめ")
 
 
-def _pick_unreached_structure(history: list[str]) -> str | None:
-    """信号機がまだ点いていない構造をひとつ、決定論的な固定順で選ぶ。"""
-    for s in _STRUCTURE_ORDER:
-        if s not in history:
-            return s
+def _has_both_numbers(text: str, dividend: int, divisor: int) -> bool:
+    def present(n: int) -> bool:
+        return re.search(rf"(?<![0-9]){n}(?![0-9])", text) is not None
+    return present(dividend) and present(divisor)
+
+
+def violates_boundary(message: str, support_level: str, expression: str) -> str | None:
+    """境界を破っていれば理由を返す（None なら合格）。"""
+    for w in _BANNED_ALWAYS:
+        if w in message:
+            return f"banned:{w}"
+    if support_level in ("discover", "talk", "form"):
+        for w in _BANNED_UNKNOWN_WORDS:
+            if w in message:
+                return f"banned_unknown:{w}"
+    if support_level == "level4":
+        for w in _BANNED_LEVEL4:
+            if w in message:
+                return f"banned_level4:{w}"
+    if support_level == "discover":
+        for w in _BANNED_DISCOVER:
+            if w in message:
+                return f"banned_discover:{w}"
+    if support_level in ("discover", "talk", "level4"):
+        dividend, divisor = parse_expression(expression)
+        if _has_both_numbers(message, dividend, divisor):
+            return "both_numbers"
+    if len(message) > 120:
+        return "too_long"
     return None
 
 
-def _tape_diagram_payload(structure: str) -> dict:
-    """hint3で提示するテープ図のJSON。18÷3固定の数値のみで組み立てる。
-    物語文は一切含めない（呼び出し側はこの戻り値以外に本文を生成しない）。
-    """
-    if structure == "tobun":
-        known, unknown = {"全体量": DIVIDEND, "いくつ分": DIVISOR}, "1あたり量"
-    elif structure == "hougan":
-        known, unknown = {"全体量": DIVIDEND, "1あたり量": DIVISOR}, "いくつ分"
-    else:  # bai
-        known, unknown = {"比較量": DIVIDEND, "基準量": DIVISOR}, "倍"
-    return {
-        "type": "tape_diagram",
-        "structure": STRUCTURE_LABEL_JA[structure],
-        "known": known,
-        "unknown": unknown,
-    }
+def _fallback(support_level: str, judge_result: dict | None, expression: str) -> str:
+    dividend, divisor = parse_expression(expression)
+    expr = f"{dividend} ÷ {divisor}"
+    if support_level == "form":
+        issue = (judge_result or {}).get("issue")
+        return FORM_FALLBACK.get(issue, FORM_FALLBACK["not_problem"]).replace("{expression}", expr)
+    if support_level == "discover":
+        return DISCOVER_FALLBACK
+    if support_level == "level4":
+        return LEVEL4_FALLBACK.replace("{dividend}", str(dividend))
+    return TALK_FALLBACK
 
 
-def _build_tape_diagram(history: list[str]) -> dict | None:
-    """hint3の応答をLLMを介さずコード側だけで決定論的に生成する。
+def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
+                 history: list[str], recent_turns: list[dict] | None,
+                 support_level: str, expression: str, target_structure: str | None) -> dict:
+    dividend, divisor = parse_expression(expression)
+    expr = f"{dividend} ÷ {divisor}"
 
-    未到達構造が無い（理論上goalで止まるはずの縁）場合は None を返し、
-    呼び出し側は通常のLLM対話にフォールバックする。
-    """
-    structure = _pick_unreached_structure(history)
-    if not structure:
-        return None
-    return {
-        "message": TAPE_DIAGRAM_MESSAGE,
-        "figure": None,
-        "target_structure": structure,
-        "state": "hint3_tape_diagram",
-        "tape_diagram": _tape_diagram_payload(structure),
-    }
+    if input_kind == "taiwa" or not judge_result:
+        situation = "これは対話（質問・つぶやき・こまった等）です。新しい作問ではありません。"
+    elif not judge_result.get("valid"):
+        issue = judge_result.get("issue")
+        situation = "作問したが成立していない。判定理由：" + _ISSUE_JA.get(issue, "文章題として成立していない").replace("{expression}", expr)
+    elif judge_result.get("is_new"):
+        situation = "作問成立。これまでにない新しい聞き方のお話ができた（称賛のみ。中身の分類は言わない）。"
+    else:
+        situation = "作問成立。ただし、すでに作ったことのある聞き方のくり返し。"
 
-
-def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
-             history: list[str], recent_turns: list[dict] | None,
-             support_level: str = "talk") -> dict:
-    """児童向けの声かけを生成する。
-
-    support_level は main.py が決める支援の段階（form/discover/hint1/hint2/hint3/goal/talk）。
-    戻り値: {"message", "figure", "target_structure", "state", "tape_diagram"}
-    パース失敗が続いた場合は message にフォールバック文言を入れて返す。
-
-    hint3（停滞3回目以降）は物語文を絶対に生成してはいけない安全境界のため、
-    LLMを一切呼ばずコード側の _build_tape_diagram だけで応答を組み立てる。
-    """
-    if support_level == "hint3":
-        tape = _build_tape_diagram(history)
-        if tape:
-            return tape
-        # 3構造すべて到達済みなのにhint3が来た場合（本来はgoalで止まる想定の保険）。
-        # 未到達構造が無いのでテープ図は作れず、通常のLLM対話にフォールバックする。
+    reached = len(history)
+    extra = ""
+    if support_level == "level4" and target_structure:
+        extra = f"\nまだ作れていない聞き方: 「{QUESTION_JA[target_structure]}」（この聞き方に向く素材を思い出させる。数量関係は書かない）"
 
     user_content = f"""子どもの発話: {child_message}
 この発話の区別: {"作問" if input_kind == "sakumon" else "対話"}
-いまの支援の段階: {SUPPORT_LEVEL_JP.get(support_level, support_level)}
+いまの支援の段階: {support_level}
 
 直近の作問の判定結果:
-{_build_situation(input_kind, judge_result)}
+{situation}
 
-これまでに作れた構造（信号機の点灯状態）: {_history_labels(history)}
+これまでに作れた聞き方の数: {reached} / 3{extra}
 
 直近のやりとりの履歴:
 {_build_history(recent_turns)}"""
 
+    system = _build_system(expression)
     for attempt in range(2):  # 1回リトライ
         try:
             response = _client.messages.create(
                 model=MODEL,
-                max_tokens=512,
-                thinking={"type": "disabled"},  # 短い声かけに思考は不要（sonnet-5は既定でonのため明示off）
-                system=SYSTEM_PROMPT,
+                max_tokens=400,
+                thinking={"type": "disabled"},
+                system=system,
                 messages=[{"role": "user", "content": user_content}],
             )
             result = _parse(_text_from(response))
-            message = result.get("message")
-            if message:
-                figure = result.get("figure")
-                if figure not in ("tobun", "hougan", "bai", "all"):
-                    figure = None
-                # form/talk/hint1/hint2/hint3では図を出さない。プロンプト任せにせずコード側でも強制する。
-                # （hint3は通常上の短絡で処理済みだが、フォールバック経路の保険として含める）
-                if support_level in ("form", "talk", "hint1", "hint2", "hint3"):
-                    figure = None
-                target = result.get("target_structure")
-                if target not in ("tobun", "hougan", "bai"):
-                    target = None
-                return {
-                    "message": message,
-                    "figure": figure,
-                    "target_structure": target,
-                    "state": result.get("state"),
-                    "tape_diagram": None,
-                }
+            message = (result.get("message") or "").strip()
+            if not message:
+                continue
+            reason = violates_boundary(message, support_level, expression)
+            if reason:
+                print(f"[ai_dialogue] boundary violation ({support_level}, {reason}): {message}")
+                continue  # リトライ（2回目も違反なら定型文へ）
+            return {"message": message, "state": result.get("state") or support_level}
         except Exception as e:
             print(f"[ai_dialogue] dialogue failed (attempt {attempt + 1}): {type(e).__name__}: {e}")
 
-    return {
-        "message": FALLBACK_MESSAGE, "figure": None, "target_structure": None,
-        "state": "fallback", "tape_diagram": None,
-    }
+    return {"message": _fallback(support_level, judge_result, expression), "state": f"{support_level}_fallback"}
+
+
+# ===== 入口 =====
+
+def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
+             history: list[str], recent_turns: list[dict] | None,
+             support_level: str, expression: str,
+             problems: list[dict] | None = None,
+             target_structure: str | None = None,
+             first_goal: bool = True) -> dict:
+    """児童向けの声かけを組み立てる。
+
+    戻り値: {"message", "buttons", "figure", "target_structure", "state", "tape_diagram"}
+    figure / tape_diagram は ENABLE_FIGURES=False のため常に None。
+    """
+    base = {"buttons": None, "figure": None, "target_structure": target_structure, "tape_diagram": None}
+    problems = problems or []
+    current_structure = (judge_result or {}).get("structure")
+
+    if support_level == "none":
+        return {**base, "message": ACK_MESSAGE, "state": "no_support_phase"}
+    if support_level == "level1":
+        return {**base, "message": level1_message(problems), "state": "level1_list"}
+    if support_level == "level2":
+        return {**base, "message": level2_message(problems, current_structure),
+                "buttons": list(LEVEL2_BUTTONS), "state": "level2_question"}
+    if support_level == "level3":
+        return {**base, "message": level3_message(), "state": "level3_unknowns"}
+    if support_level == "goal":
+        return {**base, "message": goal_message(first_goal), "state": "goal"}
+    if support_level in ("form", "discover", "level4", "talk"):
+        out = _llm_message(child_message, input_kind, judge_result, history, recent_turns,
+                           support_level, expression, target_structure)
+        return {**base, **out}
+    # 想定外の水準（保険）
+    return {**base, "message": FALLBACK_MESSAGE, "state": "unknown_level"}
+
+
+# ===== 以下、図の生成（ENABLE_FIGURES=False のため呼ばれない。後から戻せるように残す） =====
+
+STRUCTURE_LABEL_JA = {"tobun": "等分除", "hougan": "包含除", "bai": "倍"}
+TAPE_DIAGRAM_MESSAGE = "このテープ図に合うお話を考えてみよう。"
+
+
+def _tape_diagram_payload(structure: str, dividend: int, divisor: int) -> dict:
+    if structure == "tobun":
+        known, unknown = {"全体量": dividend, "いくつ分": divisor}, "1あたり量"
+    elif structure == "hougan":
+        known, unknown = {"全体量": dividend, "1あたり量": divisor}, "いくつ分"
+    else:  # bai
+        known, unknown = {"比較量": dividend, "基準量": divisor}, "倍"
+    return {"type": "tape_diagram", "structure": STRUCTURE_LABEL_JA[structure], "known": known, "unknown": unknown}
+
+
+def _build_tape_diagram(history: list[str], expression: str) -> dict | None:
+    if not ENABLE_FIGURES:
+        return None
+    structure = pick_unreached_structure(history)
+    if not structure:
+        return None
+    dividend, divisor = parse_expression(expression)
+    return {"message": TAPE_DIAGRAM_MESSAGE, "figure": None, "target_structure": structure,
+            "state": "tape_diagram", "tape_diagram": _tape_diagram_payload(structure, dividend, divisor)}

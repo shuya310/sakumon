@@ -5,7 +5,8 @@
 児童向けの声かけは ai_dialogue が生成する）。
 
 判定は3層（成立性 → 構造 → 求める量と整合チェック）をプロンプト内で明示的に分ける。
-出力はJSONのみ。パース失敗時は1回リトライし、それでも失敗したら issue="error" を返す。
+出力は structured outputs（output_config.format）で JSON に固定する。
+パース失敗時は1回リトライし、それでも失敗したら issue="error" を返す。
 
 戻り値:
   {"valid": bool,
@@ -15,12 +16,12 @@
             | "wrong_operation" | "no_question" | "not_problem"}
 """
 
-import json
 import os
 
 import anthropic
 
 from config import MODEL, parse_expression
+from llm_json import extract_json
 
 _client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
@@ -28,6 +29,29 @@ ALL_STRUCTURES = ("tobun", "hougan", "bai")
 UNKNOWNS = ("one_unit", "num_units", "ratio", "base", "rate")
 ISSUES = ("scene_contradiction", "wrong_number", "incomplete_text",
           "wrong_operation", "no_question", "not_problem")
+
+# structured outputs（output_config.format）のスキーマ。
+# 「JSONだけ返す」と指示してもモデルが前置きの考察を書くことがあり、その分で max_tokens を
+# 使い切って JSON が途中で切れる＝判定が error になっていた。スキーマで縛れば前置きは出せない。
+OUTPUT_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            # reasoning を先頭に置いて、判定前に考える場所をスキーマの中に用意する。
+            # （structured outputs はプロパティの順に生成されるため、順序に意味がある。
+            #   考える場所がないと3層の判定を飛ばして即答し、成立している作問を落としやすい）
+            "reasoning": {"type": "string"},
+            "valid": {"type": "boolean"},
+            "structure": {"type": "string", "enum": [*ALL_STRUCTURES, "invalid"]},
+            # null 許容の enum は anyOf で書く（type を配列にすると 400 になる）
+            "unknown": {"anyOf": [{"type": "string", "enum": list(UNKNOWNS)}, {"type": "null"}]},
+            "issue": {"anyOf": [{"type": "string", "enum": list(ISSUES)}, {"type": "null"}]},
+        },
+        "required": ["reasoning", "valid", "structure", "unknown", "issue"],
+        "additionalProperties": False,
+    },
+}
 
 # structure と unknown の整合表。矛盾したら structure を優先し、先頭の unknown に補正する。
 UNKNOWN_FOR_STRUCTURE = {
@@ -120,6 +144,7 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
 
 ## 返すJSON（この形式のみ）
 {
+  "reasoning": "第1層→第2層→第3層の順に、簡潔に判断の根拠（2〜3文）",
   "valid": true or false,
   "structure": "tobun" or "hougan" or "bai" or "invalid",
   "unknown": "one_unit" or "num_units" or "ratio" or "base" or "rate" or null,
@@ -142,15 +167,6 @@ def _text_from(response) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise ValueError("no text block in response")
-
-
-def _parse(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
 
 
 def normalize(result: dict) -> dict:
@@ -184,12 +200,15 @@ def judge(message: str, expression: str) -> dict:
         try:
             response = _client.messages.create(
                 model=MODEL,
-                max_tokens=256,
+                max_tokens=512,
                 thinking={"type": "disabled"},  # sonnet-5 は既定でonのため明示off
                 system=system,
+                output_config={"format": OUTPUT_SCHEMA},
                 messages=[{"role": "user", "content": user_content}],
             )
-            return normalize(_parse(_text_from(response)))
+            if response.stop_reason == "max_tokens":
+                raise ValueError("response truncated (max_tokens)")
+            return normalize(extract_json(_text_from(response)))
         except Exception as e:
             last_err = e
             print(f"[ai_judge] judge failed (attempt {attempt + 1}): {type(e).__name__}: {e}")

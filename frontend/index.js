@@ -306,10 +306,12 @@ function renderConversation(conversation) {
 // ===== 右パネル =====
 function updatePanels() {
   const show = state.showSupport;
-  // 信号機は水準3（求める量の明示）到達後、または3つそろった後だけ見せる
+  // 信号機は水準3（求める量の明示）到達後、または3つそろった後だけ見せる。
+  // 水準3の声かけが「聞けることは3つある」と伝える回で、空いた枠を見せる意味が生まれる。
   document.getElementById("lights-card").hidden = !(show && (state.uiLevel >= 3 || state.allReached));
-  // 作った問題リストは水準1（産出一覧）到達後だけ見せる
-  document.getElementById("problems-card").hidden = !(show && state.uiLevel >= 1);
+  // 作った問題リストはフェーズ2のあいだ常に見せる（自分の産出を読み返せる状態を保つ）。
+  // 水準1の声かけは「右を読みかえしてみよう」と視線を送る役割になる。
+  document.getElementById("problems-card").hidden = !show;
 
   for (let i = 0; i < 3; i++) document.getElementById(`light-${i}`).classList.remove("on");
   state.history.forEach(s => {

@@ -22,13 +22,13 @@
 コードは残すが呼ばれない。
 """
 
-import json
 import os
 import re
 
 import anthropic
 
 from config import MODEL, ENABLE_FIGURES, parse_expression
+from llm_json import extract_json
 from kanji_rule import KANJI_RULE
 
 _client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -50,6 +50,23 @@ UNKNOWN_JA = {
 }
 
 LEVEL2_BUTTONS = ["同じ", "ちがう"]
+
+# structured outputs（output_config.format）のスキーマ。JSON 以外を書けなくする。
+# check を先頭に置いて、声かけを書く前に境界（構造名・数量関係・答えを渡さない）を
+# 自分で確認させる（プロパティは順に生成されるので、順序に意味がある）。
+OUTPUT_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "check": {"type": "string"},
+            "message": {"type": "string"},
+            "state": {"type": "string"},
+        },
+        "required": ["check", "message", "state"],
+        "additionalProperties": False,
+    },
+}
 
 # ===== 定型文（LLM不使用） =====
 
@@ -155,6 +172,7 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 
 # 出力（JSONのみ。JSON以外の文字は出力しない）
 {
+  "check": "これから書く声かけが境界を破っていないかの自己確認（1文・ログ用）",
   "message": "子どもへの声かけ（1〜2文）",
   "state": "読み取った子どもの状態（ログ用・短く）"
 }"""
@@ -196,15 +214,6 @@ def _text_from(response) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise ValueError("no text block in response")
-
-
-def _parse(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
 
 
 # ---- コード側ガード ----
@@ -300,12 +309,15 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
         try:
             response = _client.messages.create(
                 model=MODEL,
-                max_tokens=400,
+                max_tokens=512,
                 thinking={"type": "disabled"},
                 system=system,
+                output_config={"format": OUTPUT_SCHEMA},
                 messages=[{"role": "user", "content": user_content}],
             )
-            result = _parse(_text_from(response))
+            if response.stop_reason == "max_tokens":
+                raise ValueError("response truncated (max_tokens)")
+            result = extract_json(_text_from(response))
             message = (result.get("message") or "").strip()
             if not message:
                 continue

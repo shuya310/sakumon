@@ -48,22 +48,14 @@
       </div>
     </div>
 
-    <!-- 信号機：求める量のラベル付き3灯（構造名は出さない）。フェーズ2で水準3到達後に表示 -->
+    <!-- 信号機：ラベルなしの3灯。未到達は空白のまま見せ、何が空いているかは明示しない。
+         フェーズ2で水準3到達後に表示 -->
     <div class="panel-card" id="lights-card" hidden>
       <h3>聞けること</h3>
       <div class="lights">
-        <div class="light-wrap">
-          <div class="light" id="light-0">⭐</div>
-          <div class="light-label">1つ分</div>
-        </div>
-        <div class="light-wrap">
-          <div class="light" id="light-1">⭐</div>
-          <div class="light-label">いくつ分</div>
-        </div>
-        <div class="light-wrap">
-          <div class="light" id="light-2">⭐</div>
-          <div class="light-label">何倍</div>
-        </div>
+        <div class="light" id="light-0">⭐</div>
+        <div class="light" id="light-1">⭐</div>
+        <div class="light" id="light-2">⭐</div>
       </div>
       <div class="lights-label" id="lights-label">あと 3 つ</div>
     </div>

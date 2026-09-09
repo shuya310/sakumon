@@ -137,106 +137,123 @@ with client:
     assert logsB[1]["learner_state"] == "S0"
     print("OK 学習者状態: 2問連続不成立で S0")
 
-    # ===== フェーズ2へ切替（同一セッション） =====
+    # ===== フェーズ2へ切替（別セッション：フェーズ1は引き継がない） =====
     admin_post("/admin/api/phase", phase=2)
     assert client.get("/api/config").json()["phase"] == 2
     a3 = post("/api/session/new", user_id="01").json()
-    assert a3["session_id"] == sidA, "フェーズ1→2は同一セッション"
-    assert a3["show_support"] is True and a3["history"] == ["tobun"] and a3["ui_level"] == 0
-    assert len(a3["problems"]) == 2
+    assert a3["session_id"] != sidA, "フェーズ2は新しいセッション"
+    assert post("/api/session/new", user_id="01").json()["session_id"] == a3["session_id"], \
+        "フェーズ2で二重に呼んでも重複作成しない"
+    sid2A = a3["session_id"]
+    assert a3["show_support"] is True and a3["ui_level"] == 0
+    assert a3["history"] == [] and a3["problems"] == [] and a3["conversation"] == [], \
+        "フェーズ1の産出・信号機・会話はフェーズ2に引き継がない"
+    post("/api/session/new", user_id="03")   # 03 もフェーズ2に入場（提出はしない）
+    print("OK フェーズ2: 新セッションで開始し、フェーズ1の産出・到達構造・会話を引き継がない")
+
+    # 1問目（フェーズ2で最初の成立）→ 新構造なので discover
+    r = judge(sid2A, "01", "T: おりがみ24まいを4人で 1人分は")
+    assert r["display_type"] == "new_structure" and r["history"] == ["tobun"]
 
     # 反復 → level1（産出一覧は右パネルに誘導。チャットには列挙しない）
-    r = judge(sidA, "01", "T: ジュース24Lを4人で")
+    r = judge(sid2A, "01", "T: ジュース24Lを4人で")
     assert r["display_type"] == "level1", r
     assert r["message"] == "今までに 作った お話が、右に ならんでいるよ。\nもう一度 読みかえしてみよう。"
     assert r["highlight_problems"] is True
     assert "1つ分" not in r["message"] and r["ui_level"] == 1
     # 反復 → level2（2択ボタン）
-    r = judge(sidA, "01", "T: えんぴつ24本を4人で")
+    r = judge(sid2A, "01", "T: えんぴつ24本を4人で")
     assert r["display_type"] == "level2" and r["buttons"] == ["同じ", "ちがう"]
-    assert "この4つは、聞いていることが 同じかな？ ちがうかな？" in r["message"]
+    assert "この3つは、聞いていることが 同じかな？ ちがうかな？" in r["message"]
     assert r["highlight_problems"] is True
     # 「同じ」→ 水準は上がらない
-    r = judge(sidA, "01", "同じ", button="同じ")
+    r = judge(sid2A, "01", "同じ", button="同じ")
     assert r["display_type"] == "level2" and "ちがうことを聞くお話" in r["message"]
     # 反復 → level3（求める量の明示）
-    r = judge(sidA, "01", "T: リボン24cmを4人で")
+    r = judge(sid2A, "01", "T: リボン24cmを4人で")
     assert r["display_type"] == "level3" and "「1つ分はいくつ？」「いくつ分ある？」「何倍？」" in r["message"]
     assert r["ui_level"] == 3
     # 反復 → level4（LLM、target_structure=hougan）
-    r = judge(sidA, "01", "T: あめ24こを4人で")
+    r = judge(sid2A, "01", "T: あめ24こを4人で")
     assert r["display_type"] == "level4" and r["message"] == "[level4] llm"
     # 反復 → level4 のまま（上限）
-    r = judge(sidA, "01", "T: みかん24こを4人で")
+    r = judge(sid2A, "01", "T: みかん24こを4人で")
     assert r["display_type"] == "level4"
     # 新構造 → discover、水準リセット
-    r = judge(sidA, "01", "H: あめ24こを4こずつ")
+    r = judge(sid2A, "01", "H: あめ24こを4こずつ")
     assert r["display_type"] == "new_structure" and r["message"] == "[discover] llm"
     assert sorted(r["history"]) == ["hougan", "tobun"]
     # 反復 → level1 からやり直し
-    r = judge(sidA, "01", "H: クッキー24こを4こずつ")
+    r = judge(sid2A, "01", "H: クッキー24こを4こずつ")
     assert r["display_type"] == "level1"
     # 複数構造がまじった状態の level2 は反復した構造の番号を名指しする
-    r = judge(sidA, "01", "H: ジュース24Lを4Lずつ")
-    assert r["display_type"] == "level2" and "8ばんと9ばんと10ばんは、聞いていることが" in r["message"], r["message"]
+    r = judge(sid2A, "01", "H: ジュース24Lを4Lずつ")
+    assert r["display_type"] == "level2" and "7ばんと8ばんと9ばんは、聞いていることが" in r["message"], r["message"]
     # 「ちがう」→ 即時 level3（テキスト優先。ボタンは「同じ」を押してから書き換えた想定）
-    r = judge(sidA, "01", "ちがうと思う", button="同じ")
+    r = judge(sid2A, "01", "ちがうと思う", button="同じ")
     assert r["display_type"] == "level3"
     # 次の反復は level4
-    r = judge(sidA, "01", "H: えんぴつ24本を4本ずつ")
+    r = judge(sid2A, "01", "H: えんぴつ24本を4本ずつ")
     assert r["display_type"] == "level4"
     # 不成立 → form（水準は動かない）
-    r = judge(sidA, "01", "X: だめ")
+    r = judge(sid2A, "01", "X: だめ")
     assert r["display_type"] == "normal" and r["message"] == "[form] llm" and r["valid"] is False
     # 対話（困り表明）→ 水準を1段上げる。ここは上限なので level4
-    r = judge(sidA, "01", "むずかしい")
+    r = judge(sid2A, "01", "むずかしい")
     assert r["display_type"] == "level4" and r["message"] == "[level4] llm"
     # 対話（困りではないつぶやき）→ talk のまま
-    r = judge(sidA, "01", "きゅうしょく おいしかった")
+    r = judge(sid2A, "01", "きゅうしょく おいしかった")
     assert r["display_type"] == "normal" and r["message"] == "[talk] llm"
     # 3つ目 → goal（構造名は出さない）
-    r = judge(sidA, "01", "B: 24人は4人の何倍")
+    r = judge(sid2A, "01", "B: 24人は4人の何倍")
     assert r["display_type"] == "goal" and "3つとも作れたね" in r["message"] and r["all_reached"] is True
     assert "等分除" not in r["message"] and "倍の" not in r["message"]
-    r = judge(sidA, "01", "B: 24本は4本の何倍")
+    r = judge(sid2A, "01", "B: 24本は4本の何倍")
     assert r["display_type"] == "goal" and "もう3つとも" in r["message"]
     print("OK 水準遷移: 反復で 1→2→3→4（1提出1段階・上限4）、新構造で discover→1にリセット、"
           "『同じ』は据え置き・『ちがう』は即時3、不成立は form、goal は構造名なし")
 
-    logs = client.get(f"/admin/api/sessions/{sidA}", headers=AUTH).json()
-    p2 = [l for l in logs if l["phase"] == 2]
+    p2 = client.get(f"/admin/api/sessions/{sid2A}", headers=AUTH).json()
+    assert all(l["phase"] == 2 for l in p2), "フェーズ2のセッションにはフェーズ2のターンだけ"
     seq = [(l["input_type"], l["support_level"], l["is_new"]) for l in p2]
-    assert [s[1] for s in seq] == ["level1", "level2", "level2", "level3", "level4", "level4", "discover",
-                                   "level1", "level2", "level3", "level4", "form", "level4", "talk",
-                                   "goal", "goal"], seq
-    same_turn = p2[2]
+    assert [s[1] for s in seq] == ["discover", "level1", "level2", "level2", "level3", "level4", "level4",
+                                   "discover", "level1", "level2", "level3", "level4", "form", "level4",
+                                   "talk", "goal", "goal"], seq
+    same_turn = p2[3]
     assert same_turn["button_pressed"] == "同じ" and same_turn["message"] == "同じ"
-    diff_turn = p2[9]
+    diff_turn = p2[10]
     assert diff_turn["button_pressed"] == "同じ" and diff_turn["message"] == "ちがうと思う"
-    assert p2[4]["target_structure"] == "hougan"
-    assert p2[6]["learner_state"] == "S3", p2[6]["learner_state"]  # level4 直後の新構造 → S3（暫定）
-    assert all(l["support_level"] for l in logs), "support_level は全ターン必ず記録"
+    assert p2[5]["target_structure"] == "hougan"
+    assert p2[7]["learner_state"] == "S3", p2[7]["learner_state"]  # level4 直後の新構造 → S3（暫定）
+    assert all(l["support_level"] for l in p2), "support_level は全ターン必ず記録"
     print("OK ログ: 全ターンに support_level、ボタン値と送信文の両方、target_structure、S3暫定値")
 
     # 児童B（S0）：フェーズ2で不成立 → form のみ、成立で脱出
-    r = judge(sidB, "02", "X: c")
+    # フェーズ1で2問不成立でも、S0 はフェーズ2の提出だけで数え直す
+    sidB2 = post("/api/session/new", user_id="02").json()["session_id"]
+    assert sidB2 != sidB
+    r = judge(sidB2, "02", "X: c")
     assert r["display_type"] == "normal"
-    logsB = client.get(f"/admin/api/sessions/{sidB}", headers=AUTH).json()
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
+    assert logsB[-1]["learner_state"] == "S1" and logsB[-1]["support_level"] == "form", \
+        "フェーズ1の不成立は数えないので、フェーズ2の1問目だけでは S0 にならない"
+    r = judge(sidB2, "02", "X: d")
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
     assert logsB[-1]["learner_state"] == "S0" and logsB[-1]["support_level"] == "form"
-    r = judge(sidB, "02", "T: 成立")
-    logsB = client.get(f"/admin/api/sessions/{sidB}", headers=AUTH).json()
+    r = judge(sidB2, "02", "T: 成立")
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
     assert logsB[-1]["learner_state"] == "S1" and logsB[-1]["support_level"] == "discover"
     # judge エラー → フォールバック、S0 判定に数えない
-    r = judge(sidB, "02", "E: err")
+    r = judge(sidB2, "02", "E: err")
     assert r["message"] == ai_dialogue.FALLBACK_MESSAGE
-    logsB = client.get(f"/admin/api/sessions/{sidB}", headers=AUTH).json()
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
     assert logsB[-1]["support_level"] == "error" and logsB[-1]["issue"] == "error"
     print("OK S0: 不成立は form のみ、成立1問で脱出、judge エラーは error として記録")
 
     # ===== 教師画面 live =====
     live = client.get("/admin/api/live", headers=AUTH).json()
     users = {s["user_id"]: s for s in live["students"]}
-    assert users["01"]["submitted"] == 12 and users["01"]["valid"] == 11, users["01"]
+    assert users["01"]["submitted"] == 13 and users["01"]["valid"] == 12, users["01"]
     assert sorted(users["01"]["structures"]) == ["bai", "hougan", "tobun"]
     assert users["03"]["submitted"] == 0 and users["03"]["online"] is True  # ログインしただけ（提出0）
     assert users["01"]["online"] is True
@@ -255,9 +272,9 @@ with client:
     logs3 = client.get(f"/admin/api/sessions/{a4['session_id']}", headers=AUTH).json()
     assert logs3[0]["phase"] == 3 and logs3[0]["expression"] == "18 ÷ 3" and logs3[0]["is_new"] is True
     assert logs3[0]["stall_count"] == 0
-    # 誤操作で 3→2 に戻しても、フェーズ1・2のセッションに戻れる
+    # 誤操作で 3→2 に戻しても、フェーズ2のセッションに戻れる
     admin_post("/admin/api/phase", phase=2)
-    assert post("/api/session/new", user_id="01").json()["session_id"] == sidA
+    assert post("/api/session/new", user_id="01").json()["session_id"] == sid2A
     admin_post("/admin/api/phase", phase=3)
     print("OK フェーズ3: 別式・新セッション・信号機と停滞カウントはゼロから。判定はログのみ")
 
@@ -266,7 +283,7 @@ with client:
     cfg = client.get("/api/config").json()
     assert cfg["phase"] == 1 and cfg["run_id"] == 2
     a6 = post("/api/login", user_id="01").json()
-    assert a6["session_id"] not in (sidA, a4["session_id"]), "新しい回では旧セッションを拾わない"
+    assert a6["session_id"] not in (sidA, sid2A, a4["session_id"]), "新しい回では旧セッションを拾わない"
     print("OK 新しい回: run_id が進み、旧セッションを再開しない（データは残る）")
 
     # ===== 困り表明で支援水準が上がる（対話も停滞シグナルとして扱う） =====

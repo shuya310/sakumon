@@ -3,7 +3,7 @@
 // 描画コードは末尾に残してあるが、このフラグが false の間は呼ばれない。
 const ENABLE_FIGURES = false;
 
-const LIGHT_INDEX = { tobun: 0, hougan: 1, bai: 2 };   // 到達構造 → 灯の位置（ラベルは求める量）
+const LIGHT_INDEX = { tobun: 0, hougan: 1, bai: 2 };   // 到達構造 → 灯の位置（ラベルは出さない）
 
 const state = {
   userId: null,
@@ -159,7 +159,7 @@ async function pollConfig() {
 }
 
 // フェーズが変わったら：入力中のものは破棄し、「いったん おしまい」を見せてから
-// 現在のフェーズのセッションに入り直す（1→2は同一セッション、→3は新セッション）。
+// 新しいフェーズのセッションに入り直す（フェーズごとに別セッション＝チャットも作り直し）。
 async function handlePhaseChange(cfg) {
   state.switching = true;
   stopPolling();
@@ -188,7 +188,7 @@ function showPhaseBanner(cfg) {
   const sub = document.getElementById("phase-banner-sub");
   sub.textContent = cfg.phase === 3
     ? `つぎは「${cfg.expression}」で 作るよ`
-    : `つづきは このあと`;
+    : `つぎは 新しい 画面で 作るよ`;
   document.getElementById("phase-banner").hidden = false;
 }
 function hidePhaseBanner() {

@@ -173,8 +173,12 @@ def start_new_run() -> dict:
 # ===== セッション =====
 
 def _phase_group(phase: int) -> tuple[int, ...]:
-    """フェーズ1と2は同一セッション、フェーズ3は別セッション。"""
-    return (3,) if phase == 3 else (1, 2)
+    """フェーズごとに別セッション。
+
+    フェーズ1（事前・支援なし）で作った話はフェーズ1で完結させ、フェーズ2には引き継がない
+    （＝フェーズ2の支援は、フェーズ2で打った内容だけを根拠にする）。
+    """
+    return (phase,)
 
 
 def find_session(user_id: str, run_id: int, phase: int) -> int | None:
@@ -340,7 +344,7 @@ def get_last_turn(session_id: int) -> dict | None:
 
 
 def get_history(session_id: int) -> list[str]:
-    """到達済み構造（信号機）。フェーズ1・2は同一セッションなのでフェーズ1の到達も含む。"""
+    """到達済み構造（信号機）。セッションはフェーズごとなので、そのフェーズの到達だけを数える。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT DISTINCT structure FROM chat_logs

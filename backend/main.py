@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -57,7 +57,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+class _RevalidatingStaticFiles(StaticFiles):
+    """静的ファイルに Cache-Control: no-cache を付ける。
+
+    既定では Cache-Control が付かず、ブラウザが独自の推測でキャッシュを再利用してしまう
+    （＝デプロイしても古い index.js / admin.js が使われ続ける）。no-cache は
+    「毎回サーバに確認する（変わっていなければ304で軽い）」の意味で、no-store ではない。
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatingStaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+def _asset_version() -> str:
+    """frontend/ の js・css の最終更新時刻。HTMLの `?v=__V__` に埋め込む。
+
+    デプロイのたびに値が変わるので、ブラウザに残っている古いキャッシュを
+    確実に切れる（URLが変わる＝別ファイル扱いになる）。
+    """
+    try:
+        mtimes = [f.stat().st_mtime for f in FRONTEND_DIR.iterdir() if f.suffix in (".js", ".css")]
+        return str(int(max(mtimes))) if mtimes else "0"
+    except OSError:
+        return "0"
+
+
+def _html_page(filename: str) -> HTMLResponse:
+    """HTML本体はキャッシュさせない（中の ?v= を必ず最新にするため）。"""
+    path = FRONTEND_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"{filename} not found")
+    html = path.read_text(encoding="utf-8").replace("__V__", _asset_version())
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 # ===== Models =====
@@ -418,10 +454,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
 
 @app.get("/")
 def index():
-    html = FRONTEND_DIR / "index.html"
-    if not html.exists():
-        raise HTTPException(status_code=404, detail="index.html not found")
-    return FileResponse(html)
+    return _html_page("index.html")
 
 
 # ===== 管理者（HTTP Basic 認証） =====
@@ -442,10 +475,7 @@ admin = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
 
 @admin.get("")
 def admin_page():
-    html = FRONTEND_DIR / "admin.html"
-    if not html.exists():
-        raise HTTPException(status_code=404, detail="admin.html not found")
-    return FileResponse(html)
+    return _html_page("admin.html")
 
 
 @admin.get("/api/config")

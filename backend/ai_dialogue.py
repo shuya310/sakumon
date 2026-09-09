@@ -3,8 +3,8 @@
 支援水準は main.py が決定論的に決めて渡す。ここでは水準ごとに声かけを組み立てる。
 
   form     【水準0・不成立作問】成立性のフィードバック（LLM＋コード側ガード、失敗時は定型文）
-  level1   産出一覧を見せる（定型・LLM不使用）
-  level2   産出一覧＋「聞いていることは同じ？ちがう？」＋2択ボタン（定型・LLM不使用）
+  level1   右パネルの産出一覧に注意を向けさせる（定型・LLM不使用。一覧はチャットに列挙しない）
+  level2   同上＋「聞いていることは同じ？ちがう？」＋2択ボタン（定型・LLM不使用）
   level3   求める量の明示（定型・LLM不使用。信号機の空欄提示はフロント側）
   level4   場面想起の足場かけ（LLM＋コード側ガード、失敗時は定型文）
   discover 新構造が出た（称賛のみ。LLM＋ガード、失敗時は定型文）
@@ -51,38 +51,31 @@ UNKNOWN_JA = {
 
 LEVEL2_BUTTONS = ["同じ", "ちがう"]
 
-_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-
-
-def _circled(i: int) -> str:
-    return _CIRCLED[i] if i < len(_CIRCLED) else f"({i + 1})"
-
-
 # ===== 定型文（LLM不使用） =====
 
-def _problem_lines(problems: list[dict]) -> str:
-    return "\n".join(f"{_circled(i)} {p['text']}" for i, p in enumerate(problems))
-
-
-def level1_message(problems: list[dict]) -> str:
-    """そのセッションで成立した作問の問題文だけを並べる。求める量も構造名も添えない。"""
-    return "今までに作ったお話だよ。\n" + _problem_lines(problems)
-
-
-def level2_message(problems: list[dict], current_structure: str | None) -> str:
-    """産出一覧を再掲し、「聞いていることは同じ？ちがう？」と問う。
-
-    全部が同じ構造なら「この3つは」、複数構造がまじっていれば反復した構造の番号を名指しする
-    （「①と③は」）。正解が「ちがう」になる問いを出さないため。
-    """
+def _subject(problems: list[dict], current_structure: str | None) -> str:
+    """比較させる対象の呼び方。全部が同じ構造なら「この3つは」、複数構造がまじっていれば
+    反復した構造の番号を名指しする（「1ばんと3ばんは」）。正解が「ちがう」になる問いを出さないため。
+    番号は右パネルの通し番号（1.2.3…）に合わせる。"""
     n = len(problems)
     same_idx = [i for i, p in enumerate(problems) if p.get("structure") == current_structure]
     if current_structure and 2 <= len(same_idx) < n:
-        subject = "と".join(_circled(i) for i in same_idx) + "は"
-    else:
-        subject = f"この{n}つは"
-    return (level1_message(problems)
-            + f"\n\n{subject}、聞いていることが 同じかな？ ちがうかな？")
+        return "と".join(f"{i + 1}ばん" for i in same_idx) + "は"
+    return f"この{n}つは"
+
+
+def level1_message(problems: list[dict]) -> str:
+    """産出一覧そのものは右パネルに常設されているので、チャットには列挙しない。
+    読みかえす先（右パネル）に注意を向けるだけにする。
+    停滞中の児童に「たくさん作れている」と伝わらないよう、数はほめない。"""
+    return ("今までに 作った お話が、右に ならんでいるよ。\n"
+            "もう一度 読みかえしてみよう。")
+
+
+def level2_message(problems: list[dict], current_structure: str | None) -> str:
+    """右パネルの産出一覧を見させたうえで、「聞いていることは同じ？ちがう？」と問う。"""
+    return ("右の「作った お話」を 見てみよう。\n"
+            f"{_subject(problems, current_structure)}、聞いていることが 同じかな？ ちがうかな？")
 
 
 def level2_same_reply() -> str:
@@ -151,8 +144,11 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
   OK例：「教室にあるもので、{dividend}こあるものって何かな？」「きゅうしょくの時間だと、どんな場面が思いつく？」
   NG例：「{dividend}このあめを1人に{divisor}こずつ配ったら…みたいなお話はどう？」（数量関係を丸ごと渡している）
   まだ作れていない聞き方（下に示す）を意識して素材を選んでよいが、数量関係は書かない。
-- talk：作問以外の入力（質問・つぶやき・こまった・あいさつ）。やさしく短く受け止め、作問にもどれるよう軽くうながす。
-  構造の名前や「何を求めるか」は教えない。「どんなさがし方がある？」と聞かれても具体的には答えず、自分で考えるよう返す。
+- talk：作問以外の入力のうち、困り（「わからない」「どうしたら」等）ではないもの
+  （つぶやき・感想・あいさつ・確認）。やさしく短く受け止め、作問にもどれるよう軽くうながす。
+  構造の名前や「何を求めるか」は教えない。
+  ※困りの訴えは talk には来ない（main.py が支援水準を1段上げて構造支援に回す）。
+    ここで「自分で考えてみよう」と突き放して堂々めぐりにしないこと。
 
 # 文字づかい
 {KANJI_RULE}
@@ -334,20 +330,25 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              first_goal: bool = True) -> dict:
     """児童向けの声かけを組み立てる。
 
-    戻り値: {"message", "buttons", "figure", "target_structure", "state", "tape_diagram"}
+    戻り値: {"message", "buttons", "figure", "target_structure", "state", "tape_diagram",
+             "highlight_problems"}
     figure / tape_diagram は ENABLE_FIGURES=False のため常に None。
+    highlight_problems は右パネルの産出一覧に注意を向けさせたい水準（1・2）で True。
     """
-    base = {"buttons": None, "figure": None, "target_structure": target_structure, "tape_diagram": None}
+    base = {"buttons": None, "figure": None, "target_structure": target_structure,
+            "tape_diagram": None, "highlight_problems": False}
     problems = problems or []
     current_structure = (judge_result or {}).get("structure")
 
     if support_level == "none":
         return {**base, "message": ACK_MESSAGE, "state": "no_support_phase"}
     if support_level == "level1":
-        return {**base, "message": level1_message(problems), "state": "level1_list"}
+        return {**base, "message": level1_message(problems), "state": "level1_list",
+                "highlight_problems": True}
     if support_level == "level2":
         return {**base, "message": level2_message(problems, current_structure),
-                "buttons": list(LEVEL2_BUTTONS), "state": "level2_question"}
+                "buttons": list(LEVEL2_BUTTONS), "state": "level2_question",
+                "highlight_problems": True}
     if support_level == "level3":
         return {**base, "message": level3_message(), "state": "level3_unknowns"}
     if support_level == "goal":

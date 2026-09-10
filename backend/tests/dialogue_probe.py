@@ -1,4 +1,4 @@
-"""対話AI（form / discover / level4 / talk）の実出力と境界ガードの確認。実際に API を呼ぶ。"""
+"""対話AI（form / discover / level3 / talk）の実出力と境界ガードの確認。実際に API を呼ぶ。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -18,10 +18,10 @@ cases = [
      {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None, "is_new": True}, [], "discover", None),
     ("discover/bai", "赤いリボンは24cm、青いリボンは4cm。赤は青の何倍？", "sakumon",
      {"valid": True, "structure": "bai", "unknown": "ratio", "issue": None, "is_new": True}, ["tobun", "hougan"], "discover", None),
-    ("level4/target=bai", "ジュースが24Lあります。4人で分けると1人何Lですか", "sakumon",
-     {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None, "is_new": False}, ["tobun", "hougan"], "level4", "bai"),
-    ("level4/target=hougan", "みかんが24こあります。4人で分けると1人何こですか", "sakumon",
-     {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None, "is_new": False}, ["tobun"], "level4", "hougan"),
+    ("level3/target=bai", "ジュースが24Lあります。4人で分けると1人何Lですか", "sakumon",
+     {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None, "is_new": False}, ["tobun", "hougan"], "level3", "bai"),
+    ("level3/target=hougan", "みかんが24こあります。4人で分けると1人何こですか", "sakumon",
+     {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None, "is_new": False}, ["tobun"], "level3", "hougan"),
     ("talk/わからない", "わからない", "taiwa", None, ["tobun"], "talk", None),
     ("talk/さがし方", "どんなさがし方があるの？おしえて", "taiwa", None, ["tobun"], "talk", None),
     ("talk/あいさつ", "こんにちは", "taiwa", None, [], "talk", None),

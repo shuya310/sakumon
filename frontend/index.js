@@ -232,7 +232,7 @@ function addNotice(text) {
 
 const BUBBLE_CLASS = {
   new_structure: "new-structure",
-  level1: "hint", level2: "hint", level3: "hint", level4: "hint",
+  level1: "hint", level2: "hint", level3: "hint",
   hint1: "hint", hint2: "hint", hint3: "hint",
   goal: "clear", clear: "clear",
 };
@@ -306,9 +306,9 @@ function renderConversation(conversation) {
 // ===== 右パネル =====
 function updatePanels() {
   const show = state.showSupport;
-  // 信号機は水準3（求める量の明示）到達後、または3つそろった後だけ見せる。
-  // 水準3の声かけが「聞けることは3つある」と伝える回で、空いた枠を見せる意味が生まれる。
-  document.getElementById("lights-card").hidden = !(show && (state.uiLevel >= 3 || state.allReached));
+  // 信号機は水準2（未到達の求める量を1つ名指す）到達後、または3つそろった後だけ見せる。
+  // 声かけは「聞けること」を1つしか渡さないので、枠の数と空白はここで灯が受け持つ。
+  document.getElementById("lights-card").hidden = !(show && (state.uiLevel >= 2 || state.allReached));
   // 作った問題リストはフェーズ2のあいだ常に見せる（自分の産出を読み返せる状態を保つ）。
   // 水準1の声かけは「右を読みかえしてみよう」と視線を送る役割になる。
   document.getElementById("problems-card").hidden = !show;

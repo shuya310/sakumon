@@ -2,7 +2,7 @@
 
 - 式・フェーズは app_config（database.get_config）から取得する。ハードコードしない。
 - フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す。
-- フェーズ2：学習者状態（S0〜S3）と支援水準（form / level1〜4 / discover / goal / talk）を
+- フェーズ2：学習者状態（S0〜S3）と支援水準（form / level1〜3 / discover / goal / talk）を
   ここで決定論的に算出し、ai_dialogue に声かけを組み立てさせる。AIには判定させない。
   水準を上げるのは「成立作問の反復」と「対話での困り表明」の2つ（どちらも停滞のシグナル）。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
@@ -36,6 +36,7 @@ if not config.ADMIN_PASSWORD:
 
 STRUCTURES = {"tobun", "hougan", "bai"}
 LEVEL_NAMES = database.LEVEL_NAMES
+MAX_LEVEL = len(LEVEL_NAMES)          # 水準3（場面想起）が上限
 USER_ID_PATTERN = re.compile(r"^[0-9a-z]{2}$")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -227,7 +228,7 @@ def _learner_state(session_id: int, current_valid: bool | None, history_after: s
     return "S2"
 
 
-# ===== 水準2の問いへの応答検出 =====
+# ===== 水準1の問い（同じ？ちがう？）への応答検出 =====
 
 _DIFF_RE = re.compile(r"ちがう|違う|ちがい|違い|べつ|別")
 _SAME_RE = re.compile(r"同じ|おなじ|おんなじ|いっしょ|一緒")
@@ -274,14 +275,16 @@ def _stuck_support_level(session_id: int, history: list, learner_state: str,
     """困り表明を受けたときに返す支援水準。
 
     3構造そろっていれば上げる先がないので talk のまま。
-    まだ1問も成立していない／不成立が続いている（S0）ときは、産出の比較（水準1・2）が
-    成り立たないので場面想起（水準4）へ直行する。それ以外は作問の反復と同じく1段上げる。
+    まだ1問も成立していない／不成立が続いている（S0）ときは、産出の比較（水準1）も
+    産出の作り直し（水準3）も成り立たないので、場面想起の水準3へ直行する
+    （水準3は産出の有無で中身が変わる。ai_dialogue.dialogue 参照）。
+    それ以外は作問の反復と同じく1段上げる。
     """
     if set(history) >= STRUCTURES:
         return "talk"
     if not has_problems or learner_state == "S0":
-        return "level4"
-    return f"level{min(4, database.get_current_level(session_id, 2) + 1)}"
+        return "level3"
+    return f"level{min(MAX_LEVEL, database.get_current_level(session_id, 2) + 1)}"
 
 
 # ===== Routes（児童） =====
@@ -335,11 +338,11 @@ def judge(req: JudgeRequest):
     ctx = dict(session=session, phase=phase, expression=expression, history=history,
                recent=recent, last=last, button=button)
 
-    # 水準2の問いに、ボタン押下＋短い応答で答えた場合は classify を通さない
-    if phase == 2 and button in ai_dialogue.LEVEL2_BUTTONS and len(message) <= 8:
+    # 水準1の問いに、ボタン押下＋短い応答で答えた場合は classify を通さない
+    if phase == 2 and button in ai_dialogue.COMPARE_BUTTONS and len(message) <= 8:
         kind = _answer_kind(message, button)
         if kind:
-            result = _handle_level2_answer(req, user_id, message, kind, ctx)
+            result = _handle_compare_answer(req, user_id, message, kind, ctx)
             return _finish(result, req.session_id, phase)
 
     input_kind = ai_classify.classify(message, recent, expression)
@@ -347,10 +350,10 @@ def judge(req: JudgeRequest):
         result = _handle_sakumon(req, user_id, message, ctx)
     else:
         kind = None
-        if phase == 2 and last and last.get("support_level") == "level2":
+        if phase == 2 and last and last.get("support_level") == "level1":
             kind = _answer_kind(message, button)
         if kind:
-            result = _handle_level2_answer(req, user_id, message, kind, ctx)
+            result = _handle_compare_answer(req, user_id, message, kind, ctx)
         else:
             result = _handle_taiwa(req, user_id, message, ctx)
     return _finish(result, req.session_id, phase)
@@ -382,21 +385,25 @@ def _base_result(message: str, display_type: str, input_type: str, **extra) -> d
     }
 
 
-def _handle_level2_answer(req: JudgeRequest, user_id: str, message: str, kind: str, ctx: dict) -> dict:
-    """水準2の問い「同じ？ちがう？」への応答。
-    同じ → 気づけている：水準は上げず挑戦を促す。 ちがう → 気づけていない：即時に水準3へ。"""
+def _handle_compare_answer(req: JudgeRequest, user_id: str, message: str, kind: str, ctx: dict) -> dict:
+    """水準1の問い「同じ？ちがう？」への応答。
+    同じ → 気づけている：水準は上げず挑戦を促す。 ちがう → 気づけていない：即時に水準2へ。"""
+    target = None
     if kind == "same":
-        support_level, text = "level2", ai_dialogue.level2_same_reply()
+        support_level, text = "level1", ai_dialogue.compare_same_reply()
     else:
-        support_level, text = "level3", ai_dialogue.level3_message()
+        support_level = "level2"
+        target = ai_dialogue.pick_unreached_structure(ctx["history"])
+        text = ai_dialogue.unknown_hint_message(target)
     learner_state = _learner_state(req.session_id, None, set(ctx["history"]), False, ctx["phase"], ctx["last"])
-    result = _base_result(text, support_level, "taiwa", state=f"level2_answer_{kind}")
+    result = _base_result(text, support_level, "taiwa", state=f"compare_answer_{kind}",
+                          target_structure=target)
     database.save_log(
         session_id=req.session_id, user_id=user_id, message=message, response_json=result,
         structure=None, is_new=False, input_type="taiwa",
         phase=ctx["phase"], support_level=support_level, learner_state=learner_state,
         unknown=None, issue=None, button_pressed=ctx["button"],
-        stall_count=database.get_stall_count(req.session_id), target_structure=None,
+        stall_count=database.get_stall_count(req.session_id), target_structure=target,
         expression=ctx["expression"],
     )
     return result
@@ -419,7 +426,7 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
     elif _is_stuck(message):
         support_level = _stuck_support_level(req.session_id, history, learner_state, bool(problems))
         display_type = "normal" if support_level == "talk" else support_level
-        if support_level == "level4":
+        if support_level in ("level2", "level3"):
             target = ai_dialogue.pick_unreached_structure(history)
     else:
         support_level, display_type = "talk", "normal"
@@ -479,11 +486,11 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     elif completes_all or all_before:
         support_level, display_type = "goal", "goal"
     elif is_new:
-        support_level, display_type = "discover", "new_structure"  # 水準を1にリセット（次の反復が level1）
+        support_level, display_type = "discover", "new_structure"  # 水準を0にリセット（次の反復が level1）
     else:
-        level = min(4, database.get_current_level(req.session_id, 2) + 1)  # 1提出につき最大1段階
+        level = min(MAX_LEVEL, database.get_current_level(req.session_id, 2) + 1)  # 1提出につき最大1段階
         support_level = display_type = f"level{level}"
-        if level == 4:
+        if level >= 2:   # 水準2・3は「まだ聞いていない求める量」を1つ選んで使う
             target = ai_dialogue.pick_unreached_structure(history)
 
     problems = [{"text": p["text"], "structure": p["structure"]} for p in database.get_valid_problems(req.session_id)]

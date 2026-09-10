@@ -115,7 +115,7 @@ document.getElementById("btn-new-run").addEventListener("click", async () => {
 // ===== 児童の状態（ライブ） =====
 const STATE_CLS = { S0: "badge-red", S1: "badge-orange", S2: "badge-blue", S3: "badge-green" };
 const LEVEL_LABEL = {
-  none: "—", form: "0 成立性", level1: "1 一覧", level2: "2 同じ？", level3: "3 求める量", level4: "4 場面",
+  none: "—", form: "0 成立性", level1: "1 同じ？", level2: "2 求める量", level3: "3 場面",
   discover: "新構造", goal: "3つ達成", talk: "対話", error: "エラー",
 };
 
@@ -336,7 +336,7 @@ function buildLogRow(log) {
 
   const aiCls = {
     new_structure: "new-structure",
-    level1: "hint", level2: "hint", level3: "hint", level4: "hint",
+    level1: "hint", level2: "hint", level3: "hint",
     hint1: "hint", hint2: "hint", hint3: "hint",
     goal: "clear", clear: "clear",
   }[log.display_type] || "";
@@ -427,8 +427,8 @@ function setBreadcrumb(elId, items) {
 // ===== Helpers =====
 const STRUCT_LABEL = { tobun: "等分除", hougan: "包含除", bai: "倍" };
 const LEVEL_CLS = {
-  none: "badge-gray", form: "badge-orange", level1: "badge-orange", level2: "badge-orange",
-  level3: "badge-red", level4: "badge-red", discover: "badge-green", goal: "badge-green",
+  none: "badge-gray", form: "badge-orange", level1: "badge-orange",
+  level2: "badge-red", level3: "badge-red", discover: "badge-green", goal: "badge-green",
   talk: "badge-purple", error: "badge-gray",
 };
 // 旧データ（9/18 以前）の stumble 表示用

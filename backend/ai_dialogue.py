@@ -3,10 +3,13 @@
 支援水準は main.py が決定論的に決めて渡す。ここでは水準ごとに声かけを組み立てる。
 
   form     【水準0・不成立作問】成立性のフィードバック（LLM＋コード側ガード、失敗時は定型文）
-  level1   右パネルの産出一覧に注意を向けさせる（定型・LLM不使用。一覧はチャットに列挙しない）
-  level2   同上＋「聞いていることは同じ？ちがう？」＋2択ボタン（定型・LLM不使用）
-  level3   求める量の明示（定型・LLM不使用。信号機の空欄提示はフロント側）
-  level4   場面想起の足場かけ（LLM＋コード側ガード、失敗時は定型文）
+  level1   自分の産出を比べさせる：「聞いていることは同じ？ちがう？」＋2択ボタン（定型・LLM不使用）
+  level2   未到達の「求める量」を1つだけ名指す（定型・LLM不使用。信号機の表示はフロント側）
+  level3   最終段。児童の状態で2モードに分かれる（state 列で区別できる）
+             ・産出あり（level3_rewrite）：自分の既存産出を素材として再利用させ、
+               問いだけを差し替える課題を出す（定型・LLM不使用）
+             ・産出なし／S0（level3_scene）：場面が何も浮かんでいないので素材を想起させる
+               （LLM＋コード側ガード、失敗時は定型文）
   discover 新構造が出た（称賛のみ。LLM＋ガード、失敗時は定型文）
   goal     3構造そろった（定型）
   talk     作問以外の入力（LLM＋ガード、失敗時は定型文）
@@ -49,7 +52,7 @@ UNKNOWN_JA = {
     "ratio": "何倍", "base": "もとの大きさ", "rate": "1つあたり",
 }
 
-LEVEL2_BUTTONS = ["同じ", "ちがう"]
+COMPARE_BUTTONS = ["同じ", "ちがう"]
 
 # structured outputs（output_config.format）のスキーマ。JSON 以外を書けなくする。
 # check を先頭に置いて、声かけを書く前に境界（構造名・数量関係・答えを渡さない）を
@@ -81,28 +84,51 @@ def _subject(problems: list[dict], current_structure: str | None) -> str:
     return f"この{n}つは"
 
 
-def level1_message(problems: list[dict]) -> str:
-    """産出一覧そのものは右パネルに常設されているので、チャットには列挙しない。
-    読みかえす先（右パネル）に注意を向けるだけにする。
+def compare_message(problems: list[dict], current_structure: str | None) -> str:
+    """【水準1】産出一覧は右パネルに常設なので、チャットには列挙しない。
+    一覧を見させたうえで「聞いていることは同じ？ちがう？」と問う。
+    題材（りんご→えんぴつ）ではなく「聞いていること」で自分の産出を分類させるのが、この段の仕事。
     停滞中の児童に「たくさん作れている」と伝わらないよう、数はほめない。"""
-    return ("今までに 作った お話が、右に ならんでいるよ。\n"
-            "もう一度 読みかえしてみよう。")
-
-
-def level2_message(problems: list[dict], current_structure: str | None) -> str:
-    """右パネルの産出一覧を見させたうえで、「聞いていることは同じ？ちがう？」と問う。"""
     return ("右の「作った お話」を 見てみよう。\n"
             f"{_subject(problems, current_structure)}、聞いていることが 同じかな？ ちがうかな？")
 
 
-def level2_same_reply() -> str:
+def compare_same_reply() -> str:
+    """水準1の問いに「同じ」と答えられた＝気づけている。水準は上げず、挑戦だけ促す。"""
     return "そうだね、聞いていることは 同じだね。じゃあ、ちがうことを聞くお話は 作れるかな？"
 
 
-def level3_message() -> str:
-    return ("わり算のお話で聞けることは、3つあるよ。\n"
-            "「1つ分はいくつ？」「いくつ分ある？」「何倍？」\n"
-            "まだ 聞いていないものがあるね。作れそうかな？")
+def rewrite_message(problems: list[dict], target_structure: str | None) -> str:
+    """【水準3・産出あり】自分の既存産出を素材にして、問いだけを差し替える課題を出す。
+
+    新しい素材を探させてはいけない。素材の差し替え（りんご→えんぴつ）は 9/1 で観測された
+    同型反復そのもので、最終段でそれを促すと誤概念を強化してしまう。
+    渡すのは「素材は自分のものを流用してよい」という許可だけで、素材も数量関係も渡さない。
+    ねらいは「素材を変えれば別の問題」の逆＝場面を固定して問いを変える操作をさせること
+    （Brown & Walter の What-If-Not 戦略）。
+
+    「場面はそのまま」とは言わない。24 ÷ 8 で 1つ分 ⇄ いくつ分 に移ると除数 8 の意味が
+    変わるので、文言も変えないと成立しない。そこに気づくこと自体がねらいなので、
+    「同じ もの を つかって いい」までに留める。
+    """
+    if not problems or not target_structure:
+        return ""
+    n = len(problems)   # 右パネルの通し番号。直前に書いた1問を指す
+    return (f"{n}ばんの お話と 同じ ものを つかって いいよ。\n"
+            f"こんどは「{QUESTION_JA[target_structure]}」を 聞く お話に できるかな？")
+
+
+def unknown_hint_message(target_structure: str | None) -> str:
+    """【水準2】まだ聞いていない「求める量」を1つだけ言葉で渡す。
+
+    3つを列挙しない。答えの空間を一度に渡すと、以降の産出が「言われたから作った」になり、
+    意図的産出として測れなくなる（＝主要指標が壊れる）。
+    「3つあって、あと何個空いているか」は、ラベルなし3灯の信号機が同時に見せる。
+    """
+    if not target_structure:
+        return "ほかにも 聞けることが あるよ。右の ⭐ を 見てみよう。"
+    return ("ほかにも 聞けることが あるよ。\n"
+            f"たとえば「{QUESTION_JA[target_structure]}」を 聞く お話は 作れるかな？")
 
 
 def goal_message(first_time: bool) -> str:
@@ -121,7 +147,7 @@ FORM_FALLBACK = {
 }
 DISCOVER_FALLBACK = "いいね！新しいお話が できたね！"
 TALK_FALLBACK = "そうなんだね。またお話を 作ってみてね。"
-LEVEL4_FALLBACK = "身近なところで、{dividend}こ あるものは何かな？ 教室や きゅうしょくの時間を 思い出してみよう。"
+LEVEL3_FALLBACK = "身近なところで、{dividend}こ あるものは何かな？ 教室や きゅうしょくの時間を 思い出してみよう。"
 
 
 def pick_unreached_structure(history: list[str]) -> str | None:
@@ -132,7 +158,7 @@ def pick_unreached_structure(history: list[str]) -> str | None:
     return None
 
 
-# ===== LLM（form / discover / level4 / talk） =====
+# ===== LLM（form / discover / level3 / talk） =====
 
 _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（作問）」をするのを助ける先生です。
 子どもは、式 {expression} になるお話を作っています。
@@ -143,7 +169,7 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 - 構造の名前（等分除・包含除・倍）を子どもに見せない。「どんな種類のお話か」を分類して伝えない。
 - 数量関係（だれが何をどう分けるか・何と何を比べるか）を渡さない。
   「{dividend}こを{divisor}こずつ」「{divisor}人で分ける」のように、数と数の関係を含む言い方は禁止。
-- 「何を求めたか」「1つ分」「いくつ分」「何倍」などの言葉は、level4 以外では使わない。
+- 「何を求めたか」「1つ分」「いくつ分」「何倍」などの言葉は、level3 以外では使わない。
 - 答え（数値 {quotient}）を教えない。
 - 1〜2文で短く。やさしく、はげます口調。
 
@@ -155,7 +181,8 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
   「何を求めたか」「どんな種類か」「次は何を作るか」は一切言わない。次の構造を名指ししない。
   ★「分ける」「配る」「くらべる」「〜ずつ」「何倍」など、お話の中の操作や数量関係を言い当てる言葉も使わない
   （「4人に分けるところがいいね」「長さをくらべるお話だね」は不可）。ほめるのは題材と、作れたこと自体だけ。
-- level4：目標（3つの聞き方があること）は伝わったが、場面が思い浮かばない状態。
+- level3：まだ1問も作れておらず、場面が何も思い浮かんでいない状態
+  （すでに作れている子はここに来ない。コード側で別の定型文に分岐している）。
   「場面」を【素材（何の話か）】と【数量関係（だれが何をどう分けるか）】に分け、素材にだけ触れる。
   子どもの身近な場面（教室・きゅうしょく・体育・家・お店・遠足）から、素材を思い出させる問いかけをする。
   OK例：「教室にあるもので、{dividend}こあるものって何かな？」「きゅうしょくの時間だと、どんな場面が思いつく？」
@@ -221,7 +248,7 @@ _BANNED_ALWAYS = ("等分除", "包含除", "倍の話", "倍のお話", "くら
 _BANNED_UNKNOWN_WORDS = ("1つ分", "１つ分", "一つ分", "1人分", "１人分", "一人分", "いくつ分",
                          "何倍", "なんばい", "もとの大きさ", "もとにする", "1つあたり", "１つあたり",
                          "何人分", "何こ分", "さがしているもの", "さがすもの")
-_BANNED_LEVEL4 = ("ずつ",)
+_BANNED_LEVEL3 = ("ずつ",)   # 水準3（素材想起）で数量関係を渡させない
 # discover では操作・数量関係を言い当てる言葉も禁止（種類の分類を暗に伝えてしまうため）
 _BANNED_DISCOVER = ("分け", "配", "くらべ", "比べ", "ずつ", "等分", "まとめ")
 
@@ -241,15 +268,15 @@ def violates_boundary(message: str, support_level: str, expression: str) -> str 
         for w in _BANNED_UNKNOWN_WORDS:
             if w in message:
                 return f"banned_unknown:{w}"
-    if support_level == "level4":
-        for w in _BANNED_LEVEL4:
+    if support_level == "level3":
+        for w in _BANNED_LEVEL3:
             if w in message:
-                return f"banned_level4:{w}"
+                return f"banned_level3:{w}"
     if support_level == "discover":
         for w in _BANNED_DISCOVER:
             if w in message:
                 return f"banned_discover:{w}"
-    if support_level in ("discover", "talk", "level4"):
+    if support_level in ("discover", "talk", "level3"):
         dividend, divisor = parse_expression(expression)
         if _has_both_numbers(message, dividend, divisor):
             return "both_numbers"
@@ -266,8 +293,8 @@ def _fallback(support_level: str, judge_result: dict | None, expression: str) ->
         return FORM_FALLBACK.get(issue, FORM_FALLBACK["not_problem"]).replace("{expression}", expr)
     if support_level == "discover":
         return DISCOVER_FALLBACK
-    if support_level == "level4":
-        return LEVEL4_FALLBACK.replace("{dividend}", str(dividend))
+    if support_level == "level3":
+        return LEVEL3_FALLBACK.replace("{dividend}", str(dividend))
     return TALK_FALLBACK
 
 
@@ -289,7 +316,7 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
 
     reached = len(history)
     extra = ""
-    if support_level == "level4" and target_structure:
+    if support_level == "level3" and target_structure:
         extra = f"\nまだ作れていない聞き方: 「{QUESTION_JA[target_structure]}」（この聞き方に向く素材を思い出させる。数量関係は書かない）"
 
     user_content = f"""子どもの発話: {child_message}
@@ -345,7 +372,7 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
     戻り値: {"message", "buttons", "figure", "target_structure", "state", "tape_diagram",
              "highlight_problems"}
     figure / tape_diagram は ENABLE_FIGURES=False のため常に None。
-    highlight_problems は右パネルの産出一覧に注意を向けさせたい水準（1・2）で True。
+    highlight_problems は右パネルの産出一覧を参照させる水準（1と、水準3の rewrite）で True。
     """
     base = {"buttons": None, "figure": None, "target_structure": target_structure,
             "tape_diagram": None, "highlight_problems": False}
@@ -355,19 +382,27 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
     if support_level == "none":
         return {**base, "message": ACK_MESSAGE, "state": "no_support_phase"}
     if support_level == "level1":
-        return {**base, "message": level1_message(problems), "state": "level1_list",
+        return {**base, "message": compare_message(problems, current_structure),
+                "buttons": list(COMPARE_BUTTONS), "state": "level1_compare",
                 "highlight_problems": True}
     if support_level == "level2":
-        return {**base, "message": level2_message(problems, current_structure),
-                "buttons": list(LEVEL2_BUTTONS), "state": "level2_question",
-                "highlight_problems": True}
-    if support_level == "level3":
-        return {**base, "message": level3_message(), "state": "level3_unknowns"}
+        return {**base, "message": unknown_hint_message(target_structure),
+                "state": "level2_unknown_hint"}
     if support_level == "goal":
         return {**base, "message": goal_message(first_goal), "state": "goal"}
-    if support_level in ("form", "discover", "level4", "talk"):
+    if support_level == "level3" and problems:
+        # 産出がある子には素材を渡さない（＝同型反復を促さない）。自分の産出を使わせる。
+        text = rewrite_message(problems, target_structure)
+        if text:
+            return {**base, "message": text, "state": "level3_rewrite",
+                    "highlight_problems": True}
+    if support_level in ("form", "discover", "level3", "talk"):
         out = _llm_message(child_message, input_kind, judge_result, history, recent_turns,
                            support_level, expression, target_structure)
+        if support_level == "level3":
+            # 水準3の2モードを CSV で機械的に分けられるよう、state の頭を固定する
+            # （level3_rewrite / level3_scene。後半はLLMが読み取った状態）
+            out["state"] = f"level3_scene / {out.get('state') or ''}".strip(" /")
         return {**base, **out}
     # 想定外の水準（保険）
     return {**base, "message": FALLBACK_MESSAGE, "state": "unknown_level"}

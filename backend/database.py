@@ -12,7 +12,7 @@ if not DB_PATH.parent.exists():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 STRUCTURES = ("tobun", "hougan", "bai")
-LEVEL_NAMES = ("level1", "level2", "level3", "level4")
+LEVEL_NAMES = ("level1", "level2", "level3")
 
 
 def _now():
@@ -389,9 +389,9 @@ def get_stall_count(session_id: int) -> int:
 
 
 def get_current_level(session_id: int, phase: int = 2) -> int:
-    """現在の支援水準（0〜4）。
+    """現在の支援水準（0〜3）。
 
-    指定フェーズのターンだけを新しい順に見て、最後に記録された level1〜4 の数字を返す。
+    指定フェーズのターンだけを新しい順に見て、最後に記録された level1〜3 の数字を返す。
     新構造の到達（is_new=1）が見つかったらそこでリセット＝0。フェーズが違う行に
     達したら（＝フェーズ2の開始より前）0。水準の遷移はフェーズ2の提出だけで数える。
     """
@@ -644,12 +644,12 @@ def admin_live_status(run_id: int, phase: int) -> list[dict]:
 
 
 def get_max_level(session_id: int, phase: int = 2) -> int:
-    """そのセッション（指定フェーズ）で到達した最大の支援水準（0〜4）。単調増加。
-    フロントの表示ゲート（水準1以上で産出一覧、水準3以上で信号機）に使う。"""
+    """そのセッション（指定フェーズ）で到達した最大の支援水準（0〜3）。単調増加。
+    フロントの表示ゲート（水準2以上で信号機）に使う。産出一覧はフェーズ2で常設。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT support_level FROM chat_logs
-               WHERE session_id = ? AND phase = ? AND support_level IN ('level1','level2','level3','level4')""",
+               WHERE session_id = ? AND phase = ? AND support_level IN ('level1','level2','level3')""",
             (session_id, phase),
         ).fetchall()
     return max((int(r[0][-1]) for r in rows), default=0)

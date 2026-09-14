@@ -119,8 +119,12 @@ def run_student(args, base: str, user_id: str, samples: list[tuple[str, str]], m
         if not r.is_success:
             metrics.errors.append(f"{user_id} login {r.status_code}: {r.text[:120]}")
             return
-        session_id = r.json()["session_id"]
+        payload = r.json()
+        session_id = payload["session_id"]
         sessions[user_id] = session_id
+        # 式は児童ごと（奇偶）に決まるので、ログイン後にサンプルの数値を埋める
+        a, b = [int(x) for x in payload["expression"].split("÷")]
+        samples = [(k, t.format(a=a, b=b)) for k, t in samples]
 
         prev_text = None
         for i in range(args.n_messages):
@@ -215,9 +219,10 @@ def main():
     # ---- 事前：式・フェーズ ----
     with httpx.Client(base_url=base, timeout=30.0) as c:
         cfg = c.get("/api/config").json()
-    a, b = cfg["dividend"], cfg["divisor"]
-    samples = [(k, t.format(a=a, b=b)) for k, t in SAMPLES]
-    print(f"対象: {base}  式: {cfg['expression']}  フェーズ: {cfg['phase']}")
+    # 式は児童（出席番号の奇偶）とフェーズで決まる（仕様 v2 4章）。仮想児童は 99 から下向きなので
+    # 奇数・偶数が混ざる。サンプルの数値は送信時に各自の式で埋める（run_student 参照）。
+    samples = list(SAMPLES)
+    print(f"対象: {base}  フェーズ: {cfg['phase']}")
     if cfg["phase"] != 2:
         print("  注: フェーズ2以外では声かけ（ai_dialogue）が呼ばれないため、API 負荷はフェーズ2より軽い")
     user_ids = [f"{99 - i:02d}" for i in range(args.n_students)]   # 99, 98, …（実学級の 01〜 と重ねない）

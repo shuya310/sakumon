@@ -308,3 +308,11 @@ tr.clickable:hover td { background: #F0FDF8; }
 .lamp.on { color: #1D9E75; text-shadow: 0 0 6px rgba(29,158,117,.6); }
 
 .logs-table td { font-size: .82rem; }
+
+/* 式の割り当て表 */
+.expr-table { width: 100%; border-collapse: collapse; font-size: .92rem; margin-bottom: 8px; }
+.expr-table th, .expr-table td { padding: 6px 8px; text-align: center; border-bottom: 1px solid var(--gray-border); }
+.expr-table td:first-child, .expr-table th:first-child { text-align: left; }
+.msg-ai strong { font-weight: 800; }
+.met-ok { color: #0F6E56; font-weight: 700; }
+.met-ng { color: #B42318; font-weight: 700; }

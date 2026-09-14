@@ -37,9 +37,9 @@ document.getElementById("tab-students").addEventListener("click", loadStudents);
 
 // ===== フェーズ管理 =====
 const PHASE_DESC = {
-  1: "事前測定：式Aで自由に作問。判定は裏で動くが児童には何も表示しない。",
-  2: "支援：同じ式Aで、フィードバックを受けながら作問（新しいセッション）。",
-  3: "事後測定：式Bで自由に作問。新しいセッション。支援なし。",
+  1: "事前測定：自由に作問。判定は裏で動くが児童には何も表示しない。",
+  2: "支援：予告支援（なし／弱／中／強）を受けながら作問（新しいセッション）。",
+  3: "事後測定：別の式で自由に作問。新しいセッション。支援なし。",
 };
 
 function renderConfig(cfg) {
@@ -49,9 +49,14 @@ function renderConfig(cfg) {
   document.querySelectorAll(".btn-phase").forEach(b => {
     b.classList.toggle("active", Number(b.dataset.phase) === cfg.current_phase);
   });
-  const a = document.getElementById("expr-a"), b = document.getElementById("expr-b");
-  if (document.activeElement !== a) a.value = cfg.expression_a;
-  if (document.activeElement !== b) b.value = cfg.expression_b;
+  const asg = (cfg.public && cfg.public.expression_assignment) || {};
+  const tbody = document.getElementById("expr-tbody");
+  tbody.innerHTML = "";
+  [["odd", "奇数番"], ["even", "偶数番"]].forEach(([g, label]) => {
+    const row = asg[g] || {};
+    tbody.insertAdjacentHTML("beforeend",
+      `<tr><td>${label}</td><td>${esc(row["1"] || "—")}</td><td>${esc(row["2"] || "—")}</td><td>${esc(row["3"] || "—")}</td></tr>`);
+  });
 }
 
 async function loadConfig() {
@@ -80,29 +85,9 @@ document.querySelectorAll(".btn-phase").forEach(btn => {
   });
 });
 
-document.getElementById("btn-save-expr").addEventListener("click", async () => {
-  const msg = document.getElementById("expr-msg");
-  msg.textContent = "";
-  try {
-    const cfg = await api("/admin/api/expressions", {
-      method: "POST",
-      body: JSON.stringify({
-        expression_a: document.getElementById("expr-a").value,
-        expression_b: document.getElementById("expr-b").value,
-      }),
-    });
-    renderConfig(cfg);
-    msg.textContent = "保存しました";
-    msg.className = "expr-msg ok";
-  } catch (e) {
-    msg.textContent = e.message;
-    msg.className = "expr-msg err";
-  }
-});
-
 // ===== 児童の状態（ライブ） =====
 const RESPONSE_LABEL = {
-  form: "成立性", praise: "称賛", prompt: "予告", talk: "対話", done: "3つ達成", error: "判定保留",
+  form: "形式", praise: "称賛", prompt: "予告支援", talk: "対話", done: "3つ達成", error: "判定エラー",
 };
 const STRENGTH_LABEL = { 0: "なし", 1: "弱", 2: "中", 3: "強" };
 
@@ -130,21 +115,25 @@ function renderLive(data) {
   document.getElementById("live-summary").textContent =
     `（${students.length}人 ／ 接続中 ${online}人 ／ 提出0問 ${zero}人）`;
   if (students.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" class="empty">この回・このフェーズでログインした児童はまだいません</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">このフェーズでログインした児童はまだいません</td></tr>`;
     return;
   }
   tbody.innerHTML = "";
   students.forEach(s => {
     const tr = document.createElement("tr");
     if (s.submitted === 0) tr.className = "row-zero";
-    const counts = `困り ${s.stuck_count ?? 0} ／ 不成立 ${s.miss_count ?? 0}`;
+    const counts = `反復 ${s.stuck_count ?? 0} ／ 不一致 ${s.miss_count ?? 0}`;
+    const declared = s.declared
+      ? `<span class="badge ${s.declared_by === "child" ? "badge-blue" : "badge-orange"}">${s.declared_by === "child" ? "児童" : "システム"}</span> ${STRUCT_LABEL[s.declared] || s.declared}`
+      : '<span class="muted">—</span>';
     tr.innerHTML = `
       <td><strong>${esc(s.user_id)}</strong></td>
       <td>${s.online ? '<span class="dot-on"></span> 接続中' : `<span class="dot-off"></span> <span class="muted small">${s.last_seen_seconds == null ? "未接続" : Math.round(s.last_seen_seconds / 60) + "分前"}</span>`}</td>
       <td class="${s.submitted === 0 ? "zero" : ""}"><strong>${s.submitted}</strong></td>
       <td>${s.valid}</td>
       <td>${lightsHtml(s.structures)}</td>
-      <td class="${(s.stuck_count ?? 0) > 0 ? "" : "muted"} small">${counts}</td>
+      <td class="small">${data.config.phase === 2 ? declared : '<span class="muted">—</span>'}</td>
+      <td class="${(s.miss_count ?? 0) > 0 ? "met-ng" : "muted"} small">${counts}</td>
       <td>${data.config.phase === 2 ? responseBadge(s.last_response_type, s.last_prompt_strength) : '<span class="muted">—</span>'}</td>
       <td class="muted small">${s.last_activity ? fmtTime(s.last_activity) : "—"}</td>
     `;
@@ -244,8 +233,10 @@ function buildSessionBlock(session, userId) {
       <div>
         <div class="s-date">#${session.session_id}　${fmtDate(session.session_start)} 〜 ${session.session_end ? fmtDate(session.session_end) : "（継続中）"}　
           <span class="badge badge-blue">フェーズ${session.phase}</span>
-          <span class="badge badge-gray">${esc(session.expression)}</span>
+          <span class="badge badge-gray" id="expr-badge-${session.session_id}">${esc(session.expression)}</span>
+          <button class="btn btn-ghost btn-sm btn-set-expr" data-id="${session.session_id}">式を変更</button>
           <span class="badge badge-gray">${session.parity_group === "odd" ? "奇数" : "偶数"}</span>
+          ${session.declared ? `<span class="badge badge-orange">予告: ${STRUCT_LABEL[session.declared] || session.declared}（${session.declared_by === "child" ? "児童" : "システム"}）</span>` : ""}
         </div>
         <div class="s-stat">違う構造 ${session.new_count} ／ 作問 ${session.sakumon_count ?? 0}回・対話 ${session.taiwa_count ?? 0}回　${structs}</div>
       </div>
@@ -259,6 +250,19 @@ function buildSessionBlock(session, userId) {
   const body = document.createElement("div");
   body.className = "session-body";
   body.dataset.loaded = "false";
+
+  head.querySelector(".btn-set-expr").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const v = prompt(`セッション #${session.session_id} の式を上書きします（例: 24 ÷ 8）`, session.expression);
+    if (!v) return;
+    try {
+      const r = await api(`/admin/api/sessions/${session.session_id}/expression`, { method: "POST", body: JSON.stringify({ expression: v }) });
+      session.expression = r.expression;
+      head.querySelector(`#expr-badge-${session.session_id}`).textContent = r.expression;
+    } catch (err) {
+      alert("式の変更に失敗しました: " + err.message);
+    }
+  });
 
   head.querySelector(".btn-del-session").addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -318,8 +322,7 @@ function buildLogsTable(logs) {
 const UNKNOWN_LABEL = { one_unit: "1つ分", num_units: "いくつ分", ratio: "倍率", base: "基準量", rate: "割合" };
 const ISSUE_LABEL = {
   scene_contradiction: "場面矛盾", wrong_number: "式ちがい", wrong_operation: "演算ちがい",
-  incomplete_text: "途中で切れ", no_question: "問いなし", not_problem: "文章題でない", error: "判定エラー",
-  pending: "判定保留（API不通）", reversed: "向き逆(旧)",
+  incomplete_text: "途中で切れ", no_question: "問いなし", not_problem: "文章題でない", error: "判定エラー（API不通）",
 };
 
 function buildLogRow(log) {
@@ -331,11 +334,12 @@ function buildLogRow(log) {
     : (log.response_type === "praise" && log.is_new) ? "new-structure" : "";
 
   const isTaiwa = log.input_type === "taiwa";
-  const inputBadge = isTaiwa
-    ? '<span class="badge badge-purple">対話</span>'
-    : (log.input_type === "resend"
-      ? '<span class="badge badge-gray" title="同じ本文の再送（APIは呼ばず直前の結果を返した）">再送</span>'
-      : '<span class="badge badge-blue">作問</span>');
+  const inputBadge = {
+    taiwa: '<span class="badge badge-purple">対話</span>',
+    resend: '<span class="badge badge-gray" title="同じ本文の再送（APIは呼ばず直前の結果を返した）">再送</span>',
+    declaration: '<span class="badge badge-orange">予告</span>',
+    self_label: '<span class="badge badge-orange">自己ラベル</span>',
+  }[log.input_type] || '<span class="badge badge-blue">作問</span>';
 
   // 判定：成立なら 構造＋求める量、不成立なら issue
   let judgeCell = '<span style="color:#ccc">—</span>';
@@ -351,12 +355,12 @@ function buildLogRow(log) {
 
   // 応答の種類と、予告・自己ラベル（予告支援仕様で記録されるようになる列）
   const declared = log.declared_structure
-    ? `<div class="muted small">予告: ${STRUCT_LABEL[log.declared_structure] || log.declared_structure}（${log.declared_by || "?"}）${log.declaration_met == null ? "" : (log.declaration_met ? " ✓" : " ✗")}</div>` : "";
-  const selfLabel = log.self_label
-    ? `<div class="muted small">自己ラベル: ${STRUCT_LABEL[log.self_label] || log.self_label}${log.self_label_match == null ? "" : (log.self_label_match ? " ✓" : " ✗")}</div>` : "";
+    ? `<div class="small">予告: ${STRUCT_LABEL[log.declared_structure] || log.declared_structure}（${log.declared_by === "child" ? "児童" : "システム"}）${log.declaration_met == null ? "" : (log.declaration_met ? ' <span class="met-ok">一致 ✓</span>' : ' <span class="met-ng">不一致 ✗</span>')}</div>` : "";
+  const selfLabel = (log.self_label || log.self_label_text)
+    ? `<div class="small">自己ラベル: ${log.self_label ? (STRUCT_LABEL[log.self_label] || log.self_label) : esc(log.self_label_text)}${log.self_label_match == null ? "" : (log.self_label_match ? ' <span class="met-ok">判定と一致</span>' : ' <span class="met-ng">判定と不一致</span>')}</div>` : "";
   const timingHtml = log.latency_ms != null ? `<div class="muted small">${(log.latency_ms / 1000).toFixed(1)}s</div>` : "";
   const produced = (log.produced_structures || "").split(",").filter(Boolean);
-  const countsHtml = `<div class="muted small">困り ${log.stuck_count ?? 0} ／ 不成立 ${log.miss_count ?? 0}</div>`;
+  const countsHtml = `<div class="muted small">反復 ${log.stuck_count ?? 0} ／ 不一致 ${log.miss_count ?? 0}</div>`;
 
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>
@@ -364,7 +368,7 @@ function buildLogRow(log) {
     <td>${inputBadge}</td>
     <td>
       <div class="msg-user">${esc(log.message)}</div>
-      ${log.ai_message ? `<div class="msg-ai ${aiCls}">${esc(log.ai_message)}</div>` : ""}
+      ${log.ai_message ? `<div class="msg-ai ${aiCls}">${richHtml(log.ai_message)}</div>` : ""}
       ${timingHtml}
     </td>
     <td>${judgeCell}</td>
@@ -438,6 +442,10 @@ function fmtTime(str) {
   const d = toDate(str);
   if (!d || isNaN(d)) return "—";
   return d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+// **強調** と改行を HTML に（エスケープ後）
+function richHtml(str) {
+  return esc(str).split("\n").map(line => line.split("**").map((p, i) => i % 2 ? `<strong>${p}</strong>` : p).join("")).join("<br>");
 }
 function esc(str) {
   return String(str ?? "")

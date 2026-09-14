@@ -175,10 +175,6 @@ def get_config() -> dict:
     return {"current_phase": r[0], "expression_a": r[1], "expression_b": r[2], "updated_at": r[3]}
 
 
-def expression_for_phase(cfg: dict, phase: int) -> str:
-    return cfg["expression_b"] if phase == 3 else cfg["expression_a"]
-
-
 def _record_phase_change(con, cfg_after: dict, note: str):
     con.execute(
         """INSERT INTO phase_changes (phase, expression_a, expression_b, note, changed_at)
@@ -200,16 +196,10 @@ def set_phase(phase: int) -> dict:
     return cfg
 
 
-def set_expressions(expression_a: str, expression_b: str) -> dict:
+def set_session_expression(session_id: int, expression: str):
+    """管理画面からの個別の式の上書き（当日のトラブル対応用。仕様 v2 4章）。"""
     with _conn() as con:
-        con.execute(
-            "UPDATE app_config SET expression_a = ?, expression_b = ?, updated_at = ? WHERE id = 1",
-            (expression_a, expression_b, _now()),
-        )
-    cfg = get_config()
-    with _conn() as con:
-        _record_phase_change(con, cfg, "set_expressions")
-    return cfg
+        con.execute("UPDATE sessions SET expression = ? WHERE session_id = ?", (expression, session_id))
 
 
 # ===== セッション =====
@@ -325,12 +315,12 @@ def get_conversation(session_id: int) -> list[dict]:
     """全ターンを時系列で返す（再開時のチャット再描画用）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT message, ai_message, input_type, phase, response_type, is_new FROM chat_logs
-               WHERE session_id = ? ORDER BY log_id""",
+            """SELECT message, ai_message, input_type, phase, response_type, is_new, prompt_strength
+               FROM chat_logs WHERE session_id = ? ORDER BY log_id""",
             (session_id,),
         ).fetchall()
     return [{"message": r[0], "ai_message": r[1], "input_type": r[2], "phase": r[3],
-             "response_type": r[4], "is_new": bool(r[5])} for r in rows]
+             "response_type": r[4], "is_new": bool(r[5]), "prompt_strength": r[6]} for r in rows]
 
 
 def get_recent_turns(session_id: int, limit: int = 6) -> list[dict]:
@@ -350,7 +340,7 @@ def get_last_turn(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
             """SELECT input_type, message, ai_message, phase, valid, structure, unknown, issue,
-                      response_type, prompt_strength
+                      response_type, prompt_strength, self_label, self_label_text
                FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
@@ -358,7 +348,8 @@ def get_last_turn(session_id: int) -> dict | None:
         return None
     return {"input_type": r[0], "message": r[1], "ai_message": r[2], "phase": r[3],
             "valid": None if r[4] is None else bool(r[4]), "structure": r[5], "unknown": r[6],
-            "issue": r[7], "response_type": r[8], "prompt_strength": r[9]}
+            "issue": r[7], "response_type": r[8], "prompt_strength": r[9],
+            "self_label": r[10], "self_label_text": r[11]}
 
 
 def get_produced(user_id: str, phase: int) -> list[str]:
@@ -374,14 +365,11 @@ def get_produced(user_id: str, phase: int) -> list[str]:
 
 
 def get_valid_problems(session_id: int) -> list[dict]:
-    """成立した作問を時系列で返す（児童の「作った お話」一覧用）。
-
-    判定保留（issue='pending'：API 不通で受理だけした作問）も含める。一覧には載せるが
-    structure は None のまま（到達構造には数えない）。"""
+    """成立した作問を時系列で返す（児童の「つくった お話」一覧用。表示番号＝この並びの 1 始まり）。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT log_id, message, structure, unknown, is_new, phase FROM chat_logs
-               WHERE session_id = ? AND (valid = 1 OR issue = 'pending')
+               WHERE session_id = ? AND valid = 1
                ORDER BY log_id""",
             (session_id,),
         ).fetchall()

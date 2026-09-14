@@ -3,8 +3,6 @@
 // 描画コードは末尾に残してあるが、このフラグが false の間は呼ばれない。
 const ENABLE_FIGURES = false;
 
-const LIGHT_INDEX = { tobun: 0, hougan: 1, bai: 2 };   // 到達構造 → 灯の位置（ラベルは出さない）
-
 const state = {
   userId: null,
   sessionId: null,
@@ -13,9 +11,10 @@ const state = {
   showSupport: false,
   history: [],
   problems: [],
-  uiStrength: 0,          // そのフェーズで出た予告支援の最大の強さ（表示ゲート用）
   allReached: false,
   sending: false,
+  dialog: null,           // null / declaration / self_label_text / self_label_choice
+  choices: [],            // 中・ステップ2の3択（サーバから受け取る）
   pollTimer: null,
   pollSeconds: 5,
   switching: false,
@@ -135,9 +134,9 @@ function enter(payload) {
   state.expression = payload.expression;
   state.showSupport = !!payload.show_support;
   state.history = payload.history || [];
-  state.uiStrength = payload.ui_strength || 0;
   state.allReached = !!payload.all_reached;
   state.problems = [];
+  state.choices = payload.choices || [];
   state.pollSeconds = payload.poll_seconds || 5;
   saveSession();
 
@@ -145,6 +144,8 @@ function enter(payload) {
   (payload.problems || []).forEach(p => addProblem(p.text, p.structure));
   renderConversation(payload.conversation || []);
   addNotice(kickoffText(state.phase, state.expression));
+  setTarget(payload.declared, payload.target_label);
+  setDialog(state.showSupport ? payload.dialog : null);
   updatePanels();
   showScreen("screen-game");
   document.getElementById("chat-input").focus();
@@ -152,9 +153,9 @@ function enter(payload) {
 }
 
 function kickoffText(phase, expression) {
-  if (phase === 2) return `ここからは、おくった お話に 返事が 来るよ。「${expression}」になる お話を 作ろう。`;
-  if (phase === 3) return `新しい式だよ。「${expression}」になる お話を 作って おくってね。`;
-  return `「${expression}」になる お話を 作って おくってね。`;
+  if (phase === 2) return `ここからは、おくった 問題に 返事が 来るよ。「${expression}」になる 問題を 作ろう。`;
+  if (phase === 3) return `新しい式だよ。「${expression}」になる 問題を 作って おくってね。`;
+  return `「${expression}」になる 問題を 作って おくってね。`;
 }
 
 function resetGame() {
@@ -163,6 +164,7 @@ function resetGame() {
   document.getElementById("game-user-name").textContent = state.userId ? `${state.userId} さん` : "";
   document.getElementById("game-expression").textContent = state.expression || "";
   document.getElementById("chat-input").value = "";
+  document.getElementById("sub-input").value = "";
 }
 
 document.getElementById("btn-logout").addEventListener("click", () => {
@@ -198,9 +200,11 @@ async function pollConfig() {
     const cfg = await res.json();
     if (cfg.phase !== state.phase) {
       await handlePhaseChange(cfg);
-    } else if (cfg.expression !== state.expression) {
+    } else if (cfg.expression && cfg.expression !== state.expression) {
+      // 管理画面からの個別の式の上書き
       state.expression = cfg.expression;
       document.getElementById("game-expression").textContent = cfg.expression;
+      addNotice(`式が「${cfg.expression}」に かわったよ。`);
     }
   } catch (e) { /* 次の周期で再試行 */ }
 }
@@ -211,6 +215,7 @@ async function handlePhaseChange(cfg) {
   state.switching = true;
   stopPolling();
   document.getElementById("chat-input").value = "";
+  setDialog(null);
   showPhaseBanner(cfg);
   await new Promise(r => setTimeout(r, 2600));
   try {
@@ -231,9 +236,7 @@ async function handlePhaseChange(cfg) {
 
 function showPhaseBanner(cfg) {
   const sub = document.getElementById("phase-banner-sub");
-  sub.textContent = cfg.phase === 3
-    ? `つぎは「${cfg.expression}」で 作るよ`
-    : `つぎは 新しい 画面で 作るよ`;
+  sub.textContent = cfg.phase === 3 ? "つぎは 新しい 式で 作るよ" : "つぎは 新しい 画面で 作るよ";
   document.getElementById("phase-banner").hidden = false;
 }
 function hidePhaseBanner() {
@@ -244,6 +247,24 @@ function hidePhaseBanner() {
 function scrollLog() {
   const log = document.getElementById("chat-log");
   log.scrollTop = log.scrollHeight;
+}
+
+// 文言の **強調** と改行を描く（HTML は入れない：テキストノードと <strong>/<br> だけ）
+function renderRich(el, text) {
+  el.textContent = "";
+  String(text || "").split("\n").forEach((line, li) => {
+    if (li > 0) el.appendChild(document.createElement("br"));
+    line.split("**").forEach((part, i) => {
+      if (!part) return;
+      if (i % 2 === 1) {
+        const b = document.createElement("strong");
+        b.textContent = part;
+        el.appendChild(b);
+      } else {
+        el.appendChild(document.createTextNode(part));
+      }
+    });
+  });
 }
 
 function addUserBubble(text) {
@@ -275,21 +296,47 @@ function addNotice(text) {
   scrollLog();
 }
 
-// 吹き出しの見た目：新しい聞き方の称賛は緑の強調、3つそろった done はクリア表示、それ以外は通常。
-function bubbleClass(responseType, isNew) {
+// 吹き出しの見た目：新しい問題の称賛は緑の強調、done はクリア表示、強（場面固定）は文頭を強調、それ以外は通常。
+function bubbleClass(responseType, isNew, strength) {
   if (responseType === "done") return "clear";
   if (responseType === "praise" && isNew) return "new-structure";
+  if (responseType === "prompt" && strength === 3) return "normal strong-prompt";
   return "normal";
 }
 
-function addAiBubble(text, responseType, isNew) {
+function addAiBubble(text, responseType, isNew, strength) {
   const log = document.getElementById("chat-log");
   const el = document.createElement("div");
-  el.className = `bubble bubble-ai ${bubbleClass(responseType, isNew)}`;
-  el.textContent = text;
+  el.className = `bubble bubble-ai ${bubbleClass(responseType, isNew, strength)}`;
+  renderRich(el, text);
   log.appendChild(el);
   scrollLog();
   return el;
+}
+
+// 中・ステップ2の3択。3つとも常に出す。選ぶと送信し、選んだものだけ残して無効化する。
+function addChoiceButtons(choices) {
+  disableChoiceButtons();
+  const log = document.getElementById("chat-log");
+  const wrap = document.createElement("div");
+  wrap.className = "choice-buttons";
+  choices.forEach(c => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn-choice";
+    b.textContent = c.label;
+    b.dataset.value = c.value;
+    b.addEventListener("click", () => {
+      wrap.querySelectorAll(".btn-choice").forEach(x => { x.classList.toggle("selected", x === b); x.disabled = true; });
+      sendSelfLabelChoice(c.value, c.label);
+    });
+    wrap.appendChild(b);
+  });
+  log.appendChild(wrap);
+  scrollLog();
+}
+function disableChoiceButtons() {
+  document.querySelectorAll(".choice-buttons .btn-choice").forEach(b => { b.disabled = true; });
 }
 
 function addLoadingBubble() {
@@ -336,7 +383,7 @@ function renderConversation(conversation) {
   conversation.forEach((turn) => {
     if (turn.message) addUserBubble(turn.message);
     if (turn.phase === 2 && state.showSupport) {
-      if (turn.ai_message) addAiBubble(turn.ai_message, turn.response_type, turn.is_new);
+      if (turn.ai_message) addAiBubble(turn.ai_message, turn.response_type, turn.is_new, turn.prompt_strength);
     } else {
       addAckLine("おくったよ");
     }
@@ -344,23 +391,50 @@ function renderConversation(conversation) {
   return true;
 }
 
+// ===== 目標の固定表示・対話の状態 =====
+function setTarget(declared, label) {
+  const bar = document.getElementById("target-bar");
+  if (declared && label) {
+    document.getElementById("target-label").textContent = label;
+    bar.hidden = false;
+  } else {
+    bar.hidden = true;
+  }
+}
+
+// dialog: null / "declaration"（弱：予告入力）/ "self_label_text"（中・ステップ1）/ "self_label_choice"（中・ステップ2）
+function setDialog(dialog) {
+  state.dialog = dialog || null;
+  const area = document.getElementById("sub-input-area");
+  const useSub = state.dialog === "declaration" || state.dialog === "self_label_text";
+  area.hidden = !useSub;
+  if (useSub) {
+    document.getElementById("sub-input").value = "";
+    document.getElementById("sub-input").focus();
+  }
+  if (state.dialog === "self_label_choice") addChoiceButtons(state.choices);
+  else if (!useSub) disableChoiceButtons();
+}
+
+function applySupport(data) {
+  if (data.history) state.history = data.history;
+  state.allReached = !!data.all_reached;
+  setTarget(data.declared, data.target_label);
+  updatePanels();
+}
+
 // ===== 右パネル =====
 function updatePanels() {
   const show = state.showSupport;
-  // 信号機は予告支援の「中」（強さ2）以上が出た後、または3つそろった後だけ見せる。
-  // 「3つある」ことを先に見せないため（予告支援が入るまでは、3つそろったときだけ出る）。
-  document.getElementById("lights-card").hidden = !(show && (state.uiStrength >= 2 || state.allReached));
-  // 作った問題リストはフェーズ2のあいだ常に見せる（自分の産出を読み返せる状態を保つ）。
+  // 進捗（信号機）と一覧はフェーズ2のあいだ常時表示。マークは到達数だけ（どの構造かは示さない）
+  document.getElementById("lights-card").hidden = !show;
   document.getElementById("problems-card").hidden = !show;
-
-  for (let i = 0; i < 3; i++) document.getElementById(`light-${i}`).classList.remove("on");
-  state.history.forEach(s => {
-    const idx = LIGHT_INDEX[s];
-    if (idx !== undefined) document.getElementById(`light-${idx}`).classList.add("on");
-  });
-  const remaining = 3 - state.history.filter(s => LIGHT_INDEX[s] !== undefined).length;
-  document.getElementById("lights-label").textContent =
-    remaining > 0 ? `あと ${remaining} つ` : "3つとも できた！";
+  const n = Math.min(3, state.history.length);
+  for (let i = 0; i < 3; i++) {
+    const el = document.getElementById(`light-${i}`);
+    el.classList.toggle("on", i < n);
+    el.textContent = i < n ? "●" : "○";
+  }
   document.getElementById("count-number").textContent = state.problems.length;
 }
 
@@ -377,7 +451,7 @@ function addProblem(text, structure) {
   list.scrollTop = list.scrollHeight;
 }
 
-// ===== Send =====
+// ===== Send（作問・対話） =====
 async function sendMessage() {
   if (state.sending || state.switching) return;
   const input = document.getElementById("chat-input");
@@ -387,6 +461,8 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
+  // 予告・自己ラベルの途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
+  setDialog(null);
 
   addUserBubble(text);
   const loader = addLoadingBubble();
@@ -413,14 +489,11 @@ async function sendMessage() {
       if (data.phase !== state.phase) pollConfig();
       return;
     }
-    if (data.history) state.history = data.history;
-    if (typeof data.ui_strength === "number") state.uiStrength = data.ui_strength;
-    state.allReached = !!data.all_reached;
-    // accepted：成立した作問と、判定保留（API不通）で受理した作問。再送は追加しない
+    // accepted：成立した作問だけ一覧に追加（再送・判定エラーは追加しない）
     if (data.accepted) addProblem(text, data.structure);
-    updatePanels();
-
-    addAiBubble(data.message, data.response_type, data.is_new);
+    applySupport(data);
+    addAiBubble(data.message, data.response_type, data.is_new, data.prompt_strength);
+    setDialog(data.dialog);
   } catch (e) {
     stopWatch();
     loader.remove();
@@ -428,39 +501,90 @@ async function sendMessage() {
   } finally {
     state.sending = false;
     document.getElementById("btn-send").disabled = false;
-    input.focus();
+    if (!state.dialog) input.focus();
+  }
+}
+
+// ===== 予告（弱）／自己ラベル（中・ステップ1）の送信 =====
+async function sendSubInput() {
+  if (state.sending || state.switching || !state.dialog) return;
+  const input = document.getElementById("sub-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const mode = state.dialog;
+  state.sending = true;
+  document.getElementById("btn-sub-send").disabled = true;
+  input.value = "";
+  addUserBubble(text);
+  try {
+    if (mode === "declaration") {
+      const { ok, data } = await postJson("/api/declare", { session_id: state.sessionId, user_id: state.userId, text });
+      if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
+      // 分類できれば目標を固定表示。unknown なら何も出さず作問入力に戻す（再質問しない）
+      applySupport(data);
+      setDialog(null);
+    } else if (mode === "self_label_text") {
+      const { ok, data } = await postJson("/api/self_label", { session_id: state.sessionId, user_id: state.userId, text });
+      if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
+      applySupport(data);
+      addAiBubble(data.message, "prompt", false, 2);
+      state.choices = data.choices || state.choices;
+      setDialog(data.dialog);   // self_label_choice → 3択
+    }
+  } catch (e) {
+    addNotice("エラーが起きました。もう一度送ってみてね。");
+  } finally {
+    state.sending = false;
+    document.getElementById("btn-sub-send").disabled = false;
+    if (!state.dialog) document.getElementById("chat-input").focus();
+  }
+}
+
+// 中・ステップ2：3択の送信 → ステップ3（目標の指定）
+async function sendSelfLabelChoice(value, label) {
+  if (state.switching) return;
+  state.dialog = null;
+  addUserBubble(label);
+  try {
+    const { ok, data } = await postJson("/api/self_label", { session_id: state.sessionId, user_id: state.userId, choice: value });
+    if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
+    applySupport(data);
+    addAiBubble(data.message, "prompt", false, 2);
+  } catch (e) {
+    addNotice("エラーが起きました。もう一度送ってみてね。");
+  } finally {
+    document.getElementById("chat-input").focus();
   }
 }
 
 document.getElementById("btn-send").addEventListener("click", sendMessage);
+document.getElementById("btn-sub-send").addEventListener("click", sendSubInput);
 
 let isComposing = false;
 let compositionJustEnded = false;
-const chatInput = document.getElementById("chat-input");
-chatInput.addEventListener("compositionstart", () => { isComposing = true; });
-chatInput.addEventListener("compositionend", () => {
-  isComposing = false;
-  // SafariはEnterでのIME確定時、compositionendがkeydownより先に発火するため、
-  // その直後のEnter keydownは変換確定とみなして送信しない（次のイベントループで解除）
-  compositionJustEnded = true;
-  setTimeout(() => { compositionJustEnded = false; }, 0);
-});
-chatInput.addEventListener("keydown", (e) => {
-  if (e.key !== "Enter" || e.shiftKey) return;
-  if (isComposing || compositionJustEnded || e.keyCode === 229) return;
-  e.preventDefault();
-  sendMessage();
-});
+function bindEnter(el, handler) {
+  el.addEventListener("compositionstart", () => { isComposing = true; });
+  el.addEventListener("compositionend", () => {
+    isComposing = false;
+    // SafariはEnterでのIME確定時、compositionendがkeydownより先に発火するため、
+    // その直後のEnter keydownは変換確定とみなして送信しない（次のイベントループで解除）
+    compositionJustEnded = true;
+    setTimeout(() => { compositionJustEnded = false; }, 0);
+  });
+  el.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    if (isComposing || compositionJustEnded || e.keyCode === 229) return;
+    e.preventDefault();
+    handler();
+  });
+}
+bindEnter(document.getElementById("chat-input"), sendMessage);
+bindEnter(document.getElementById("sub-input"), sendSubInput);
 
 // ===== Boot =====
 async function showLoginExpression() {
-  try {
-    const res = await fetch("/api/config");
-    if (res.ok) {
-      const cfg = await res.json();
-      document.getElementById("login-expression").textContent = cfg.expression;
-    }
-  } catch (e) { /* noop */ }
+  // 式は出席番号（奇偶）とフェーズで決まるので、ログイン前は出さない
+  document.getElementById("login-expression").textContent = "";
 }
 
 async function tryRestore() {

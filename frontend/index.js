@@ -51,7 +51,7 @@ async function postJson(path, body) {
 }
 
 // ===== Login screen =====
-const ID_RE = /^[0-9a-z]{2}$/;
+const ID_RE = /^[0-9]{2}$/;
 const inputId = document.getElementById("input-id");
 const btnLogin = document.getElementById("btn-login");
 const loginError = document.getElementById("login-error");
@@ -63,7 +63,7 @@ inputId.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); }
 async function doLogin() {
   const val = inputId.value.trim().toLowerCase();
   if (!ID_RE.test(val)) {
-    loginError.textContent = "半角英数字2文字で入力してね";
+    loginError.textContent = "数字2文字で入力してね";
     return;
   }
   loginError.textContent = "";

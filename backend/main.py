@@ -37,7 +37,7 @@ if not config.ADMIN_PASSWORD:
 STRUCTURES = {"tobun", "hougan", "bai"}
 LEVEL_NAMES = database.LEVEL_NAMES
 MAX_LEVEL = len(LEVEL_NAMES)          # 水準3（場面想起）が上限
-USER_ID_PATTERN = re.compile(r"^[0-9a-z]{2}$")
+USER_ID_PATTERN = re.compile(r"^[0-9]{2}$")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 # 児童側の設定ポーリングを心拍として使う（user_id → 最終受信）。単一プロセス前提のメモリ保持。
@@ -134,7 +134,7 @@ class ExpressionsRequest(BaseModel):
 def _normalize_user_id(user_id: str) -> str:
     uid = (user_id or "").strip().lower()
     if not USER_ID_PATTERN.match(uid):
-        raise HTTPException(status_code=400, detail="学籍番号は半角英数字2桁で入力してください")
+        raise HTTPException(status_code=400, detail="出席番号は数字2桁で入力してください")
     return uid
 
 

@@ -1,8 +1,18 @@
+"""SQLite（sessions / chat_logs / app_config / phase_changes）。
+
+- 時刻はすべて JST の 'YYYY-MM-DD HH:MM:SS' で保存する（旧実装は UTC で、書き出し時に日付がずれていた）。
+- sessions は UNIQUE(user_id, phase)。1児童1フェーズ1セッションを DB レベルで保証する
+  （旧実装では別タブで並行セッションが作られ、フェーズごとの状態が分裂していた）。
+- 起動時にテーブルが無ければ作る。旧スキーマ（response_json 列の chat_logs 等）が残っていた場合は
+  DROP せず `*_legacy_YYYYMMDD` に改名して退避し、新スキーマで作り直す（Render の永続ディスク上の
+  DB をそのまま使えるようにするため）。
+- is_new は「同じ児童・同じフェーズ」で初めて出た構造かどうか（フェーズスコープ）。
+"""
+
 import os
 import sqlite3
-import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from config import DEFAULT_EXPRESSION_A, DEFAULT_EXPRESSION_B
 
@@ -12,12 +22,14 @@ if not DB_PATH.parent.exists():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 STRUCTURES = ("tobun", "hougan", "bai")
-LEVEL_NAMES = ("level1", "level2", "level3")
+JST = timezone(timedelta(hours=9))
+
+RESPONSE_TYPES = ("form", "praise", "prompt", "talk", "done", "error")
 
 
-def _now():
-    """UTC ナイーブ（旧データと同じ書式 'YYYY-MM-DD HH:MM:SS.ffffff'）。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+def _now() -> str:
+    """JST の 'YYYY-MM-DD HH:MM:SS'（授業時間帯と一致する）。"""
+    return datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _conn():
@@ -27,89 +39,130 @@ def _conn():
     return con
 
 
-def init_db():
-    with _conn() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                expression TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS chat_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL,
-                user_id TEXT NOT NULL,
-                message TEXT NOT NULL,
-                response_json TEXT NOT NULL,
-                structure TEXT,
-                is_new INTEGER NOT NULL DEFAULT 0,
-                input_type TEXT,
-                stumble TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # グローバル設定（常に1行）
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS app_config (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                current_phase INTEGER NOT NULL DEFAULT 1,
-                expression_a TEXT NOT NULL DEFAULT '24 ÷ 4',
-                expression_b TEXT NOT NULL DEFAULT '18 ÷ 3',
-                run_id INTEGER NOT NULL DEFAULT 1,
-                updated_at TIMESTAMP
-            )
-        """)
-        con.execute(
-            """INSERT OR IGNORE INTO app_config (id, current_phase, expression_a, expression_b, run_id, updated_at)
-               VALUES (1, 1, ?, ?, 1, ?)""",
-            (DEFAULT_EXPRESSION_A, DEFAULT_EXPRESSION_B, _now()),
-        )
-        # フェーズ・式の変更履歴（分析時の時刻復元用）
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS phase_changes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id INTEGER NOT NULL,
-                phase INTEGER NOT NULL,
-                expression_a TEXT,
-                expression_b TEXT,
-                note TEXT,
-                changed_at TIMESTAMP
-            )
-        """)
-        _migrate(con)
+# ===== スキーマ =====
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id        TEXT    NOT NULL,
+    phase          INTEGER NOT NULL,
+    expression     TEXT    NOT NULL,
+    parity_group   TEXT    NOT NULL,
+    session_start  TEXT    NOT NULL,
+    session_end    TEXT,
+    -- 予告支援の状態機械（仕様 v2 2-2。フェーズスコープ＝セッションごと）
+    declared       TEXT,
+    declared_by    TEXT,
+    stuck_count    INTEGER NOT NULL DEFAULT 0,
+    miss_count     INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_phase ON sessions(user_id, phase);
+
+CREATE TABLE IF NOT EXISTS chat_logs (
+    log_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          INTEGER NOT NULL,
+    user_id             TEXT    NOT NULL,
+    phase               INTEGER NOT NULL,
+    expression          TEXT    NOT NULL,
+    created_at          TEXT    NOT NULL,
+
+    input_type          TEXT    NOT NULL,
+    message             TEXT,
+    ai_message          TEXT,
+
+    valid               INTEGER,
+    structure           TEXT,
+    unknown             TEXT,
+    issue               TEXT,
+    is_new              INTEGER,
+
+    response_type       TEXT,
+    prompt_strength     INTEGER,
+
+    declared_structure  TEXT,
+    declared_by         TEXT,
+    declaration_met     INTEGER,
+
+    self_label          TEXT,
+    self_label_text     TEXT,
+    self_label_match    INTEGER,
+
+    produced_structures TEXT,
+    stuck_count         INTEGER,
+    miss_count          INTEGER,
+
+    latency_ms          INTEGER,
+
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_logs_user ON chat_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_chat_logs_sess ON chat_logs(session_id);
+
+CREATE TABLE IF NOT EXISTS app_config (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    current_phase  INTEGER NOT NULL DEFAULT 1,
+    expression_a   TEXT    NOT NULL,
+    expression_b   TEXT    NOT NULL,
+    updated_at     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS phase_changes (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    phase          INTEGER NOT NULL,
+    expression_a   TEXT,
+    expression_b   TEXT,
+    note           TEXT,
+    changed_at     TEXT
+);
+"""
+
+# 「旧スキーマである」と判定する目印（この列があるのは 9/14 以前のテーブルだけ）
+_LEGACY_MARKERS = {
+    "chat_logs": "response_json",
+    "sessions": "run_id",
+    "app_config": "run_id",
+    "phase_changes": "run_id",
+}
 
 
-def _add_column(con, table: str, cols: list[str], name: str, ddl: str):
-    if name not in cols:
-        con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+def _columns(con, table: str) -> list[str]:
+    return [row[1] for row in con.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+def _archive_legacy_tables(con):
+    """旧スキーマのテーブルを `*_legacy_YYYYMMDD` に改名して退避する（DROP しない）。"""
+    stamp = datetime.now(JST).strftime("%Y%m%d")
+    for table, marker in _LEGACY_MARKERS.items():
+        cols = _columns(con, table)
+        if cols and marker in cols:
+            name = f"{table}_legacy_{stamp}"
+            n = 1
+            while con.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (name,)).fetchone():
+                n += 1
+                name = f"{table}_legacy_{stamp}_{n}"
+            con.execute(f"ALTER TABLE {table} RENAME TO {name}")
+            print(f"[database] legacy table archived: {table} -> {name}")
 
 
 def _migrate(con):
-    """既存DBを壊さずにスキーマを更新する（データは保持）。"""
-    cols = [row[1] for row in con.execute("PRAGMA table_info(chat_logs)").fetchall()]
-    _add_column(con, "chat_logs", cols, "input_type", "TEXT")        # 作問/対話
-    _add_column(con, "chat_logs", cols, "stumble", "TEXT")           # 旧つまづき（新規書き込みは停止）
-    _add_column(con, "chat_logs", cols, "phase", "INTEGER")          # 1/2/3
-    _add_column(con, "chat_logs", cols, "support_level", "TEXT")     # 全ターン必ず記録
-    _add_column(con, "chat_logs", cols, "learner_state", "TEXT")     # S0/S1/S2/S3
-    _add_column(con, "chat_logs", cols, "unknown", "TEXT")           # 求める量5区分
-    _add_column(con, "chat_logs", cols, "issue", "TEXT")             # ai_judge の生 issue
-    _add_column(con, "chat_logs", cols, "button_pressed", "TEXT")    # 押されたボタン値
-    _add_column(con, "chat_logs", cols, "stall_count", "INTEGER")    # その時点の反復回数
-    _add_column(con, "chat_logs", cols, "target_structure", "TEXT")  # 専用カラム化
-    _add_column(con, "chat_logs", cols, "expression", "TEXT")        # そのターンの式
-    # 計測（llm_call）：判定・声かけの所要時間、API リトライ回数、判定の状態
-    _add_column(con, "chat_logs", cols, "judge_latency_ms", "INTEGER")     # ai_judge の所要ms（リトライ込み）
-    _add_column(con, "chat_logs", cols, "dialogue_latency_ms", "INTEGER")  # ai_dialogue の所要ms
-    _add_column(con, "chat_logs", cols, "retry_count", "INTEGER")          # API リトライ回数（0〜3）
-    _add_column(con, "chat_logs", cols, "judge_status", "TEXT")            # ok / retried_ok / failed / skipped
+    """新スキーマ以降の列追加（既存 DB を壊さない）。SCHEMA にも同じ列を書いておくこと。"""
+    cols = _columns(con, "sessions")
+    for name, ddl in (("declared", "TEXT"), ("declared_by", "TEXT"),
+                      ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0")):
+        if cols and name not in cols:
+            con.execute(f"ALTER TABLE sessions ADD COLUMN {name} {ddl}")
 
-    scols = [row[1] for row in con.execute("PRAGMA table_info(sessions)").fetchall()]
-    _add_column(con, "sessions", scols, "phase", "INTEGER NOT NULL DEFAULT 1")   # 作成時のフェーズ
-    _add_column(con, "sessions", scols, "run_id", "INTEGER NOT NULL DEFAULT 0")  # 旧データは run 0（当日の run とは一致しない）
+
+def init_db():
+    with _conn() as con:
+        _archive_legacy_tables(con)
+        con.executescript(SCHEMA)
+        _migrate(con)
+        con.execute(
+            """INSERT OR IGNORE INTO app_config (id, current_phase, expression_a, expression_b, updated_at)
+               VALUES (1, 1, ?, ?, ?)""",
+            (DEFAULT_EXPRESSION_A, DEFAULT_EXPRESSION_B, _now()),
+        )
 
 
 # ===== グローバル設定 =====
@@ -117,15 +170,9 @@ def _migrate(con):
 def get_config() -> dict:
     with _conn() as con:
         r = con.execute(
-            "SELECT current_phase, expression_a, expression_b, run_id, updated_at FROM app_config WHERE id = 1"
+            "SELECT current_phase, expression_a, expression_b, updated_at FROM app_config WHERE id = 1"
         ).fetchone()
-    return {
-        "current_phase": r[0],
-        "expression_a": r[1],
-        "expression_b": r[2],
-        "run_id": r[3],
-        "updated_at": r[4],
-    }
+    return {"current_phase": r[0], "expression_a": r[1], "expression_b": r[2], "updated_at": r[3]}
 
 
 def expression_for_phase(cfg: dict, phase: int) -> str:
@@ -134,16 +181,19 @@ def expression_for_phase(cfg: dict, phase: int) -> str:
 
 def _record_phase_change(con, cfg_after: dict, note: str):
     con.execute(
-        """INSERT INTO phase_changes (run_id, phase, expression_a, expression_b, note, changed_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (cfg_after["run_id"], cfg_after["current_phase"], cfg_after["expression_a"],
-         cfg_after["expression_b"], note, _now()),
+        """INSERT INTO phase_changes (phase, expression_a, expression_b, note, changed_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (cfg_after["current_phase"], cfg_after["expression_a"], cfg_after["expression_b"], note, _now()),
     )
 
 
 def set_phase(phase: int) -> dict:
+    """フェーズを切り替える。それ以外のフェーズで開いているセッションは終了時刻を打つ
+    （児童が入り直せば find_or_create_session で再開＝終了時刻は消える）。"""
     with _conn() as con:
-        con.execute("UPDATE app_config SET current_phase = ?, updated_at = ? WHERE id = 1", (phase, _now()))
+        now = _now()
+        con.execute("UPDATE app_config SET current_phase = ?, updated_at = ? WHERE id = 1", (phase, now))
+        con.execute("UPDATE sessions SET session_end = ? WHERE phase != ? AND session_end IS NULL", (now, phase))
     cfg = get_config()
     with _conn() as con:
         _record_phase_change(con, cfg, "set_phase")
@@ -162,295 +212,190 @@ def set_expressions(expression_a: str, expression_b: str) -> dict:
     return cfg
 
 
-def start_new_run() -> dict:
-    """新しい回（run）を始める。run_id を進め、フェーズ1に戻す。データは消さない。"""
-    with _conn() as con:
-        con.execute(
-            "UPDATE app_config SET run_id = run_id + 1, current_phase = 1, updated_at = ? WHERE id = 1",
-            (_now(),),
-        )
-    cfg = get_config()
-    with _conn() as con:
-        _record_phase_change(con, cfg, "new_run")
-    return cfg
-
-
 # ===== セッション =====
 
-def _phase_group(phase: int) -> tuple[int, ...]:
-    """フェーズごとに別セッション。
+def parity_group_of(user_id: str) -> str:
+    """出席番号の奇偶（式のカウンターバランス用）。"""
+    try:
+        return "odd" if int(user_id) % 2 else "even"
+    except ValueError:
+        return "odd"
 
-    フェーズ1（事前・支援なし）で作った話はフェーズ1で完結させ、フェーズ2には引き継がない
-    （＝フェーズ2の支援は、フェーズ2で打った内容だけを根拠にする）。
+
+def find_or_create_session(user_id: str, phase: int, expression: str) -> tuple[int, bool]:
+    """その児童・そのフェーズのセッションを返す。無ければ作る。(session_id, created)
+
+    UNIQUE(user_id, phase) があるので、別タブから同時に呼ばれても2つ目は作られない
+    （INSERT OR IGNORE）。既存セッションの再開時は session_end を消す。
     """
-    return (phase,)
-
-
-def find_session(user_id: str, run_id: int, phase: int) -> int | None:
-    group = _phase_group(phase)
-    ph = ",".join("?" * len(group))
-    with _conn() as con:
-        row = con.execute(
-            f"""SELECT session_id FROM sessions
-                WHERE user_id = ? AND run_id = ? AND phase IN ({ph})
-                ORDER BY session_id DESC LIMIT 1""",
-            (user_id, run_id, *group),
-        ).fetchone()
-    return row[0] if row else None
-
-
-def create_session(user_id: str, expression: str, phase: int = 1, run_id: int = 1) -> int:
     with _conn() as con:
         cur = con.execute(
-            "INSERT INTO sessions (user_id, expression, phase, run_id, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_id, expression, phase, run_id, _now()),
+            """INSERT OR IGNORE INTO sessions (user_id, phase, expression, parity_group, session_start)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, phase, expression, parity_group_of(user_id), _now()),
         )
-        return cur.lastrowid
+        created = cur.rowcount == 1
+        sid = con.execute(
+            "SELECT session_id FROM sessions WHERE user_id = ? AND phase = ?", (user_id, phase)
+        ).fetchone()[0]
+        if not created:
+            con.execute("UPDATE sessions SET session_end = NULL WHERE session_id = ?", (sid,))
+    return sid, created
 
 
-def find_or_create_session(user_id: str, run_id: int, phase: int, expression: str) -> tuple[int, bool]:
-    """現在の run・フェーズ群に対応するセッションを返す。無ければ作る。(session_id, created)"""
-    sid = find_session(user_id, run_id, phase)
-    if sid is not None:
-        return sid, False
-    return create_session(user_id, expression, phase, run_id), True
+def end_session(session_id: int):
+    """ログアウト時。終了時刻を打つ（入り直せば消える）。"""
+    with _conn() as con:
+        con.execute("UPDATE sessions SET session_end = ? WHERE session_id = ? AND session_end IS NULL",
+                    (_now(), session_id))
 
 
 def get_session(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
-            "SELECT session_id, user_id, expression, phase, run_id, created_at FROM sessions WHERE session_id = ?",
+            """SELECT session_id, user_id, phase, expression, parity_group, session_start, session_end,
+                      declared, declared_by, stuck_count, miss_count
+               FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
     if not r:
         return None
-    return {"session_id": r[0], "user_id": r[1], "expression": r[2], "phase": r[3], "run_id": r[4], "created_at": r[5]}
+    return {"session_id": r[0], "user_id": r[1], "phase": r[2], "expression": r[3],
+            "parity_group": r[4], "session_start": r[5], "session_end": r[6],
+            "declared": r[7], "declared_by": r[8], "stuck_count": r[9] or 0, "miss_count": r[10] or 0}
 
 
-def get_session_user(session_id: int) -> str | None:
-    s = get_session(session_id)
-    return s["user_id"] if s else None
-
-
-def get_sessions(user_id: str) -> list[dict]:
+def set_state(session_id: int, *, declared: str | None, declared_by: str | None,
+              stuck_count: int, miss_count: int):
+    """状態機械の変数を保存する（仕様 v2 2-2）。"""
     with _conn() as con:
-        rows = con.execute(
-            """SELECT s.session_id, s.created_at, s.phase, s.run_id,
-                      COUNT(CASE WHEN cl.structure IS NOT NULL THEN 1 END) as problem_count,
-                      GROUP_CONCAT(DISTINCT CASE WHEN cl.is_new = 1 AND cl.structure IS NOT NULL THEN cl.structure END) as structures
-               FROM sessions s
-               LEFT JOIN chat_logs cl ON cl.session_id = s.session_id
-               WHERE s.user_id = ?
-               GROUP BY s.session_id
-               ORDER BY s.created_at DESC""",
-            (user_id,),
-        ).fetchall()
-    return [
-        {
-            "session_id": r[0],
-            "created_at": r[1],
-            "phase": r[2],
-            "run_id": r[3],
-            "problem_count": r[4] or 0,
-            "structures": [s for s in (r[5] or "").split(",") if s],
-        }
-        for r in rows
-    ]
+        con.execute(
+            """UPDATE sessions SET declared = ?, declared_by = ?, stuck_count = ?, miss_count = ?
+               WHERE session_id = ?""",
+            (declared, declared_by, stuck_count, miss_count, session_id),
+        )
 
 
 # ===== ログ =====
 
-def save_log(session_id: int, user_id: str, message: str, response_json: dict,
-             structure: str | None, is_new: bool, input_type: str | None = None,
-             phase: int | None = None, support_level: str | None = None,
-             learner_state: str | None = None, unknown: str | None = None,
-             issue: str | None = None, button_pressed: str | None = None,
-             stall_count: int | None = None, target_structure: str | None = None,
-             expression: str | None = None,
-             judge_latency_ms: int | None = None, dialogue_latency_ms: int | None = None,
-             retry_count: int | None = None, judge_status: str | None = None) -> int:
+def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
+             input_type: str, message: str | None, ai_message: str | None,
+             valid: bool | None = None, structure: str | None = None, unknown: str | None = None,
+             issue: str | None = None, is_new: bool | None = None,
+             response_type: str | None = None, prompt_strength: int | None = None,
+             declared_structure: str | None = None, declared_by: str | None = None,
+             declaration_met: bool | None = None,
+             self_label: str | None = None, self_label_text: str | None = None,
+             self_label_match: bool | None = None,
+             produced_structures: list[str] | None = None,
+             stuck_count: int | None = None, miss_count: int | None = None,
+             latency_ms: int | None = None) -> int:
+    def b(v):
+        return None if v is None else int(bool(v))
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO chat_logs
-               (session_id, user_id, message, response_json, structure, is_new, input_type, stumble,
-                phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-                target_structure, expression,
-                judge_latency_ms, dialogue_latency_ms, retry_count, judge_status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session_id, user_id, message,
-             json.dumps(response_json, ensure_ascii=False),
-             structure, int(is_new), input_type,
-             phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-             target_structure, expression,
-             judge_latency_ms, dialogue_latency_ms, retry_count, judge_status, _now()),
+               (session_id, user_id, phase, expression, created_at,
+                input_type, message, ai_message,
+                valid, structure, unknown, issue, is_new,
+                response_type, prompt_strength,
+                declared_structure, declared_by, declaration_met,
+                self_label, self_label_text, self_label_match,
+                produced_structures, stuck_count, miss_count, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, user_id, phase, expression, _now(),
+             input_type, message, ai_message,
+             b(valid), structure, unknown, issue, b(is_new),
+             response_type, prompt_strength,
+             declared_structure, declared_by, b(declaration_met),
+             self_label, self_label_text, b(self_label_match),
+             format_structures(produced_structures) if produced_structures is not None else None,
+             stuck_count, miss_count, latency_ms),
         )
         return cur.lastrowid
 
 
-def _loads(s: str) -> dict:
-    try:
-        return json.loads(s)
-    except Exception:
-        return {}
+def format_structures(structures) -> str:
+    """到達構造集合の保存形式 "tobun,hougan"（固定順）。"""
+    s = set(structures or ())
+    return ",".join(x for x in STRUCTURES if x in s)
 
 
 def get_conversation(session_id: int) -> list[dict]:
     """全ターンを時系列で返す（再開時のチャット再描画用）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT message, response_json, input_type, phase, support_level FROM chat_logs
-               WHERE session_id = ? ORDER BY id""",
+            """SELECT message, ai_message, input_type, phase, response_type, is_new FROM chat_logs
+               WHERE session_id = ? ORDER BY log_id""",
             (session_id,),
         ).fetchall()
-    turns = []
-    for r in rows:
-        resp = _loads(r[1])
-        turns.append({
-            "message": r[0],
-            "ai_message": resp.get("message", ""),
-            "display_type": resp.get("display_type", "normal"),
-            "figure": resp.get("figure"),
-            "tape_diagram": resp.get("tape_diagram"),
-            "buttons": resp.get("buttons"),
-            "input_type": r[2],
-            "phase": r[3],
-            "support_level": r[4],
-        })
-    return turns
+    return [{"message": r[0], "ai_message": r[1], "input_type": r[2], "phase": r[3],
+             "response_type": r[4], "is_new": bool(r[5])} for r in rows]
 
 
 def get_recent_turns(session_id: int, limit: int = 6) -> list[dict]:
     """直近のやりとりを古い順で返す（対話の文脈用）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT message, response_json, input_type, support_level FROM chat_logs
-               WHERE session_id = ? ORDER BY id DESC LIMIT ?""",
+            """SELECT message, ai_message, input_type, response_type FROM chat_logs
+               WHERE session_id = ? ORDER BY log_id DESC LIMIT ?""",
             (session_id, limit),
         ).fetchall()
-    turns = []
-    for r in reversed(rows):
-        resp = _loads(r[1])
-        turns.append({
-            "child": r[0],
-            "ai": resp.get("message", ""),
-            "input_type": r[2],
-            "support_level": r[3],
-        })
-    return turns
+    return [{"child": r[0], "ai": r[1] or "", "input_type": r[2], "response_type": r[3]}
+            for r in reversed(rows)]
 
 
 def get_last_turn(session_id: int) -> dict | None:
-    """直近1ターン（水準2の問いへの応答かどうかの判定・同一本文の再送検出用）。"""
+    """直近1ターン（同一本文の再送検出用）。"""
     with _conn() as con:
         r = con.execute(
-            """SELECT support_level, input_type, response_json, phase, message, button_pressed
-               FROM chat_logs WHERE session_id = ? ORDER BY id DESC LIMIT 1""",
+            """SELECT input_type, message, ai_message, phase, valid, structure, unknown, issue,
+                      response_type, prompt_strength
+               FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
     if not r:
         return None
-    return {"support_level": r[0], "input_type": r[1], "response": _loads(r[2]), "phase": r[3],
-            "message": r[4], "button_pressed": r[5]}
+    return {"input_type": r[0], "message": r[1], "ai_message": r[2], "phase": r[3],
+            "valid": None if r[4] is None else bool(r[4]), "structure": r[5], "unknown": r[6],
+            "issue": r[7], "response_type": r[8], "prompt_strength": r[9]}
 
 
-def get_history(session_id: int) -> list[str]:
-    """到達済み構造（信号機）。セッションはフェーズごとなので、そのフェーズの到達だけを数える。"""
+def get_produced(user_id: str, phase: int) -> list[str]:
+    """到達済み構造（フェーズスコープ）。同じ児童・同じフェーズなら別セッションでも数える。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT DISTINCT structure FROM chat_logs
-               WHERE session_id = ? AND is_new = 1 AND structure IS NOT NULL""",
-            (session_id,),
+               WHERE user_id = ? AND phase = ? AND valid = 1 AND structure IS NOT NULL""",
+            (user_id, phase),
         ).fetchall()
-    return [row[0] for row in rows]
+    found = {r[0] for r in rows}
+    return [s for s in STRUCTURES if s in found]
 
 
 def get_valid_problems(session_id: int) -> list[dict]:
-    """成立した作問を時系列で返す（is_new 問わず。水準1・2の産出一覧に使う）。
+    """成立した作問を時系列で返す（児童の「作った お話」一覧用）。
 
-    判定保留（issue='pending'：API 不通で受理だけした作問）も含める。児童の一覧には載せるが
-    structure は None のまま（信号機・到達構造には数えない）。"""
+    判定保留（issue='pending'：API 不通で受理だけした作問）も含める。一覧には載せるが
+    structure は None のまま（到達構造には数えない）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT id, message, structure, unknown, is_new, phase FROM chat_logs
-               WHERE session_id = ? AND (structure IS NOT NULL OR issue = 'pending')
-               ORDER BY id""",
+            """SELECT log_id, message, structure, unknown, is_new, phase FROM chat_logs
+               WHERE session_id = ? AND (valid = 1 OR issue = 'pending')
+               ORDER BY log_id""",
             (session_id,),
         ).fetchall()
     return [{"id": r[0], "text": r[1], "structure": r[2], "unknown": r[3],
              "is_new": bool(r[4]), "phase": r[5]} for r in rows]
 
 
-def get_session_problems(session_id: int) -> list[dict]:
-    return get_valid_problems(session_id)
-
-
-def get_stall_count(session_id: int) -> int:
-    """直近の新構造到達（is_new=1）より後に、成立作問で同じ構造をくり返した回数。"""
+def get_max_prompt_strength(session_id: int) -> int:
+    """そのセッションで出した予告支援の最大の強さ（0〜3）。フロントの表示ゲートに使う。"""
     with _conn() as con:
-        rows = con.execute(
-            """SELECT is_new FROM chat_logs
-               WHERE session_id = ? AND structure IS NOT NULL
-               ORDER BY id DESC""",
-            (session_id,),
-        ).fetchall()
-    count = 0
-    for (is_new,) in rows:
-        if is_new:
-            break
-        count += 1
-    return count
-
-
-def get_current_level(session_id: int, phase: int = 2) -> int:
-    """現在の支援水準（0〜3）。
-
-    指定フェーズのターンだけを新しい順に見て、最後に記録された level1〜3 の数字を返す。
-    新構造の到達（is_new=1）が見つかったらそこでリセット＝0。フェーズが違う行に
-    達したら（＝フェーズ2の開始より前）0。水準の遷移はフェーズ2の提出だけで数える。
-    """
-    with _conn() as con:
-        rows = con.execute(
-            """SELECT is_new, support_level, phase FROM chat_logs
-               WHERE session_id = ? ORDER BY id DESC""",
-            (session_id,),
-        ).fetchall()
-    for is_new, level, ph in rows:
-        if ph != phase:
-            return 0
-        if is_new:
-            return 0
-        if level in LEVEL_NAMES:
-            return int(level[-1])
-    return 0
-
-
-def get_recent_sakumon_validity(session_id: int, limit: int = 2) -> list[bool]:
-    """直近の作問提出の成立/不成立を新しい順で返す（S0判定用。judgeエラー・判定保留の行は除く）。"""
-    with _conn() as con:
-        rows = con.execute(
-            """SELECT structure, issue FROM chat_logs
-               WHERE session_id = ? AND input_type = 'sakumon'
-                 AND (issue IS NULL OR issue NOT IN ('error', 'pending'))
-               ORDER BY id DESC LIMIT ?""",
-            (session_id, limit),
-        ).fetchall()
-    return [r[0] is not None for r in rows]
-
-
-def has_intentional_evidence(session_id: int) -> bool:
-    """S3の暫定判定：フェーズ2で、水準1以上の声かけを受けた直後の作問提出で新構造が出たことがあるか。"""
-    with _conn() as con:
-        rows = con.execute(
-            """SELECT is_new, support_level, phase, input_type FROM chat_logs
-               WHERE session_id = ? ORDER BY id""",
-            (session_id,),
-        ).fetchall()
-    prev_level = None
-    for is_new, level, ph, input_type in rows:
-        if ph == 2 and is_new and prev_level in LEVEL_NAMES:
-            return True
-        prev_level = level
-    return False
+        r = con.execute(
+            "SELECT MAX(prompt_strength) FROM chat_logs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    return int(r[0] or 0) if r else 0
 
 
 # ===== 管理者用 =====
@@ -459,8 +404,8 @@ def admin_get_all_students() -> list[dict]:
     with _conn() as con:
         rows = con.execute("""
             SELECT s.user_id,
-                   MAX(s.created_at) as last_login,
-                   COUNT(DISTINCT CASE WHEN cl.is_new=1 AND cl.structure IS NOT NULL
+                   MAX(s.session_start) as last_login,
+                   COUNT(DISTINCT CASE WHEN cl.valid = 1 AND cl.structure IS NOT NULL
                          THEN cl.structure END) as structure_count,
                    COUNT(DISTINCT s.session_id) as session_count
             FROM sessions s
@@ -475,76 +420,57 @@ def admin_get_all_students() -> list[dict]:
 def admin_get_student_sessions(user_id: str) -> list[dict]:
     with _conn() as con:
         rows = con.execute("""
-            SELECT s.session_id, s.created_at, s.phase, s.run_id, s.expression,
-                   COUNT(CASE WHEN cl.is_new=1 AND cl.structure IS NOT NULL THEN 1 END) as new_count,
-                   COUNT(CASE WHEN cl.input_type='sakumon' OR (cl.input_type IS NULL AND cl.id IS NOT NULL)
-                         THEN 1 END) as sakumon_count,
-                   COUNT(CASE WHEN cl.input_type='taiwa' THEN 1 END) as taiwa_count,
-                   GROUP_CONCAT(DISTINCT CASE WHEN cl.is_new=1 AND cl.structure IS NOT NULL
-                         THEN cl.structure END) as structures
+            SELECT s.session_id, s.phase, s.expression, s.parity_group, s.session_start, s.session_end,
+                   s.declared, s.declared_by, s.stuck_count, s.miss_count,
+                   COUNT(CASE WHEN cl.is_new = 1 THEN 1 END) as new_count,
+                   COUNT(CASE WHEN cl.input_type = 'sakumon' THEN 1 END) as sakumon_count,
+                   COUNT(CASE WHEN cl.input_type = 'taiwa' THEN 1 END) as taiwa_count,
+                   GROUP_CONCAT(DISTINCT CASE WHEN cl.valid = 1 THEN cl.structure END) as structures
             FROM sessions s
             LEFT JOIN chat_logs cl ON cl.session_id = s.session_id
             WHERE s.user_id = ?
             GROUP BY s.session_id
-            ORDER BY s.created_at DESC
+            ORDER BY s.phase
         """, (user_id,)).fetchall()
     return [
         {
-            "session_id": r[0],
-            "created_at": r[1],
-            "phase": r[2],
-            "run_id": r[3],
-            "expression": r[4],
-            "new_count": r[5] or 0,
-            "sakumon_count": r[6] or 0,
-            "taiwa_count": r[7] or 0,
-            "structures": [s for s in (r[8] or "").split(",") if s],
+            "session_id": r[0], "phase": r[1], "expression": r[2], "parity_group": r[3],
+            "session_start": r[4], "session_end": r[5],
+            "declared": r[6], "declared_by": r[7], "stuck_count": r[8] or 0, "miss_count": r[9] or 0,
+            "new_count": r[10] or 0, "sakumon_count": r[11] or 0, "taiwa_count": r[12] or 0,
+            "structures": [s for s in (r[13] or "").split(",") if s],
         }
         for r in rows
     ]
 
 
+LOG_COLUMNS = [
+    "log_id", "session_id", "user_id", "phase", "expression", "created_at",
+    "input_type", "message", "ai_message",
+    "valid", "structure", "unknown", "issue", "is_new",
+    "response_type", "prompt_strength",
+    "declared_structure", "declared_by", "declaration_met",
+    "self_label", "self_label_text", "self_label_match",
+    "produced_structures", "stuck_count", "miss_count", "latency_ms",
+]
+_BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match")
+
+
+def _row_to_log(r) -> dict:
+    d = dict(zip(LOG_COLUMNS, r))
+    for k in _BOOL_COLUMNS:
+        if d[k] is not None:
+            d[k] = bool(d[k])
+    return d
+
+
 def admin_get_session_logs(session_id: int) -> list[dict]:
     with _conn() as con:
-        rows = con.execute("""
-            SELECT id, message, response_json, structure, is_new, input_type, stumble, created_at,
-                   phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-                   target_structure, expression,
-                   judge_latency_ms, dialogue_latency_ms, retry_count, judge_status
-            FROM chat_logs WHERE session_id = ? ORDER BY id
-        """, (session_id,)).fetchall()
-    result = []
-    for r in rows:
-        resp = _loads(r[2])
-        result.append({
-            "id": r[0],
-            "message": r[1],
-            "ai_message": resp.get("message", ""),
-            "display_type": resp.get("display_type", ""),
-            "valid": resp.get("valid"),
-            "structure": r[3],
-            "is_new": bool(r[4]),
-            "input_type": r[5],
-            "stumble": r[6],
-            "figure": resp.get("figure"),
-            "tape_diagram": resp.get("tape_diagram"),
-            "state": resp.get("state", ""),
-            "created_at": r[7],
-            "phase": r[8],
-            "support_level": r[9],
-            "learner_state": r[10],
-            "unknown": r[11],
-            "issue": r[12],
-            "button_pressed": r[13],
-            "stall_count": r[14],
-            "target_structure": r[15],
-            "expression": r[16],
-            "judge_latency_ms": r[17],
-            "dialogue_latency_ms": r[18],
-            "retry_count": r[19],
-            "judge_status": r[20],
-        })
-    return result
+        rows = con.execute(
+            f"SELECT {', '.join(LOG_COLUMNS)} FROM chat_logs WHERE session_id = ? ORDER BY log_id",
+            (session_id,),
+        ).fetchall()
+    return [_row_to_log(r) for r in rows]
 
 
 def admin_delete_session(session_id: int):
@@ -555,125 +481,70 @@ def admin_delete_session(session_id: int):
 
 def admin_delete_log(log_id: int):
     with _conn() as con:
-        con.execute("DELETE FROM chat_logs WHERE id = ?", (log_id,))
+        con.execute("DELETE FROM chat_logs WHERE log_id = ?", (log_id,))
 
 
 CSV_FIELDS = [
-    "user_id", "session_id", "run_id", "session_phase", "session_start",
+    "user_id", "session_id", "parity_group", "session_start", "session_end",
     "log_id", "created_at", "phase", "expression", "input_type",
-    "message", "ai_message", "display_type",
+    "message", "ai_message",
     "valid", "structure", "unknown", "issue", "is_new",
-    "support_level", "learner_state", "stall_count", "button_pressed", "target_structure",
-    "state", "stumble", "session_new_count",
-    "judge_latency_ms", "dialogue_latency_ms", "retry_count", "judge_status",
+    "response_type", "prompt_strength",
+    "declared_structure", "declared_by", "declaration_met",
+    "self_label", "self_label_text", "self_label_match",
+    "produced_structures", "stuck_count", "miss_count", "latency_ms",
 ]
 
 
 def admin_get_all_logs_csv() -> list[dict]:
+    """全ログを CSV 用の dict で返す。NULL は空文字、真偽値は 1/0。"""
     with _conn() as con:
-        rows = con.execute("""
-            SELECT s.user_id, cl.session_id, s.run_id, s.phase as session_phase, s.created_at as session_start,
-                   cl.id, cl.created_at, cl.phase, cl.expression, cl.input_type,
-                   cl.message, cl.response_json,
-                   cl.structure, cl.unknown, cl.issue, cl.is_new,
-                   cl.support_level, cl.learner_state, cl.stall_count, cl.button_pressed, cl.target_structure,
-                   cl.stumble,
-                   cl.judge_latency_ms, cl.dialogue_latency_ms, cl.retry_count, cl.judge_status,
-                   (SELECT COUNT(*) FROM chat_logs c2
-                    WHERE c2.session_id = cl.session_id AND c2.is_new=1
-                    AND c2.structure IS NOT NULL) as session_new_count
+        rows = con.execute(f"""
+            SELECT s.parity_group, s.session_start, s.session_end,
+                   {', '.join('cl.' + c for c in LOG_COLUMNS)}
             FROM chat_logs cl
             JOIN sessions s ON s.session_id = cl.session_id
-            ORDER BY s.user_id, cl.session_id, cl.id
+            ORDER BY s.user_id, cl.session_id, cl.log_id
         """).fetchall()
     result = []
     for r in rows:
-        resp = _loads(r[11])
-        valid = resp.get("valid")
-        result.append({
-            "user_id": r[0],
-            "session_id": r[1],
-            "run_id": r[2],
-            "session_phase": r[3],
-            "session_start": r[4],
-            "log_id": r[5],
-            "created_at": r[6],
-            "phase": r[7] if r[7] is not None else "",
-            "expression": r[8] or "",
-            "input_type": r[9] or "",
-            "message": r[10],
-            "ai_message": resp.get("message", ""),
-            "display_type": resp.get("display_type", ""),
-            "valid": "" if valid is None else int(bool(valid)),
-            "structure": r[12] or "",
-            "unknown": r[13] or "",
-            "issue": r[14] or "",
-            "is_new": r[15],
-            "support_level": r[16] or "",
-            "learner_state": r[17] or "",
-            "stall_count": "" if r[18] is None else r[18],
-            "button_pressed": r[19] or "",
-            "target_structure": r[20] or "",
-            "state": resp.get("state", "") or "",
-            "stumble": r[21] or "",
-            "judge_latency_ms": "" if r[22] is None else r[22],
-            "dialogue_latency_ms": "" if r[23] is None else r[23],
-            "retry_count": "" if r[24] is None else r[24],
-            "judge_status": r[25] or "",
-            "session_new_count": r[26],
-        })
+        d = dict(zip(LOG_COLUMNS, r[3:]))
+        d.update({"parity_group": r[0], "session_start": r[1], "session_end": r[2]})
+        result.append({k: ("" if d.get(k) is None else d[k]) for k in CSV_FIELDS})
     return result
 
 
-def admin_live_status(run_id: int, phase: int) -> list[dict]:
-    """現在の run・フェーズにおける児童ごとの状態（教師用フェーズ画面）。"""
-    group = _phase_group(phase)
-    ph = ",".join("?" * len(group))
+def admin_live_status(phase: int) -> list[dict]:
+    """現在のフェーズにおける児童ごとの状態（教師用フェーズ画面）。"""
     with _conn() as con:
         sess = con.execute(
-            f"""SELECT user_id, MAX(session_id) FROM sessions
-                WHERE run_id = ? AND phase IN ({ph})
-                GROUP BY user_id ORDER BY user_id""",
-            (run_id, *group),
+            """SELECT user_id, session_id, declared, declared_by, stuck_count, miss_count
+               FROM sessions WHERE phase = ? ORDER BY user_id""", (phase,)
         ).fetchall()
         result = []
-        for user_id, sid in sess:
+        for user_id, sid, declared, declared_by, stuck, miss in sess:
             agg = con.execute(
-                """SELECT
-                     COUNT(CASE WHEN input_type='sakumon' AND phase = ? THEN 1 END),
-                     COUNT(CASE WHEN structure IS NOT NULL AND phase = ? THEN 1 END),
-                     MAX(created_at)
+                """SELECT COUNT(CASE WHEN input_type = 'sakumon' THEN 1 END),
+                          COUNT(CASE WHEN valid = 1 THEN 1 END),
+                          MAX(created_at)
                    FROM chat_logs WHERE session_id = ?""",
-                (phase, phase, sid),
+                (sid,),
             ).fetchone()
-            structs = [r[0] for r in con.execute(
-                """SELECT DISTINCT structure FROM chat_logs
-                   WHERE session_id = ? AND is_new = 1 AND structure IS NOT NULL""", (sid,)).fetchall()]
             last = con.execute(
-                """SELECT learner_state, support_level FROM chat_logs
-                   WHERE session_id = ? ORDER BY id DESC LIMIT 1""", (sid,)).fetchone()
+                """SELECT response_type, prompt_strength, produced_structures
+                   FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC LIMIT 1""", (sid,)).fetchone()
             result.append({
                 "user_id": user_id,
                 "session_id": sid,
                 "submitted": agg[0] or 0,
                 "valid": agg[1] or 0,
-                "structures": structs,
-                "learner_state": last[0] if last else None,
-                "last_support_level": last[1] if last else None,
+                "structures": [s for s in ((last[2] if last else "") or "").split(",") if s],
+                "last_response_type": last[0] if last else None,
+                "last_prompt_strength": last[1] if last else None,
+                "declared": declared,
+                "declared_by": declared_by,
+                "stuck_count": stuck or 0,
+                "miss_count": miss or 0,
                 "last_activity": agg[2],
             })
-    for r in result:
-        r["current_level"] = get_current_level(r["session_id"], 2)
     return result
-
-
-def get_max_level(session_id: int, phase: int = 2) -> int:
-    """そのセッション（指定フェーズ）で到達した最大の支援水準（0〜3）。単調増加。
-    フロントの表示ゲート（水準2以上で信号機）に使う。産出一覧はフェーズ2で常設。"""
-    with _conn() as con:
-        rows = con.execute(
-            """SELECT support_level FROM chat_logs
-               WHERE session_id = ? AND phase = ? AND support_level IN ('level1','level2','level3')""",
-            (session_id, phase),
-        ).fetchall()
-    return max((int(r[0][-1]) for r in rows), default=0)

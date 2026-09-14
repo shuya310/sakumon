@@ -91,3 +91,45 @@ def classify(message: str, recent_turns: list[dict] | None = None, expression: s
     except llm_call.LLMUnavailable as e:
         print(f"[ai_classify] classify failed after {e.retry_count} retries: {e}")
         return "taiwa"  # 分類失敗時は安全側（対話）に倒す（judge に対話文が流れ込むのを防ぐ）
+
+
+# ===== 予告（自由記述）の分類 =====
+# 仕様 v2 3-4：児童が「つぎは何を求める問題にするか」を書いた文を tobun / hougan / bai / unknown に分ける。
+# 判断基準は「何を求めると書いているか」だけ。題材のみ（「りんごの問題」）・無関係・判断不能は unknown。
+
+DECLARATION_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの仕分け係です。
+児童が「つぎは何を求める問題にするか」を書いた文を、次の4つに分類します。
+分類結果のJSONだけを返してください。JSON以外の文字は一切出力しないでください。
+
+- "tobun"：1つ分の大きさ・1人分・1皿分などを求めると書いている
+- "hougan"：いくつ分・何人に配れるか・まとまりの数を求めると書いている
+- "bai"：何倍か・もとにする量との比較を求めると書いている
+- "unknown"：題材のみ（「りんごの問題」）・無関係・判断できない
+
+## 返すJSON（この形式のみ）
+{ "structure": "tobun" or "hougan" or "bai" or "unknown" }"""
+
+DECLARATION_TYPES = ("tobun", "hougan", "bai", "unknown")
+
+
+def classify_declaration(text: str, user_id: str | None = None) -> str:
+    """予告の文を tobun / hougan / bai / unknown に分類する。失敗時は 'unknown'。"""
+    def parse(response) -> str:
+        t = _parse(_text_from(response)).get("structure")
+        if t not in DECLARATION_TYPES:
+            raise ValueError(f"unexpected structure: {t!r}")
+        return t
+
+    try:
+        kind, _meta = llm_call.call(
+            user_id, parse,
+            model=CLASSIFY_MODEL,
+            max_tokens=64,
+            thinking={"type": "disabled"},
+            system=DECLARATION_PROMPT,
+            messages=[{"role": "user", "content": f"児童の予告: {text}"}],
+        )
+        return kind
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_classify] classify_declaration failed after {e.retry_count} retries: {e}")
+        return "unknown"  # 分類できなければ予告なし扱い（再質問もしない：仕様 3-4）

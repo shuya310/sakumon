@@ -38,14 +38,13 @@ document.getElementById("tab-students").addEventListener("click", loadStudents);
 // ===== フェーズ管理 =====
 const PHASE_DESC = {
   1: "事前測定：式Aで自由に作問。判定は裏で動くが児童には何も表示しない。",
-  2: "支援：同じ式Aで、フィードバック（水準1〜4）を受けながら作問。",
+  2: "支援：同じ式Aで、フィードバックを受けながら作問（新しいセッション）。",
   3: "事後測定：式Bで自由に作問。新しいセッション。支援なし。",
 };
 
 function renderConfig(cfg) {
   document.getElementById("phase-big").textContent = `フェーズ ${cfg.current_phase}`;
   document.getElementById("phase-desc").textContent = PHASE_DESC[cfg.current_phase] || "";
-  document.getElementById("run-id").textContent = cfg.run_id;
   document.getElementById("cfg-updated").textContent = fmtDate(cfg.updated_at);
   document.querySelectorAll(".btn-phase").forEach(b => {
     b.classList.toggle("active", Number(b.dataset.phase) === cfg.current_phase);
@@ -67,8 +66,8 @@ document.querySelectorAll(".btn-phase").forEach(btn => {
     const phase = Number(btn.dataset.phase);
     const msg = {
       1: "フェーズ1（事前・支援なし）に切り替えますか？",
-      2: "フェーズ2（支援あり）に切り替えますか？\n児童の画面に「ここまでで いったん おしまい」が出て、同じセッションで支援が始まります。",
-      3: "フェーズ3（事後・式B）に切り替えますか？\n全員に新しいセッションが作られ、信号機と停滞カウントがリセットされます。",
+      2: "フェーズ2（支援あり）に切り替えますか？\n児童の画面に「ここまでで いったん おしまい」が出て、新しいセッションで支援が始まります。",
+      3: "フェーズ3（事後・式B）に切り替えますか？\n全員に新しいセッションが作られ、到達構造はゼロから数え直します。",
     }[phase];
     if (!confirm(msg)) return;
     try {
@@ -101,23 +100,18 @@ document.getElementById("btn-save-expr").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("btn-new-run").addEventListener("click", async () => {
-  if (!confirm("新しい回を始めますか？\nrun 番号が進み、フェーズ1に戻ります。児童は次のログインから新しいセッションになります。\n（過去のデータは消えません）")) return;
-  try {
-    const cfg = await api("/admin/api/new_run", { method: "POST" });
-    renderConfig(cfg);
-    refreshLive();
-  } catch (e) {
-    alert("失敗しました: " + e.message);
-  }
-});
-
 // ===== 児童の状態（ライブ） =====
-const STATE_CLS = { S0: "badge-red", S1: "badge-orange", S2: "badge-blue", S3: "badge-green" };
-const LEVEL_LABEL = {
-  none: "—", form: "0 成立性", level1: "1 同じ？", level2: "2 求める量", level3: "3 場面",
-  discover: "新構造", goal: "3つ達成", talk: "対話", error: "エラー", pending: "判定保留",
+const RESPONSE_LABEL = {
+  form: "成立性", praise: "称賛", prompt: "予告", talk: "対話", done: "3つ達成", error: "判定保留",
 };
+const STRENGTH_LABEL = { 0: "なし", 1: "弱", 2: "中", 3: "強" };
+
+function responseBadge(type, strength) {
+  if (!type) return '<span style="color:#ccc">—</span>';
+  let html = `<span class="badge ${RESPONSE_CLS[type] || "badge-gray"}">${RESPONSE_LABEL[type] || type}</span>`;
+  if (type === "prompt" && strength != null) html += ` <span class="muted small">${STRENGTH_LABEL[strength] ?? strength}</span>`;
+  return html;
+}
 
 function lightsHtml(structures) {
   const set = new Set(structures || []);
@@ -143,16 +137,15 @@ function renderLive(data) {
   students.forEach(s => {
     const tr = document.createElement("tr");
     if (s.submitted === 0) tr.className = "row-zero";
-    const level = data.config.phase === 2 ? (s.current_level ? `水準 ${s.current_level}` : "—") : "—";
-    const lastLevel = s.last_support_level ? `<div class="muted small">直近: ${LEVEL_LABEL[s.last_support_level] || s.last_support_level}</div>` : "";
+    const counts = `困り ${s.stuck_count ?? 0} ／ 不成立 ${s.miss_count ?? 0}`;
     tr.innerHTML = `
       <td><strong>${esc(s.user_id)}</strong></td>
       <td>${s.online ? '<span class="dot-on"></span> 接続中' : `<span class="dot-off"></span> <span class="muted small">${s.last_seen_seconds == null ? "未接続" : Math.round(s.last_seen_seconds / 60) + "分前"}</span>`}</td>
       <td class="${s.submitted === 0 ? "zero" : ""}"><strong>${s.submitted}</strong></td>
       <td>${s.valid}</td>
       <td>${lightsHtml(s.structures)}</td>
-      <td>${level}${lastLevel}</td>
-      <td>${s.learner_state ? `<span class="badge ${STATE_CLS[s.learner_state] || "badge-gray"}">${s.learner_state}</span>` : '<span class="muted">—</span>'}</td>
+      <td class="${(s.stuck_count ?? 0) > 0 ? "" : "muted"} small">${counts}</td>
+      <td>${data.config.phase === 2 ? responseBadge(s.last_response_type, s.last_prompt_strength) : '<span class="muted">—</span>'}</td>
       <td class="muted small">${s.last_activity ? fmtTime(s.last_activity) : "—"}</td>
     `;
     tbody.appendChild(tr);
@@ -249,10 +242,10 @@ function buildSessionBlock(session, userId) {
   head.innerHTML = `
     <div class="session-head-left">
       <div>
-        <div class="s-date">#${session.session_id}　${fmtDate(session.created_at)}　
-          <span class="badge badge-gray">run ${session.run_id}</span>
-          <span class="badge badge-blue">フェーズ${session.phase}${session.phase === 1 ? "→2" : ""} 開始</span>
+        <div class="s-date">#${session.session_id}　${fmtDate(session.session_start)} 〜 ${session.session_end ? fmtDate(session.session_end) : "（継続中）"}　
+          <span class="badge badge-blue">フェーズ${session.phase}</span>
           <span class="badge badge-gray">${esc(session.expression)}</span>
+          <span class="badge badge-gray">${session.parity_group === "odd" ? "奇数" : "偶数"}</span>
         </div>
         <div class="s-stat">違う構造 ${session.new_count} ／ 作問 ${session.sakumon_count ?? 0}回・対話 ${session.taiwa_count ?? 0}回　${structs}</div>
       </div>
@@ -310,8 +303,8 @@ function buildLogsTable(logs) {
         <th style="width:56px">種別</th>
         <th>入力 / AIの返答</th>
         <th style="width:110px">判定</th>
-        <th style="width:90px">水準</th>
-        <th style="width:52px">状態</th>
+        <th style="width:90px">応答</th>
+        <th style="width:96px">到達 / 回数</th>
         <th style="width:52px"></th>
       </tr>
     </thead>
@@ -334,12 +327,8 @@ function buildLogRow(log) {
   tr.className = "log-row";
   tr.dataset.logId = log.id;
 
-  const aiCls = {
-    new_structure: "new-structure",
-    level1: "hint", level2: "hint", level3: "hint",
-    hint1: "hint", hint2: "hint", hint3: "hint",
-    goal: "clear", clear: "clear",
-  }[log.display_type] || "";
+  const aiCls = log.response_type === "done" ? "clear"
+    : (log.response_type === "praise" && log.is_new) ? "new-structure" : "";
 
   const isTaiwa = log.input_type === "taiwa";
   const inputBadge = isTaiwa
@@ -360,22 +349,14 @@ function buildLogRow(log) {
     judgeCell = `<span class="badge badge-orange">不成立</span>`;
   }
 
-  // 水準（新）／ 旧データは stumble を表示
-  const lvl = log.support_level
-    ? `<span class="badge ${LEVEL_CLS[log.support_level] || "badge-gray"}">${LEVEL_LABEL[log.support_level] || log.support_level}</span>`
-    : (log.stumble ? `<span class="badge badge-gray" title="旧つまづき">${STUMBLE_LABEL[log.stumble] || log.stumble}</span>` : '<span style="color:#ccc">—</span>');
-  const button = log.button_pressed ? `<div class="muted small">ボタン: ${esc(log.button_pressed)}</div>` : "";
-  const target = log.target_structure ? `<div class="muted small">対象: ${STRUCT_LABEL[log.target_structure] || log.target_structure}</div>` : "";
-  const stall = (log.stall_count != null && log.stall_count > 0) ? `<div class="muted small">反復 ${log.stall_count}</div>` : "";
-  // 計測：判定/声かけの所要時間・リトライ回数（judge_status が failed / retried_ok のときは目立たせる）
-  const timing = [];
-  if (log.judge_latency_ms != null) timing.push(`判定 ${(log.judge_latency_ms / 1000).toFixed(1)}s`);
-  if (log.dialogue_latency_ms != null) timing.push(`声かけ ${(log.dialogue_latency_ms / 1000).toFixed(1)}s`);
-  if (log.retry_count) timing.push(`再試行 ${log.retry_count}`);
-  const timingCls = (log.judge_status === "failed") ? "badge-red" : (log.judge_status === "retried_ok" ? "badge-orange" : "");
-  const timingHtml = timing.length
-    ? `<div class="muted small">${timingCls ? `<span class="badge ${timingCls}">${log.judge_status}</span> ` : ""}${timing.join(" / ")}</div>`
-    : "";
+  // 応答の種類と、予告・自己ラベル（予告支援仕様で記録されるようになる列）
+  const declared = log.declared_structure
+    ? `<div class="muted small">予告: ${STRUCT_LABEL[log.declared_structure] || log.declared_structure}（${log.declared_by || "?"}）${log.declaration_met == null ? "" : (log.declaration_met ? " ✓" : " ✗")}</div>` : "";
+  const selfLabel = log.self_label
+    ? `<div class="muted small">自己ラベル: ${STRUCT_LABEL[log.self_label] || log.self_label}${log.self_label_match == null ? "" : (log.self_label_match ? " ✓" : " ✗")}</div>` : "";
+  const timingHtml = log.latency_ms != null ? `<div class="muted small">${(log.latency_ms / 1000).toFixed(1)}s</div>` : "";
+  const produced = (log.produced_structures || "").split(",").filter(Boolean);
+  const countsHtml = `<div class="muted small">困り ${log.stuck_count ?? 0} ／ 不成立 ${log.miss_count ?? 0}</div>`;
 
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>
@@ -383,12 +364,12 @@ function buildLogRow(log) {
     <td>${inputBadge}</td>
     <td>
       <div class="msg-user">${esc(log.message)}</div>
-      <div class="msg-ai ${aiCls}">${esc(log.ai_message)}</div>
-      ${button}${timingHtml}
+      ${log.ai_message ? `<div class="msg-ai ${aiCls}">${esc(log.ai_message)}</div>` : ""}
+      ${timingHtml}
     </td>
     <td>${judgeCell}</td>
-    <td>${lvl}${target}${stall}</td>
-    <td>${log.learner_state ? `<span class="badge ${STATE_CLS[log.learner_state] || "badge-gray"}">${log.learner_state}</span>` : '<span style="color:#ccc">—</span>'}</td>
+    <td>${responseBadge(log.response_type, log.prompt_strength)}${declared}${selfLabel}</td>
+    <td>${lightsHtml(produced)}${countsHtml}</td>
     <td><button class="btn btn-danger btn-sm">削除</button></td>
   `;
 
@@ -437,22 +418,16 @@ function setBreadcrumb(elId, items) {
 
 // ===== Helpers =====
 const STRUCT_LABEL = { tobun: "等分除", hougan: "包含除", bai: "倍" };
-const LEVEL_CLS = {
-  none: "badge-gray", form: "badge-orange", level1: "badge-orange",
-  level2: "badge-red", level3: "badge-red", discover: "badge-green", goal: "badge-green",
-  talk: "badge-purple", error: "badge-gray",
-};
-// 旧データ（9/18 以前）の stumble 表示用
-const STUMBLE_LABEL = {
-  incomplete: "要素不足", wrong_expression: "式ちがい", reversed: "向き逆",
-  hint1: "停滞1", hint2: "停滞2", hint3: "停滞3(テープ図)",
-  material_confusion: "題材混同", help_request: "助け求め", repeat_structure: "反復(旧)",
+const RESPONSE_CLS = {
+  form: "badge-orange", praise: "badge-green", prompt: "badge-red", talk: "badge-purple",
+  done: "badge-green", error: "badge-gray",
 };
 
+// DB の時刻は JST（'YYYY-MM-DD HH:MM:SS'）。タイムゾーン付きで解釈する
 function toDate(str) {
   if (!str) return null;
   const s = str.includes("T") ? str : str.replace(" ", "T");
-  return new Date(s.endsWith("Z") ? s : s + "Z");
+  return new Date(/Z|[+-]\d\d:\d\d$/.test(s) ? s : s + "+09:00");
 }
 function fmtDate(str) {
   const d = toDate(str);

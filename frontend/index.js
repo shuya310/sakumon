@@ -9,15 +9,13 @@ const state = {
   userId: null,
   sessionId: null,
   phase: null,
-  runId: null,
   expression: "",
   showSupport: false,
   history: [],
   problems: [],
-  uiLevel: 0,
+  uiStrength: 0,          // そのフェーズで出た予告支援の最大の強さ（表示ゲート用）
   allReached: false,
   sending: false,
-  buttonPressed: [],      // 直近の送信までに押された2択ボタンの値（順に）
   pollTimer: null,
   pollSeconds: 5,
   switching: false,
@@ -134,14 +132,12 @@ function enter(payload) {
   state.userId = payload.user_id;
   state.sessionId = payload.session_id;
   state.phase = payload.phase;
-  state.runId = payload.run_id;
   state.expression = payload.expression;
   state.showSupport = !!payload.show_support;
   state.history = payload.history || [];
-  state.uiLevel = payload.ui_level || 0;
+  state.uiStrength = payload.ui_strength || 0;
   state.allReached = !!payload.all_reached;
   state.problems = [];
-  state.buttonPressed = [];
   state.pollSeconds = payload.poll_seconds || 5;
   saveSession();
 
@@ -171,6 +167,10 @@ function resetGame() {
 
 document.getElementById("btn-logout").addEventListener("click", () => {
   stopPolling();
+  // 終了時刻を記録する（失敗しても画面は進める。入り直せば再開になる）
+  if (state.sessionId && state.userId) {
+    postJson("/api/session/end", { session_id: state.sessionId, user_id: state.userId }).catch(() => {});
+  }
   clearSession();
   state.userId = null;
   state.sessionId = null;
@@ -196,7 +196,7 @@ async function pollConfig() {
     const res = await fetch(`/api/config?${q}`);
     if (!res.ok) return;
     const cfg = await res.json();
-    if (cfg.phase !== state.phase || cfg.run_id !== state.runId) {
+    if (cfg.phase !== state.phase) {
       await handlePhaseChange(cfg);
     } else if (cfg.expression !== state.expression) {
       state.expression = cfg.expression;
@@ -211,8 +211,6 @@ async function handlePhaseChange(cfg) {
   state.switching = true;
   stopPolling();
   document.getElementById("chat-input").value = "";
-  state.buttonPressed = [];
-  disableChoiceButtons();
   showPhaseBanner(cfg);
   await new Promise(r => setTimeout(r, 2600));
   try {
@@ -277,49 +275,21 @@ function addNotice(text) {
   scrollLog();
 }
 
-const BUBBLE_CLASS = {
-  new_structure: "new-structure",
-  level1: "hint", level2: "hint", level3: "hint",
-  hint1: "hint", hint2: "hint", hint3: "hint",
-  goal: "clear", clear: "clear",
-};
+// 吹き出しの見た目：新しい聞き方の称賛は緑の強調、3つそろった done はクリア表示、それ以外は通常。
+function bubbleClass(responseType, isNew) {
+  if (responseType === "done") return "clear";
+  if (responseType === "praise" && isNew) return "new-structure";
+  return "normal";
+}
 
-function addAiBubble(text, displayType) {
+function addAiBubble(text, responseType, isNew) {
   const log = document.getElementById("chat-log");
   const el = document.createElement("div");
-  el.className = `bubble bubble-ai ${BUBBLE_CLASS[displayType] || "normal"}`;
+  el.className = `bubble bubble-ai ${bubbleClass(responseType, isNew)}`;
   el.textContent = text;
   log.appendChild(el);
   scrollLog();
   return el;
-}
-
-// 水準2の2択ボタン。押すと入力欄にプリフィルされるだけで、送信はしない。
-function addChoiceButtons(labels) {
-  disableChoiceButtons();
-  const log = document.getElementById("chat-log");
-  const wrap = document.createElement("div");
-  wrap.className = "choice-buttons";
-  labels.forEach(label => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn-choice";
-    b.textContent = label;
-    b.addEventListener("click", () => {
-      const input = document.getElementById("chat-input");
-      input.value = label;
-      state.buttonPressed.push(label);
-      wrap.querySelectorAll(".btn-choice").forEach(x => x.classList.toggle("selected", x === b));
-      input.focus();
-      input.setSelectionRange(input.value.length, input.value.length);
-    });
-    wrap.appendChild(b);
-  });
-  log.appendChild(wrap);
-  scrollLog();
-}
-function disableChoiceButtons() {
-  document.querySelectorAll(".choice-buttons .btn-choice").forEach(b => { b.disabled = true; });
 }
 
 function addLoadingBubble() {
@@ -363,14 +333,10 @@ function watchQueue(loader) {
 // 保存済みの会話を再描画。フェーズ2のターンだけAIの吹き出しを出し、それ以外は「おくったよ」。
 function renderConversation(conversation) {
   if (!conversation || conversation.length === 0) return false;
-  const lastIdx = conversation.length - 1;
-  conversation.forEach((turn, i) => {
+  conversation.forEach((turn) => {
     if (turn.message) addUserBubble(turn.message);
     if (turn.phase === 2 && state.showSupport) {
-      if (turn.ai_message) addAiBubble(turn.ai_message, turn.display_type || "normal");
-      if (ENABLE_FIGURES && turn.figure) addFigureCard(turn.figure);
-      if (ENABLE_FIGURES && turn.tape_diagram) addTapeDiagramCard(turn.tape_diagram);
-      if (i === lastIdx && Array.isArray(turn.buttons) && turn.buttons.length) addChoiceButtons(turn.buttons);
+      if (turn.ai_message) addAiBubble(turn.ai_message, turn.response_type, turn.is_new);
     } else {
       addAckLine("おくったよ");
     }
@@ -381,11 +347,10 @@ function renderConversation(conversation) {
 // ===== 右パネル =====
 function updatePanels() {
   const show = state.showSupport;
-  // 信号機は水準2（未到達の求める量を1つ名指す）到達後、または3つそろった後だけ見せる。
-  // 声かけは「聞けること」を1つしか渡さないので、枠の数と空白はここで灯が受け持つ。
-  document.getElementById("lights-card").hidden = !(show && (state.uiLevel >= 2 || state.allReached));
+  // 信号機は予告支援の「中」（強さ2）以上が出た後、または3つそろった後だけ見せる。
+  // 「3つある」ことを先に見せないため（予告支援が入るまでは、3つそろったときだけ出る）。
+  document.getElementById("lights-card").hidden = !(show && (state.uiStrength >= 2 || state.allReached));
   // 作った問題リストはフェーズ2のあいだ常に見せる（自分の産出を読み返せる状態を保つ）。
-  // 水準1の声かけは「右を読みかえしてみよう」と視線を送る役割になる。
   document.getElementById("problems-card").hidden = !show;
 
   for (let i = 0; i < 3; i++) document.getElementById(`light-${i}`).classList.remove("on");
@@ -397,16 +362,6 @@ function updatePanels() {
   document.getElementById("lights-label").textContent =
     remaining > 0 ? `あと ${remaining} つ` : "3つとも できた！";
   document.getElementById("count-number").textContent = state.problems.length;
-}
-
-// 水準1・2は産出一覧を右パネルで読ませる。チャットに列挙せず、カードを光らせて視線を送る。
-function flashProblems() {
-  const card = document.getElementById("problems-card");
-  if (!card || card.hidden) return;
-  card.classList.remove("flash");
-  void card.offsetWidth;          // アニメーションを再生し直すためのリフロー
-  card.classList.add("flash");
-  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function addProblem(text, structure) {
@@ -432,9 +387,6 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
-  const pressed = state.buttonPressed.length ? state.buttonPressed.join(",") : null;
-  state.buttonPressed = [];
-  disableChoiceButtons();
 
   addUserBubble(text);
   const loader = addLoadingBubble();
@@ -442,7 +394,7 @@ async function sendMessage() {
 
   try {
     const { ok, status, data } = await postJson("/api/judge", {
-      session_id: state.sessionId, user_id: state.userId, message: text, button_pressed: pressed,
+      session_id: state.sessionId, user_id: state.userId, message: text,
     });
     stopWatch();
     loader.remove();
@@ -462,17 +414,13 @@ async function sendMessage() {
       return;
     }
     if (data.history) state.history = data.history;
-    if (typeof data.ui_level === "number") state.uiLevel = data.ui_level;
+    if (typeof data.ui_strength === "number") state.uiStrength = data.ui_strength;
     state.allReached = !!data.all_reached;
     // accepted：成立した作問と、判定保留（API不通）で受理した作問。再送は追加しない
     if (data.accepted) addProblem(text, data.structure);
     updatePanels();
 
-    addAiBubble(data.message, data.display_type);
-    if (data.highlight_problems) flashProblems();
-    if (Array.isArray(data.buttons) && data.buttons.length) addChoiceButtons(data.buttons);
-    if (ENABLE_FIGURES && data.figure) addFigureCard(data.figure);
-    if (ENABLE_FIGURES && data.tape_diagram) addTapeDiagramCard(data.tape_diagram);
+    addAiBubble(data.message, data.response_type, data.is_new);
   } catch (e) {
     stopWatch();
     loader.remove();

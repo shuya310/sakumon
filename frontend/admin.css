@@ -171,7 +171,6 @@ tr.clickable:hover td { background: #F0FDF8; }
 }
 
 .msg-ai.new-structure { background: #ECFDF5; border-left-color: var(--green-bright); color: #064E3B; }
-.msg-ai.hint { background: #FFFBEB; border-left-color: var(--orange); color: #7C4700; }
 .msg-ai.clear { background: #ECFDF5; border-left-color: var(--green); font-weight: 700; }
 
 /* ===== アクションバー ===== */

@@ -62,7 +62,7 @@
     </div>
 
     <!-- 信号機：ラベルなしの3灯。未到達は空白のまま見せ、何が空いているかは明示しない。
-         フェーズ2で水準2到達後に表示 -->
+         フェーズ2で予告支援「中」以上が出た後（または3つそろった後）に表示 -->
     <div class="panel-card" id="lights-card" hidden>
       <h3>聞けること</h3>
       <div class="lights">
@@ -73,7 +73,7 @@
       <div class="lights-label" id="lights-label">あと 3 つ</div>
     </div>
 
-    <!-- 作った問題：フェーズ2のあいだ常に表示（水準1の声かけはここへ視線を送る役割） -->
+    <!-- 作った問題：フェーズ2のあいだ常に表示（自分の産出を読み返せる状態を保つ） -->
     <div class="panel-card" id="problems-card" hidden>
       <h3>作った お話 <span id="count-number">0</span></h3>
       <ul class="problem-list" id="problem-list"></ul>

@@ -4,11 +4,15 @@ judge を呼ぶ前に1回だけ、児童の入力が「作問（新しいお話�
 「対話（質問・つぶやき・こまった）」かを軽量な1コールで分類する。
 構造同定は行わない。失敗時は安全側（対話）に倒す。
 API 呼び出し（タイムアウト・リトライ・同時実行制御）は judge / dialogue と同じ llm_call を通す。
+
+作問か対話かの二択だけの軽いタスクなので、判定（ai_judge）・声かけ（ai_dialogue）より
+求められる精度が低い。体感速度を優先し、既定では判定・声かけとは別モデル
+（config.CLASSIFY_MODEL、既定 Haiku）を使う。分類の定義・プロンプトはモデルを変えても触らない。
 """
 
 import json
 
-from config import MODEL, parse_expression
+from config import CLASSIFY_MODEL, parse_expression
 import llm_call
 
 SYSTEM_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの入力仕分け係です。
@@ -77,9 +81,9 @@ def classify(message: str, recent_turns: list[dict] | None = None, expression: s
     try:
         kind, _meta = llm_call.call(
             user_id, parse,
-            model=MODEL,
+            model=CLASSIFY_MODEL,
             max_tokens=64,
-            thinking={"type": "disabled"},  # 分類に思考は不要（sonnet-5は既定でonのため明示off）
+            thinking={"type": "disabled"},  # 分類に思考は不要（Haiku は既定offだが明示しておく）
             system=_system(expression),
             messages=[{"role": "user", "content": user_content}],
         )

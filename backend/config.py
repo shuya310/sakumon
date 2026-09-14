@@ -19,11 +19,15 @@ ENABLE_FIGURES = False
 
 # ---- LLM ----
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+# classify にも判定・声かけと同じ MODEL を使う。Haiku を試したところ「倍」構造の文
+# （「〜は…の何倍ですか」）が12.5%誤分類され、対話扱いになって一覧・構造判定から漏れる
+# 実害が確認されたため、既定は MODEL（sonnet）に統一した。環境変数で個別に上書きは可能。
+CLASSIFY_MODEL = os.environ.get("CLASSIFY_MODEL", MODEL)
 
 # API 呼び出しの信頼性（llm_call.py）。いずれも環境変数で上書きできる。
 LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))   # 1回あたりのタイムアウト
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))               # 再試行回数（初回を除く）
-LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "8"))       # API への同時リクエスト上限
+LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "30"))      # API への同時リクエスト上限
 
 # ---- 管理者認証（HTTP Basic）----
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")

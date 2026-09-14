@@ -116,7 +116,7 @@ document.getElementById("btn-new-run").addEventListener("click", async () => {
 const STATE_CLS = { S0: "badge-red", S1: "badge-orange", S2: "badge-blue", S3: "badge-green" };
 const LEVEL_LABEL = {
   none: "—", form: "0 成立性", level1: "1 同じ？", level2: "2 求める量", level3: "3 場面",
-  discover: "新構造", goal: "3つ達成", talk: "対話", error: "エラー",
+  discover: "新構造", goal: "3つ達成", talk: "対話", error: "エラー", pending: "判定保留",
 };
 
 function lightsHtml(structures) {
@@ -326,7 +326,7 @@ const UNKNOWN_LABEL = { one_unit: "1つ分", num_units: "いくつ分", ratio: "
 const ISSUE_LABEL = {
   scene_contradiction: "場面矛盾", wrong_number: "式ちがい", wrong_operation: "演算ちがい",
   incomplete_text: "途中で切れ", no_question: "問いなし", not_problem: "文章題でない", error: "判定エラー",
-  reversed: "向き逆(旧)",
+  pending: "判定保留（API不通）", reversed: "向き逆(旧)",
 };
 
 function buildLogRow(log) {
@@ -344,7 +344,9 @@ function buildLogRow(log) {
   const isTaiwa = log.input_type === "taiwa";
   const inputBadge = isTaiwa
     ? '<span class="badge badge-purple">対話</span>'
-    : '<span class="badge badge-blue">作問</span>';
+    : (log.input_type === "resend"
+      ? '<span class="badge badge-gray" title="同じ本文の再送（APIは呼ばず直前の結果を返した）">再送</span>'
+      : '<span class="badge badge-blue">作問</span>');
 
   // 判定：成立なら 構造＋求める量、不成立なら issue
   let judgeCell = '<span style="color:#ccc">—</span>';
@@ -365,6 +367,15 @@ function buildLogRow(log) {
   const button = log.button_pressed ? `<div class="muted small">ボタン: ${esc(log.button_pressed)}</div>` : "";
   const target = log.target_structure ? `<div class="muted small">対象: ${STRUCT_LABEL[log.target_structure] || log.target_structure}</div>` : "";
   const stall = (log.stall_count != null && log.stall_count > 0) ? `<div class="muted small">反復 ${log.stall_count}</div>` : "";
+  // 計測：判定/声かけの所要時間・リトライ回数（judge_status が failed / retried_ok のときは目立たせる）
+  const timing = [];
+  if (log.judge_latency_ms != null) timing.push(`判定 ${(log.judge_latency_ms / 1000).toFixed(1)}s`);
+  if (log.dialogue_latency_ms != null) timing.push(`声かけ ${(log.dialogue_latency_ms / 1000).toFixed(1)}s`);
+  if (log.retry_count) timing.push(`再試行 ${log.retry_count}`);
+  const timingCls = (log.judge_status === "failed") ? "badge-red" : (log.judge_status === "retried_ok" ? "badge-orange" : "");
+  const timingHtml = timing.length
+    ? `<div class="muted small">${timingCls ? `<span class="badge ${timingCls}">${log.judge_status}</span> ` : ""}${timing.join(" / ")}</div>`
+    : "";
 
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>
@@ -373,7 +384,7 @@ function buildLogRow(log) {
     <td>
       <div class="msg-user">${esc(log.message)}</div>
       <div class="msg-ai ${aiCls}">${esc(log.ai_message)}</div>
-      ${button}
+      ${button}${timingHtml}
     </td>
     <td>${judgeCell}</td>
     <td>${lvl}${target}${stall}</td>

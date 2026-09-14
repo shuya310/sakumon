@@ -32,19 +32,28 @@ _JUDGE = {
     "H": {"valid": True, "structure": "hougan", "unknown": "num_units", "issue": None},
     "B": {"valid": True, "structure": "bai", "unknown": "ratio", "issue": None},
     "X": {"valid": False, "structure": "invalid", "unknown": None, "issue": "scene_contradiction"},
-    "E": {"valid": False, "structure": "invalid", "unknown": None, "issue": "error", "error": "boom"},
+    "E": {"valid": False, "structure": "invalid", "unknown": None, "issue": "error", "error": "boom",
+          "meta": {"retry_count": 3, "latency_ms": 65000, "status": "failed"}},
+    # リトライして成功した成立作問（計測列の記録確認用）
+    "R": {"valid": True, "structure": "tobun", "unknown": "one_unit", "issue": None,
+          "meta": {"retry_count": 2, "latency_ms": 4200, "status": "retried_ok"}},
 }
 
+CALLS = {"judge": 0, "classify": 0}
 
-def fake_judge(message, expression):
+
+def fake_judge(message, expression, user_id=None):
+    CALLS["judge"] += 1
     return dict(_JUDGE[message[0]])
 
 
-def fake_classify(message, recent=None, expression=None):
+def fake_classify(message, recent=None, expression=None, user_id=None):
+    CALLS["classify"] += 1
     return "sakumon" if len(message) > 1 and message[1] == ":" and message[0] in _JUDGE else "taiwa"
 
 
-def fake_llm(child_message, input_kind, judge_result, history, recent_turns, support_level, expression, target):
+def fake_llm(child_message, input_kind, judge_result, history, recent_turns, support_level, expression, target,
+             user_id=None):
     return {"message": f"[{support_level}] llm", "state": support_level}
 
 
@@ -243,12 +252,50 @@ with client:
     r = judge(sidB2, "02", "T: 成立")
     logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
     assert logsB[-1]["learner_state"] == "S1" and logsB[-1]["support_level"] == "discover"
-    # judge エラー → フォールバック、S0 判定に数えない
+    # judge が API 不通 → 判定保留として受理（一覧に載る・構造は空・再送は求めない）、S0 判定に数えない
     r = judge(sidB2, "02", "E: err")
-    assert r["message"] == ai_dialogue.FALLBACK_MESSAGE
+    assert r["message"] == main.JUDGE_PENDING_MESSAGE, r["message"]
+    assert "もう一度" not in r["message"]
+    assert r["accepted"] is True and r["valid"] is None and r["structure"] is None
     logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
-    assert logsB[-1]["support_level"] == "error" and logsB[-1]["issue"] == "error"
-    print("OK S0: 不成立は form のみ、成立1問で脱出、judge エラーは error として記録")
+    assert logsB[-1]["support_level"] == "pending" and logsB[-1]["issue"] == "pending"
+    assert logsB[-1]["judge_status"] == "failed" and logsB[-1]["retry_count"] == 3
+    assert logsB[-1]["judge_latency_ms"] is not None and logsB[-1]["dialogue_latency_ms"] is None
+    import database  # noqa: E402
+    assert database.get_recent_sakumon_validity(sidB2, 3) == [True, False, False], \
+        "判定保留の行は成立/不成立の並びに入れない（S0 判定に数えない）"
+    resumed = post("/api/session/resume", session_id=sidB2, user_id="02").json()
+    assert resumed["problems"][-1] == {"text": "E: err", "structure": None}, "再入場時も一覧に残る"
+    assert "tobun" in resumed["history"] and len(resumed["history"]) == 1, "保留は到達構造に数えない"
+    # 同じ本文の連続再送 → API を呼ばず直前の結果を返す（一覧には追加しない）
+    calls_before = dict(CALLS)
+    r = judge(sidB2, "02", "E: err")
+    assert CALLS == calls_before, "再送で classify / judge を呼ばない"
+    assert r["message"] == main.JUDGE_PENDING_MESSAGE and r["accepted"] is False
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
+    assert logsB[-1]["input_type"] == "resend" and logsB[-1]["judge_status"] == "skipped"
+    assert logsB[-1]["support_level"] == "pending", "水準は直前の値を写す"
+    resumed = post("/api/session/resume", session_id=sidB2, user_id="02").json()
+    assert sum(1 for p in resumed["problems"] if p["text"] == "E: err") == 1, "再送で一覧に重複しない"
+    # 別の本文なら通常どおり API を呼ぶ
+    r = judge(sidB2, "02", "R: retried")
+    assert CALLS["judge"] == calls_before["judge"] + 1
+    assert r["accepted"] is True and r["valid"] is True
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
+    assert logsB[-1]["judge_status"] == "retried_ok" and logsB[-1]["retry_count"] == 2
+    assert logsB[-1]["dialogue_latency_ms"] is not None
+    assert logsB[-1]["stall_count"] == 1, "保留・再送は反復カウントを動かさない（tobun 2問目として 1）"
+    print("OK 判定保留: API不通の作問は受理して一覧に載せる・S0に数えない・同一本文の再送はAPIを呼ばない")
+
+    # 対話ターン：judge を呼ばないので judge_status=skipped、dialogue_latency は記録
+    r = judge(sidB2, "02", "こんにちは")
+    logsB = client.get(f"/admin/api/sessions/{sidB2}", headers=AUTH).json()
+    assert logsB[-1]["judge_status"] == "skipped" and logsB[-1]["judge_latency_ms"] is None
+    assert logsB[-1]["dialogue_latency_ms"] is not None and logsB[-1]["retry_count"] == 0
+    # 待ち状態の問い合わせ（送信中でなければ null）
+    assert client.get("/api/judge/status?user_id=02").json() == {"state": None}
+    assert client.get("/api/judge/status?user_id=abc").status_code == 400
+    print("OK 計測列: 対話は skipped、/api/judge/status は待ちなしで null")
 
     # ===== 教師画面 live =====
     live = client.get("/admin/api/live", headers=AUTH).json()
@@ -326,8 +373,12 @@ with client:
     text = r.content.decode("utf-8-sig")
     rows = list(csv.DictReader(io.StringIO(text)))
     for col in ("phase", "support_level", "learner_state", "unknown", "issue", "button_pressed",
-                "stall_count", "target_structure", "expression", "run_id", "log_id", "valid", "display_type"):
+                "stall_count", "target_structure", "expression", "run_id", "log_id", "valid", "display_type",
+                "judge_latency_ms", "dialogue_latency_ms", "retry_count", "judge_status"):
         assert col in rows[0], col
+    pend = [x for x in rows if x["user_id"] == "02" and x["issue"] == "pending"]
+    assert len(pend) == 1 and pend[0]["judge_status"] == "failed" and pend[0]["retry_count"] == "3", pend
+    assert any(x["judge_status"] == "retried_ok" and x["retry_count"] == "2" for x in rows)
     # 復元例：児童01のフェーズ2で「水準Nの声かけ直後の提出で新構造が出たか」
     r01 = [x for x in rows if x["user_id"] == "01" and x["phase"] == "2"]
     pairs = [(prev["support_level"], cur["is_new"], cur["structure"])

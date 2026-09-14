@@ -6,7 +6,8 @@
 
 判定は3層（成立性 → 構造 → 求める量と整合チェック）をプロンプト内で明示的に分ける。
 出力は structured outputs（output_config.format）で JSON に固定する。
-パース失敗時は1回リトライし、それでも失敗したら issue="error" を返す。
+API 呼び出し（タイムアウト・リトライ・同時実行制御・計測）は llm_call に委ねる。
+規定回数リトライしても応答が得られなければ issue="error" を返す（判定保留。main.py が受理する）。
 
 戻り値:
   {"valid": bool,
@@ -16,14 +17,11 @@
             | "wrong_operation" | "no_question" | "not_problem"}
 """
 
-import os
-
-import anthropic
+import time
 
 from config import MODEL, parse_expression
 from llm_json import extract_json
-
-_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+import llm_call
 
 ALL_STRUCTURES = ("tobun", "hougan", "bai")
 UNKNOWNS = ("one_unit", "num_units", "ratio", "base", "rate")
@@ -186,31 +184,37 @@ def normalize(result: dict) -> dict:
     return {"valid": False, "structure": "invalid", "unknown": None, "issue": issue}
 
 
-def judge(message: str, expression: str) -> dict:
+def _parse_response(response) -> dict:
+    """応答を検査して正規化済みの判定にする。ValueError は llm_call が再試行する。"""
+    if response.stop_reason == "max_tokens":
+        raise ValueError("response truncated (max_tokens)")
+    return normalize(extract_json(_text_from(response)))
+
+
+def judge(message: str, expression: str, user_id: str | None = None) -> dict:
     """作問文の成立性・構造・求める量を同定する。
 
-    パース失敗が続いた場合は {"valid": False, "structure": "invalid", "unknown": None,
-    "issue": "error", "error": ...} を返す（児童の責任ではない技術的失敗）。
+    戻り値には計測用の "meta"（retry_count / latency_ms / status）を付ける。
+    リトライしても応答が得られなかった場合は {"valid": False, "structure": "invalid",
+    "unknown": None, "issue": "error", "error": ..., "meta": {..., "status": "failed"}} を返す
+    （児童の責任ではない技術的失敗。main.py は判定保留として受理する）。
     """
     system = build_system_prompt(expression)
     user_content = f"式: {expression}\n児童の入力: {message}"
 
-    last_err = None
-    for attempt in range(2):  # 1回リトライ
-        try:
-            response = _client.messages.create(
-                model=MODEL,
-                max_tokens=512,
-                thinking={"type": "disabled"},  # sonnet-5 は既定でonのため明示off
-                system=system,
-                output_config={"format": OUTPUT_SCHEMA},
-                messages=[{"role": "user", "content": user_content}],
-            )
-            if response.stop_reason == "max_tokens":
-                raise ValueError("response truncated (max_tokens)")
-            return normalize(extract_json(_text_from(response)))
-        except Exception as e:
-            last_err = e
-            print(f"[ai_judge] judge failed (attempt {attempt + 1}): {type(e).__name__}: {e}")
-
-    return {"valid": False, "structure": "invalid", "unknown": None, "issue": "error", "error": str(last_err)}
+    started = time.perf_counter()
+    try:
+        result, meta = llm_call.call(
+            user_id, _parse_response,
+            model=MODEL,
+            max_tokens=512,
+            thinking={"type": "disabled"},  # sonnet-5 は既定でonのため明示off
+            system=system,
+            output_config={"format": OUTPUT_SCHEMA},
+            messages=[{"role": "user", "content": user_content}],
+        )
+        return {**result, "meta": meta}
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_judge] judge failed after {e.retry_count} retries: {e}")
+        return {"valid": False, "structure": "invalid", "unknown": None, "issue": "error",
+                "error": str(e), "meta": llm_call.failed_meta(e, started)}

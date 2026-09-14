@@ -12,9 +12,10 @@
 
 出力する指標と、その取り方：
   - リクエスト総数・成功/失敗・HTTP ステータス内訳・体感待ち時間 … クライアント側の計測（常に出る）
-  - judge_latency の中央値/90p/最大、リトライ発生率、judge フォールバック率 …
+  - latency_ms（classify＋judge＋声かけの合計）の中央値/90p/最大、judge フォールバック率（判定保留）…
       サーバが chat_logs に記録した値を管理 API（/admin/api/sessions/{id}）から取る。
       → --admin-password（または .env の ADMIN_PASSWORD）が必要
+      （API リトライ回数は列に残らない。サーバログの [llm_call] attempt 行で確認する）
   - classify フォールバック率 … サーバは classify の失敗を列に残していないので、
       「作問サンプルを送ったのに input_type が taiwa になった件数」で推定する（誤分類も含む上限値）
   - 429 の発生回数 … Anthropic からの 429 はサーバ内のリトライで吸収され、クライアントには見えない。
@@ -157,7 +158,7 @@ def run_student(args, base: str, user_id: str, samples: list[tuple[str, str]], m
             t0 = time.perf_counter()
             try:
                 r = client.post("/api/judge", json={"session_id": session_id, "user_id": user_id,
-                                                    "message": text, "button_pressed": None})
+                                                    "message": text})
                 status, ok, body = r.status_code, r.is_success, (r.json() if r.is_success else {})
                 if not ok:
                     metrics.errors.append(f"{user_id} judge {r.status_code}: {r.text[:120]}")
@@ -216,7 +217,7 @@ def main():
         cfg = c.get("/api/config").json()
     a, b = cfg["dividend"], cfg["divisor"]
     samples = [(k, t.format(a=a, b=b)) for k, t in SAMPLES]
-    print(f"対象: {base}  式: {cfg['expression']}  フェーズ: {cfg['phase']}  run_id: {cfg['run_id']}")
+    print(f"対象: {base}  式: {cfg['expression']}  フェーズ: {cfg['phase']}")
     if cfg["phase"] != 2:
         print("  注: フェーズ2以外では声かけ（ai_dialogue）が呼ばれないため、API 負荷はフェーズ2より軽い")
     user_ids = [f"{99 - i:02d}" for i in range(args.n_students)]   # 99, 98, …（実学級の 01〜 と重ねない）
@@ -231,10 +232,9 @@ def main():
                 if not r.is_success:
                     continue
                 for sess in r.json().get("sessions", []):
-                    if sess.get("run_id") == cfg["run_id"]:   # 現在の run のものだけ
-                        if ac.delete(f"/admin/api/sessions/{sess['session_id']}").is_success:
-                            deleted += 1
-                            print(f"  削除: user {uid} session {sess['session_id']}")
+                    if ac.delete(f"/admin/api/sessions/{sess['session_id']}").is_success:
+                        deleted += 1
+                        print(f"  削除: user {uid} session {sess['session_id']}")
         print(f"--cleanup-only: {deleted} セッションを削除した")
         return
 
@@ -284,18 +284,15 @@ def main():
     if not rows:
         print("  管理 API に入れないため取得できず（--admin-password を指定）" if not admin_pw else "  行が取れなかった")
     else:
-        jrows = [r for r in rows if r.get("judge_status") in ("ok", "retried_ok", "failed")]
-        lat = [r["judge_latency_ms"] for r in jrows if r.get("judge_latency_ms") is not None]
+        jrows = [r for r in rows if r.get("input_type") == "sakumon"]
+        lat = [r["latency_ms"] for r in jrows if r.get("latency_ms") is not None]
         print(f"judge が動いた行: {len(jrows)}（記録行 {len(rows)}）")
-        print(f"judge_latency: 中央値 {fmt_ms(pct(lat, 50))}  90p {fmt_ms(pct(lat, 90))}  最大 {fmt_ms(pct(lat, 100))}")
-        dlat = [r["dialogue_latency_ms"] for r in rows if r.get("dialogue_latency_ms") is not None]
-        if dlat:
-            print(f"dialogue_latency: 中央値 {fmt_ms(pct(dlat, 50))}  90p {fmt_ms(pct(dlat, 90))}  最大 {fmt_ms(pct(dlat, 100))}")
-        retried = [r for r in jrows if (r.get("retry_count") or 0) > 0]
-        failed = [r for r in jrows if r.get("judge_status") == "failed"]
+        print(f"latency_ms（作問ターン）: 中央値 {fmt_ms(pct(lat, 50))}  90p {fmt_ms(pct(lat, 90))}  最大 {fmt_ms(pct(lat, 100))}")
+        tlat = [r["latency_ms"] for r in rows if r.get("input_type") == "taiwa" and r.get("latency_ms") is not None]
+        if tlat:
+            print(f"latency_ms（対話ターン）: 中央値 {fmt_ms(pct(tlat, 50))}  90p {fmt_ms(pct(tlat, 90))}  最大 {fmt_ms(pct(tlat, 100))}")
+        failed = [r for r in jrows if r.get("issue") == "pending"]
         n = max(1, len(jrows))
-        print(f"judge リトライ発生率: {len(retried)}/{len(jrows)} = {100 * len(retried) / n:.1f}%  "
-              f"（retry_count 内訳 {dict(sorted(Counter(r.get('retry_count') or 0 for r in jrows).items()))}）")
         print(f"judge フォールバック率（判定保留）: {len(failed)}/{len(jrows)} = {100 * len(failed) / n:.1f}%")
         # classify：作問サンプルなのに taiwa になった行（フォールバック＋誤分類の上限値）
         sakumon_rows = [r for r in rows if r.get("input_type") in ("sakumon", "taiwa")]
@@ -303,8 +300,6 @@ def main():
         m = max(1, len(sakumon_rows))
         print(f"classify フォールバック率（推定上限）: {len(misrouted)}/{len(sakumon_rows)} = {100 * len(misrouted) / m:.1f}%"
               f"  ※ 誤分類も含む。失敗そのものはサーバログの [ai_classify] classify failed 行で確認")
-        dret = [r for r in rows if r.get("judge_status") == "skipped" and (r.get("retry_count") or 0) > 0]
-        print(f"dialogue のみのリトライ（対話ターン）: {len(dret)} 行")
 
     print("\n== 429（レート制限） ==")
     app_429 = sum(1 for r in reqs if r["status"] == 429)

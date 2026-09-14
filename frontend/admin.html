@@ -36,7 +36,6 @@
             <button class="btn btn-phase" data-phase="3">フェーズ3<small>事後・別の式</small></button>
           </div>
           <div class="phase-meta">
-            <span>回（run）: <strong id="run-id">–</strong></span>
             <span>更新: <span id="cfg-updated">–</span></span>
           </div>
         </div>
@@ -56,12 +55,11 @@
             <span class="expr-msg" id="expr-msg"></span>
           </div>
           <hr class="sep">
-          <div class="section-title" style="margin-top:8px">新しい回を始める</div>
+          <div class="section-title" style="margin-top:8px">リハーサル後の片づけ</div>
           <p class="help">
-            run 番号を進めてフェーズ1に戻します。児童は次のログインから新しいセッションになります
-            （リハーサルのデータを本番で拾わないため）。過去のデータは消えません。
+            1児童1フェーズ1セッションなので、リハーサルで使った出席番号のセッションは
+            「児童一覧・ログ」から削除してから本番に入ってください（本番の出席番号のデータが0件であることを確認）。
           </p>
-          <button class="btn btn-ghost btn-sm" id="btn-new-run">新しい回を始める</button>
         </div>
       </div>
 
@@ -80,8 +78,8 @@
               <th>提出<small>（今のフェーズ）</small></th>
               <th>成立</th>
               <th>到達<small>（1つ分・いくつ分・何倍）</small></th>
-              <th>支援水準</th>
-              <th>学習者状態</th>
+              <th>困り／不成立</th>
+              <th>直近の応答</th>
               <th>最終活動</th>
             </tr>
           </thead>

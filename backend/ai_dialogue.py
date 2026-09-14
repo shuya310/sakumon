@@ -12,7 +12,9 @@
                （LLM＋コード側ガード、失敗時は定型文）
   discover 新構造が出た（称賛のみ。LLM＋ガード、失敗時は定型文）
   goal     3構造そろった（定型）
-  talk     作問以外の入力（LLM＋ガード、失敗時は定型文）
+  talk     作問以外の入力（LLM＋ガード、失敗時は定型文）。困り・ネガティブな表明も
+           「やめたい」ではなく「足場不足」と解釈し、休けい・終了は提案せず、
+           必ず具体的な手がかりを1つ出して作問にもどす
   none     フェーズ1・3。表示しないので LLM は呼ばず「おくったよ」だけ返す
 
 絶対に守る境界（コード側でも検査する）：
@@ -20,6 +22,7 @@
   - 構造名（等分除・包含除・倍）を児童に見せない。返すのは常に「求める量」の言葉
   - 数量関係（{dividend}こを{divisor}こずつ 等）を渡さない
   - 答え（数値）を教えない
+  - talk で休けい・活動の終了/中断・再開を児童の意欲まかせにする表現・過剰な謝罪を出さない
 
 テープ図・構造図（figure / tape_diagram）は config.ENABLE_FIGURES=False で全面無効化。
 コードは残すが呼ばれない。
@@ -142,7 +145,10 @@ FORM_FALLBACK = {
     "not_problem": "{expression} になる お話を 作ってみよう。",
 }
 DISCOVER_FALLBACK = "いいね！新しいお話が できたね！"
-TALK_FALLBACK = "そうなんだね。またお話を 作ってみてね。"
+# talk のフォールバックは2種類。まだ1問も作れていない子には素材想起(a)、
+# 1問以上作れている子にはその問いだけを変える提案(b)。休けい・終了・謝罪は入れない。
+TALK_FALLBACK = "そっか。じゃあ、身近なところで、{dividend}こ あるものは何かな？"
+TALK_FALLBACK_REWRITE = "そっか。じゃあ、いま作った お話の「たずねているところ」だけ、かえてみようか。"
 LEVEL3_FALLBACK = "身近なところで、{dividend}こ あるものは何かな？ 教室や きゅうしょくの時間を 思い出してみよう。"
 
 
@@ -184,11 +190,25 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
   OK例：「教室にあるもので、{dividend}こあるものって何かな？」「きゅうしょくの時間だと、どんな場面が思いつく？」
   NG例：「{dividend}このあめを1人に{divisor}こずつ配ったら…みたいなお話はどう？」（数量関係を丸ごと渡している）
   まだ作れていない聞き方（下に示す）を意識して素材を選んでよいが、数量関係は書かない。
-- talk：作問以外の入力のうち、困り（「わからない」「どうしたら」等）ではないもの
-  （つぶやき・感想・あいさつ・確認）。やさしく短く受け止め、作問にもどれるよう軽くうながす。
+- talk：作問以外の入力（つぶやき・感想・あいさつ・確認・困りやいやがる気持ちの表明など）。
+  ★困り・いやがる・ネガティブな表明（「もうやだ」「続けられない」「なんだそれ」等）が来ても、
+    「活動をやめたい」のサインだとは解釈しないこと。「いまの足場（手がかり）が足りない」だけだと考える。
+  絶対に書かないこと：
+    - 休けい・休息の提案（「休けいしてもいいよ」「少し休んでから」「今日はここまで」等）
+    - 活動の終了・中断をにおわせる言い方
+    - 再開を子どもの意欲まかせにする言い方（「また作りたくなったら教えてね」等）
+    - 「ごめんね」など謝りすぎた言い方
+  気持ちは一言だけ受け止めたら、必ずそのあとに具体的な手がかりを1つ出して作問にもどす
+  （気持ちを受け止めるだけで終わらせない）。
+  手がかりは次の2つのうち、状況に合う一方だけを出す（両方は出さない・新しい種類の手がかりを作らない）：
+    (a) まだ1問も作れていない子には、身近な場面（教室・きゅうしょく・体育・家・お店 等）から
+        {expression} に合いそうな具体物を思い出させる問いかけ。数量関係は書かない。
+    (b) すでに1問以上作れている子には、そのお話の「たずねているところ（問い）」だけを
+        変えてみようという提案。素材を変えさせたり、新しい場面を出したりしない。
+    「これまでに作れた聞き方の数」が0なら (a)、1以上なら (b) を選ぶ。
+  「答えを教えて」と言われても答えは渡さない。ただし断るだけで終わらせず、必ず上の(a)(b)いずれかの
+    手がかりにつなげること（断って終わりにしない）。
   構造の名前や「何を求めるか」は教えない。
-  ※困りの訴えは talk には来ない（main.py が支援水準を1段上げて構造支援に回す）。
-    ここで「自分で考えてみよう」と突き放して堂々めぐりにしないこと。
 
 # 文字づかい
 {KANJI_RULE}
@@ -247,6 +267,9 @@ _BANNED_UNKNOWN_WORDS = ("1つ分", "１つ分", "一つ分", "1人分", "１人
 _BANNED_LEVEL3 = ("ずつ",)   # 水準3（素材想起）で数量関係を渡させない
 # discover では操作・数量関係を言い当てる言葉も禁止（種類の分類を暗に伝えてしまうため）
 _BANNED_DISCOVER = ("分け", "配", "くらべ", "比べ", "ずつ", "等分", "まとめ")
+# talk では困り・ネガティブな表明を「やめたい」と誤読して活動の終了に誘導してしまう表現を禁止する
+# （9/10 の試用で「休けいしてもいいよ」等が実害として出た）
+_BANNED_TALK = ("休", "今日はここまで", "終わりにし", "中断", "たくなったら", "ごめん", "やめても")
 
 
 def _has_both_numbers(text: str, dividend: int, divisor: int) -> bool:
@@ -272,6 +295,10 @@ def violates_boundary(message: str, support_level: str, expression: str) -> str 
         for w in _BANNED_DISCOVER:
             if w in message:
                 return f"banned_discover:{w}"
+    if support_level == "talk":
+        for w in _BANNED_TALK:
+            if w in message:
+                return f"banned_talk:{w}"
     if support_level in ("discover", "talk", "level3"):
         dividend, divisor = parse_expression(expression)
         if _has_both_numbers(message, dividend, divisor):
@@ -281,7 +308,8 @@ def violates_boundary(message: str, support_level: str, expression: str) -> str 
     return None
 
 
-def _fallback(support_level: str, judge_result: dict | None, expression: str) -> str:
+def _fallback(support_level: str, judge_result: dict | None, expression: str,
+              has_problem: bool = False) -> str:
     dividend, divisor = parse_expression(expression)
     expr = f"{dividend} ÷ {divisor}"
     if support_level == "form":
@@ -291,7 +319,9 @@ def _fallback(support_level: str, judge_result: dict | None, expression: str) ->
         return DISCOVER_FALLBACK
     if support_level == "level3":
         return LEVEL3_FALLBACK.replace("{dividend}", str(dividend))
-    return TALK_FALLBACK
+    if has_problem:
+        return TALK_FALLBACK_REWRITE
+    return TALK_FALLBACK.replace("{dividend}", str(dividend))
 
 
 def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
@@ -364,7 +394,8 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
         return {"message": message, "state": result.get("state") or support_level,
                 "meta": {"retry_count": retry_total, "status": "retried_ok" if retry_total else "ok"}}
 
-    return {"message": _fallback(support_level, judge_result, expression), "state": f"{support_level}_fallback",
+    return {"message": _fallback(support_level, judge_result, expression, has_problem=bool(history)),
+            "state": f"{support_level}_fallback",
             "meta": {"retry_count": retry_total, "status": "failed"}}
 
 

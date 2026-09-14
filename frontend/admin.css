@@ -145,6 +145,13 @@ tr.clickable:hover td { background: #F0FDF8; }
 /* ===== チャットログ ===== */
 .log-row td { vertical-align: top; }
 
+.msg-user, .msg-ai {
+  max-width: 440px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .msg-user {
   background: #DBEAFE;
   border-radius: 10px;

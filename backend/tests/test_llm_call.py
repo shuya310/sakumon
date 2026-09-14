@@ -172,7 +172,7 @@ print("OK ai_judge: 全失敗は issue=error/meta.failed、成功は従来の形
 # ---- ai_dialogue: API 全失敗 → 定型文（再依頼はしない）----
 fm = install([status_error(500)] * 8)
 out = ai_dialogue.dialogue("わからない", "taiwa", None, [], [], "talk", "24 ÷ 4", user_id="01")
-assert out["message"] == ai_dialogue.TALK_FALLBACK and out["state"] == "talk_fallback"
+assert out["message"] == ai_dialogue.TALK_FALLBACK.replace("{dividend}", "24") and out["state"] == "talk_fallback"
 assert out["meta"]["status"] == "failed" and out["meta"]["retry_count"] == 3
 assert fm.calls == 4, fm.calls   # API 不通なら2周目の再依頼はしない
 

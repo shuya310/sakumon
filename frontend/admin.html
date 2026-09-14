@@ -41,19 +41,15 @@
         </div>
 
         <div class="card phase-card">
-          <div class="section-title">式</div>
-          <div class="expr-row">
-            <label>式A（フェーズ1・2）</label>
-            <input id="expr-a" class="expr-input" placeholder="24 ÷ 4">
-          </div>
-          <div class="expr-row">
-            <label>式B（フェーズ3）</label>
-            <input id="expr-b" class="expr-input" placeholder="18 ÷ 3">
-          </div>
-          <div class="expr-actions">
-            <button class="btn btn-primary btn-sm" id="btn-save-expr">式を保存</button>
-            <span class="expr-msg" id="expr-msg"></span>
-          </div>
+          <div class="section-title">式（出席番号の奇偶 × フェーズ）</div>
+          <table class="expr-table" id="expr-table">
+            <thead><tr><th></th><th>フェーズ1</th><th>フェーズ2</th><th>フェーズ3</th></tr></thead>
+            <tbody id="expr-tbody"></tbody>
+          </table>
+          <p class="help">
+            セッション開始時に決まり、途中では変わりません。個別に変えたいときは「児童一覧・ログ」の
+            セッションの「式を変更」から上書きできます（児童の画面には5秒以内に反映）。
+          </p>
           <hr class="sep">
           <div class="section-title" style="margin-top:8px">リハーサル後の片づけ</div>
           <p class="help">
@@ -77,13 +73,14 @@
               <th>接続</th>
               <th>提出<small>（今のフェーズ）</small></th>
               <th>成立</th>
-              <th>到達<small>（1つ分・いくつ分・何倍）</small></th>
-              <th>困り／不成立</th>
+              <th>到達<small>（数のみ）</small></th>
+              <th>予告<small>（誰が・何を）</small></th>
+              <th>反復／不一致</th>
               <th>直近の応答</th>
               <th>最終活動</th>
             </tr>
           </thead>
-          <tbody id="live-tbody"><tr><td colspan="8" class="empty">読み込み中…</td></tr></tbody>
+          <tbody id="live-tbody"><tr><td colspan="9" class="empty">読み込み中…</td></tr></tbody>
         </table>
       </div>
     </div>

@@ -668,3 +668,66 @@ body {
 .phase-banner-sub { font-size: 1.05rem; opacity: .9; }
 
 .panel-card h3 span { color: var(--green); font-size: 1rem; margin-left: 4px; }
+
+/* ===== 仕様 v2 5章 ===== */
+/* 目標の固定表示（入力欄の直上に固定。スクロールしても見える） */
+.target-bar {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  background: #FFF7E6;
+  border-top: 2px solid var(--orange);
+  color: #7C4700;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+.target-bar strong { font-size: 1.1rem; }
+
+/* 予告／自己ラベルの1行自由記述 */
+.sub-input-area {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px 0;
+  background: #F3FAF7;
+}
+.sub-input {
+  flex: 1;
+  font-size: 1.05rem;
+  padding: 10px 12px;
+  border: 2px solid var(--green);
+  border-radius: 10px;
+  outline: none;
+}
+.btn-sub-send { padding: 0 18px; }
+
+/* 中・ステップ2の3択。選んだものだけ残して無効化する */
+.choice-buttons {
+  align-self: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: -4px;
+  padding-left: 4px;
+}
+.btn-choice {
+  background: #fff;
+  color: var(--green);
+  border: 2px solid var(--green);
+  border-radius: 999px;
+  padding: 8px 20px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-choice:hover:not(:disabled) { background: #E8F5F1; }
+.btn-choice.selected { background: var(--green); color: #fff; }
+.btn-choice:disabled { opacity: .35; cursor: default; }
+.btn-choice.selected:disabled { opacity: 1; }
+
+/* 吹き出しの強調（**…**） */
+.bubble-ai strong { font-weight: 800; }
+.bubble-ai.strong-prompt strong:first-child { font-size: 1.12em; text-decoration: underline; }
+
+/* 進捗マーク（無地） */
+.lights .light { font-size: 1.6rem; color: #C9D3CE; margin: 0 4px; }
+.lights .light.on { color: var(--green); }

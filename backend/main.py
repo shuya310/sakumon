@@ -1,17 +1,21 @@
 """作問支援システム API。
 
-- 式・フェーズは app_config（database.get_config）から取得する。ハードコードしない。
+- フェーズは app_config（database.get_config）から取得する。ハードコードしない。
+- 式は児童（出席番号の奇偶）とフェーズで決まる（EXPRESSION_ASSIGNMENT。仕様 v2 4章）。
+  セッション開始時に決めて sessions.expression に保存し、途中で変えない。管理画面から個別に上書きできる。
 - フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す
   （response_type / ai_message は記録しない＝表示していないものは記録しない）。
 - フェーズ2：応答の種類（response_type: form / praise / prompt / done / talk / error）を状態機械
-  （仕様 v2 2章）で決定論的に決め、ai_dialogue に声かけを組み立てさせる。AIには判定させない。
+  （仕様 v2 2章）で決定論的に決め、ai_dialogue に文言を組み立てさせる。AIには判定させない。
   状態（sessions に保持・フェーズスコープ）：produced（到達構造の集合）、declared / declared_by（予告）、
   stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）。
   不成立・対話・再送ではカウンタを動かさない。新構造到達で stuck / miss を両方 0 に戻す。
+- 中（強度2）の2ステップ対話（自己ラベル）は /api/self_label。児童が答えずに作問を送ってきたら
+  対話は打ち切り、通常の作問処理に進む（予告は立ったまま）。自己ラベルが判定と違っても訂正しない。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
-- API 不通時の扱い：judge が規定回数リトライしても応答しなければ、その作問を「判定保留」として受理し
-  （一覧に載せる・構造は空のまま）、児童には「おくれたよ！先生があとで読むね」を返す。再送要求は出さない。
-  同じ本文の連続再送は API を呼ばず直前の結果を返す（input_type='resend'）。
+- judge が API 不通：response_type='error'・issue='error'。児童には「もう一度 おくって みてね」（3-2）。
+  一覧には載せない。同じ本文を送り直したら判定し直す（すでに判定済みの本文の再送だけ input_type='resend' で
+  API を呼ばず直前の結果を返す。カウンタは動かさない）。
 """
 
 import csv
@@ -42,10 +46,15 @@ if not config.ADMIN_PASSWORD:
     )
 
 STRUCTURES = {"tobun", "hougan", "bai"}
-# judge が API 不通で判定できなかったときの児童向け表示（受理はする。再送は求めない）
-JUDGE_PENDING_MESSAGE = "おくれたよ！ 先生があとで読むね。つぎのお話も作ってみよう。"
 USER_ID_PATTERN = re.compile(r"^[0-9]{2}$")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+# 式のカウンターバランス（仕様 v2 4章）。出席番号の奇偶 × フェーズ。後から1箇所で変更できるようここに置く。
+# 24÷4 を使わない理由：9/1 の紙の調査が全員 24÷4 で、練習効果が交絡するため。
+EXPRESSION_ASSIGNMENT = {
+    "odd":  {1: "24÷6", 2: "24÷8", 3: "24÷3"},
+    "even": {1: "24÷3", 2: "24÷8", 3: "24÷6"},
+}
 
 # 児童側の設定ポーリングを心拍として使う（user_id → 最終受信）。単一プロセス前提のメモリ保持。
 _last_seen: dict[str, dict] = {}
@@ -84,11 +93,7 @@ app.mount("/static", _RevalidatingStaticFiles(directory=FRONTEND_DIR), name="sta
 
 
 def _asset_version() -> str:
-    """frontend/ の js・css の最終更新時刻。HTMLの `?v=__V__` に埋め込む。
-
-    デプロイのたびに値が変わるので、ブラウザに残っている古いキャッシュを
-    確実に切れる（URLが変わる＝別ファイル扱いになる）。
-    """
+    """frontend/ の js・css の最終更新時刻。HTMLの `?v=__V__` に埋め込む。"""
     try:
         mtimes = [f.stat().st_mtime for f in FRONTEND_DIR.iterdir() if f.suffix in (".js", ".css")]
         return str(int(max(mtimes))) if mtimes else "0"
@@ -132,13 +137,19 @@ class DeclareRequest(BaseModel):
     text: str
 
 
+class SelfLabelRequest(BaseModel):
+    session_id: int
+    user_id: str
+    text: str | None = None      # ステップ1：自由記述
+    choice: str | None = None    # ステップ2：tobun / hougan / bai
+
+
 class PhaseRequest(BaseModel):
     phase: int
 
 
-class ExpressionsRequest(BaseModel):
-    expression_a: str
-    expression_b: str
+class SessionExpressionRequest(BaseModel):
+    expression: str
 
 
 # ===== 共通ヘルパ =====
@@ -154,17 +165,23 @@ def _touch(user_id: str, session_id: int | None):
     _last_seen[user_id] = {"session_id": session_id, "ts": time.time()}
 
 
-def _cfg_public(cfg: dict) -> dict:
-    phase = cfg["current_phase"]
-    dividend, divisor = config.parse_expression(database.expression_for_phase(cfg, phase))
-    return {
-        "phase": phase,
-        "expression": f"{dividend} ÷ {divisor}",
-        "dividend": dividend,
-        "divisor": divisor,
+def assigned_expression(user_id: str, phase: int) -> str:
+    """出席番号の奇偶とフェーズから式を決める（'24 ÷ 6' の形）。"""
+    group = database.parity_group_of(user_id)
+    return config.normalize_expression(EXPRESSION_ASSIGNMENT[group][phase])
+
+
+def _cfg_public(cfg: dict, session: dict | None = None) -> dict:
+    """現在のフェーズ。式は児童ごとなので、セッションが分かるときだけ返す。"""
+    out = {
+        "phase": cfg["current_phase"],
+        "expression": session["expression"] if session else None,
         "updated_at": cfg["updated_at"],
         "poll_seconds": config.CONFIG_POLL_SECONDS,
+        "expression_assignment": {g: {str(p): config.normalize_expression(e) for p, e in d.items()}
+                                  for g, d in EXPRESSION_ASSIGNMENT.items()},
     }
+    return out
 
 
 def _owned_session(session_id: int, user_id: str) -> dict:
@@ -175,6 +192,33 @@ def _owned_session(session_id: int, user_id: str) -> dict:
     if session["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="このセッションはあなたのものではありません")
     return session
+
+
+def _pending_dialog(last: dict | None) -> str | None:
+    """再入場時に、途中だった対話（予告入力／自己ラベル）を復元するための状態。
+
+    declaration     … 弱の直後（予告の入力欄を出す）
+    self_label_text … 中のステップ1（自由記述を待つ）
+    self_label_choice … 中のステップ2（3択を待つ）
+    """
+    if not last:
+        return None
+    if last["input_type"] == "sakumon" and last.get("response_type") == "prompt":
+        return {1: "declaration", 2: "self_label_text"}.get(last.get("prompt_strength"))
+    if last["input_type"] == "self_label" and last.get("self_label_text") and not last.get("self_label"):
+        return "self_label_choice"
+    return None
+
+
+def _support_state(session: dict, show: bool) -> dict:
+    declared = session["declared"] if show else None
+    return {
+        "declared": declared,
+        "declared_by": session["declared_by"] if show else None,
+        "target_label": ai_dialogue.STRUCTURE_LABEL.get(declared) if declared else None,
+        "stuck_count": session["stuck_count"] if show else None,
+        "miss_count": session["miss_count"] if show else None,
+    }
 
 
 def _enter_payload(session: dict, cfg: dict) -> dict:
@@ -188,26 +232,30 @@ def _enter_payload(session: dict, cfg: dict) -> dict:
         "user_id": user_id,
         "session_id": session_id,
         "phase": phase,
-        "expression": config.normalize_expression(database.expression_for_phase(cfg, phase)),
+        "expression": session["expression"],
         "show_support": show,
         "history": history if show else [],
         "problems": ([{"text": p["text"], "structure": p["structure"]} for p in database.get_valid_problems(session_id)]
                      if show else []),
         "conversation": database.get_conversation(session_id),
-        "ui_strength": database.get_max_prompt_strength(session_id) if show else 0,
         "all_reached": show and set(history) >= STRUCTURES,
-        "declared": session["declared"] if show else None,
-        "declared_by": session["declared_by"] if show else None,
+        "dialog": _pending_dialog(database.get_last_turn(session_id)) if show else None,
+        "choices": _choices(),
+        **_support_state(session, show),
         "poll_seconds": config.CONFIG_POLL_SECONDS,
     }
+
+
+def _choices() -> list[dict]:
+    """中・ステップ2の3択（常に3つとも出す。到達済みかどうかで出し分けない）。"""
+    return [{"value": s, "label": ai_dialogue.STRUCTURE_LABEL[s]} for s in ai_dialogue.STRUCTURE_ORDER]
 
 
 def _enter_current(user_id: str) -> dict:
     """現在のフェーズに対応するセッションを探し（無ければ作り）、入場情報を返す。"""
     cfg = database.get_config()
     phase = cfg["current_phase"]
-    expression = database.expression_for_phase(cfg, phase)
-    session_id, _created = database.find_or_create_session(user_id, phase, expression)
+    session_id, _created = database.find_or_create_session(user_id, phase, assigned_expression(user_id, phase))
     _touch(user_id, session_id)
     return _enter_payload(database.get_session(session_id), cfg)
 
@@ -225,10 +273,16 @@ def decide_strength(stuck: int, miss: int) -> int:
 
 @app.get("/api/config")
 def get_public_config(user_id: str | None = None, session_id: int | None = None):
-    """現在のフェーズと式（認証不要）。児童側はこれを5秒間隔でポーリングする（心拍にもなる）。"""
+    """現在のフェーズ（認証不要）。児童側はこれを5秒間隔でポーリングする（心拍にもなる）。
+    user_id と session_id が自分のものなら、そのセッションの式も返す（管理画面の上書きを画面に反映するため）。"""
+    session = None
     if user_id and USER_ID_PATTERN.match(user_id):
         _touch(user_id, session_id)
-    return _cfg_public(database.get_config())
+        if session_id is not None:
+            s = database.get_session(session_id)
+            if s and s["user_id"] == user_id:
+                session = s
+    return _cfg_public(database.get_config(), session)
 
 
 @app.post("/api/login")
@@ -267,11 +321,10 @@ def judge(req: JudgeRequest):
     session = _owned_session(req.session_id, user_id)
     _touch(user_id, req.session_id)
 
-    # フェーズはセッションのもの（＝児童の画面に出ているもの）。切替直後に旧画面から届いた送信を
+    # フェーズ・式はセッションのもの（＝児童の画面に出ているもの）。切替直後に旧画面から届いた送信を
     # 新フェーズとして記録しない（chat_logs.phase と sessions.phase を常に一致させる）。
     phase = session["phase"]
-    cfg = database.get_config()
-    expression = config.normalize_expression(database.expression_for_phase(cfg, phase))
+    expression = session["expression"]
     message = req.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="empty message")
@@ -283,7 +336,7 @@ def judge(req: JudgeRequest):
                counts={"stuck": session["stuck_count"], "miss": session["miss_count"]},
                t_start=t_start)
 
-    # 同じ本文の連続再送（API 不通時に児童が送り直すのが典型）は API を呼ばず直前の結果を返す
+    # すでに判定済みの本文の連続再送は API を呼ばず直前の結果を返す
     if _is_resend(message, last):
         return _finish(_handle_resend(req, user_id, message, ctx), user_id, ctx)
 
@@ -310,8 +363,6 @@ def declare(req: DeclareRequest):
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="empty text")
-    cfg = database.get_config()
-    expression = config.normalize_expression(database.expression_for_phase(cfg, 2))
 
     kind = ai_classify.classify_declaration(text, user_id=user_id)
     declared = kind if kind in STRUCTURES else None
@@ -321,14 +372,67 @@ def declare(req: DeclareRequest):
                            stuck_count=session["stuck_count"], miss_count=session["miss_count"])
     produced = database.get_produced(user_id, 2)
     database.save_log(
-        session_id=req.session_id, user_id=user_id, phase=2, expression=expression,
+        session_id=req.session_id, user_id=user_id, phase=2, expression=session["expression"],
         input_type="declaration", message=text, ai_message=None,
         declared_structure=declared, declared_by=declared_by,
         produced_structures=produced, stuck_count=session["stuck_count"], miss_count=session["miss_count"],
         latency_ms=int((time.perf_counter() - t_start) * 1000),
     )
-    return {"declared": declared, "declared_by": declared_by, "classified": kind,
-            "phase": 2, "show_support": True, "history": produced}
+    session = database.get_session(req.session_id)
+    return {"classified": kind, "message": None, "dialog": None,
+            "phase": 2, "show_support": True, "history": produced, **_support_state(session, True)}
+
+
+@app.post("/api/self_label")
+def self_label(req: SelfLabelRequest):
+    """中（強度2）の2ステップ対話（仕様 v2 3-5）。
+
+    ステップ1（text）：原文を self_label_text に保存し、ステップ2の文言と3択を返す。
+    ステップ2（choice）：選択を self_label に、ai_judge 判定との一致を self_label_match に保存し、
+      ステップ3（目標の指定）の文言を返す。目標は prompt 発行時にシステムが立てた declared（未到達構造）。
+      ★児童の選択が判定と食い違っても訂正しない（記録のみ）。
+    どちらもカウンタは動かさない。フェーズ2以外は受け付けない。"""
+    t_start = time.perf_counter()
+    user_id = _normalize_user_id(req.user_id)
+    session = _owned_session(req.session_id, user_id)
+    _touch(user_id, req.session_id)
+    if session["phase"] != 2:
+        raise HTTPException(status_code=400, detail="フェーズ2でだけ受け付けます")
+    produced = database.get_produced(user_id, 2)
+    problems = database.get_valid_problems(req.session_id)
+    if not problems:
+        raise HTTPException(status_code=400, detail="成立した作問がありません")
+    latest = problems[-1]          # 「いま 作って くれた 問題」＝直近の成立作問
+    common = dict(session_id=req.session_id, user_id=user_id, phase=2, expression=session["expression"],
+                  input_type="self_label", produced_structures=produced,
+                  stuck_count=session["stuck_count"], miss_count=session["miss_count"])
+
+    text = (req.text or "").strip()
+    choice = (req.choice or "").strip()
+    if text and not choice:
+        ai_message = ai_dialogue.SELF_LABEL_STEP2
+        database.save_log(**common, message=text, ai_message=ai_message, self_label_text=text,
+                          latency_ms=int((time.perf_counter() - t_start) * 1000))
+        return {"message": ai_message, "dialog": "self_label_choice", "choices": _choices(),
+                "phase": 2, "show_support": True, "history": produced, **_support_state(session, True)}
+
+    if choice not in STRUCTURES:
+        raise HTTPException(status_code=400, detail="text か choice（tobun / hougan / bai）を指定してください")
+    match = choice == latest["structure"]
+    # 目標：prompt 発行時に立てた declared（システム）。無ければここで未到達構造から立てる
+    target = session["declared"] if session["declared_by"] == "system" and session["declared"] else None
+    if not target:
+        target = ai_dialogue.pick_unreached_structure(produced)
+        if target:
+            database.set_state(req.session_id, declared=target, declared_by="system",
+                               stuck_count=session["stuck_count"], miss_count=session["miss_count"])
+    ai_message = ai_dialogue.target_message(target, session["expression"]) if target else ai_dialogue.DONE_MESSAGE
+    database.save_log(**common, message=ai_dialogue.STRUCTURE_LABEL[choice], ai_message=ai_message,
+                      self_label=choice, self_label_match=match,
+                      latency_ms=int((time.perf_counter() - t_start) * 1000))
+    session = database.get_session(req.session_id)
+    return {"message": ai_message, "dialog": None,
+            "phase": 2, "show_support": True, "history": produced, **_support_state(session, True)}
 
 
 @app.get("/api/judge/status")
@@ -340,8 +444,12 @@ def judge_status(user_id: str):
 
 
 def _is_resend(message: str, last: dict | None) -> bool:
-    """直前のターンと同じ本文 → 再送とみなす。"""
-    return last is not None and (last.get("message") or "") == message
+    """直前のターンと同じ本文 → 再送とみなす。ただし直前が判定エラーなら判定し直す（3-2「もう一度 おくって みてね」）。"""
+    if last is None or (last.get("message") or "") != message:
+        return False
+    if last.get("input_type") == "sakumon" and last.get("issue") == "error":
+        return False
+    return True
 
 
 def _latency(ctx: dict) -> int:
@@ -352,7 +460,7 @@ def _base_result(message: str | None, response_type: str | None, input_type: str
     return {
         "message": message, "response_type": response_type, "prompt_strength": None,
         "valid": None, "structure": None, "unknown": None, "is_new": False,
-        "input_type": input_type, **extra,
+        "input_type": input_type, "dialog": None, **extra,
     }
 
 
@@ -360,24 +468,19 @@ def _finish(result: dict, user_id: str, ctx: dict) -> dict:
     phase = ctx["phase"]
     show = phase == 2
     history = database.get_produced(user_id, phase)
+    session = database.get_session(ctx["session"]["session_id"])
     result["phase"] = phase
     result["show_support"] = show
     result["history"] = history if show else []
-    result["ui_strength"] = database.get_max_prompt_strength(ctx["session"]["session_id"]) if show else 0
     result["all_reached"] = show and set(history) >= STRUCTURES
-    state = database.get_session(ctx["session"]["session_id"])
-    result["stuck_count"] = state["stuck_count"] if show else None
-    result["miss_count"] = state["miss_count"] if show else None
-    result.setdefault("declared", state["declared"] if show else None)
-    result.setdefault("declared_by", state["declared_by"] if show else None)
-    # accepted：フロントが「作った お話」一覧に追加するか。成立した作問と、判定保留で受理した作問が対象。
-    # 再送（resend）は直前の応答を返すだけなので追加しない。
+    result["choices"] = _choices()
+    result.update(_support_state(session, show))
+    # accepted：フロントが「つくった お話」一覧に追加するか（成立した作問だけ。再送・判定エラーは追加しない）
     result.setdefault("accepted", bool(result.get("valid")) and result.get("input_type") == "sakumon")
     if not show:
         # フェーズ1・3では判定結果を画面に出さない（ログには残っている）
         result["message"] = ai_dialogue.ACK_MESSAGE
-        for k in ("valid", "structure", "unknown", "response_type", "prompt_strength",
-                  "declared", "declared_by", "declaration_met"):
+        for k in ("valid", "structure", "unknown", "response_type", "prompt_strength", "declaration_met", "dialog"):
             result[k] = None
         result["is_new"] = False
         result["accepted"] = False
@@ -385,9 +488,9 @@ def _finish(result: dict, user_id: str, ctx: dict) -> dict:
 
 
 def _handle_resend(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
-    """同一本文の再送：API を呼ばず直前の応答をそのまま返す（多重呼び出し防止）。
+    """判定済みの本文の再送：API を呼ばず直前の応答をそのまま返す（多重呼び出し防止）。
 
-    ログは残す（再送の回数は計測したい）が、input_type="resend" として提出・成立・回数のどれにも
+    ログは残す（再送の回数は計測したい）が、input_type="resend" として提出・成立・カウンタのどれにも
     数えない。response_type / ai_message は直前の値を写す。"""
     last, phase, counts = ctx["last"], ctx["phase"], ctx["counts"]
     result = _base_result(last.get("ai_message") or ai_dialogue.ACK_MESSAGE, last.get("response_type"), "resend",
@@ -405,11 +508,7 @@ def _handle_resend(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> 
 
 
 def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
-    """対話経路：judge は通さない。フェーズ1・3は「おくったよ」。
-
-    困り表明（「わからない」「どうしたら」等）は stuck_count に数える。応答は talk
-    （LLM が困りに対しても具体的な手がかりを1つ出して作問にもどす）。
-    """
+    """対話経路：judge は通さない。フェーズ1・3は「おくったよ」。カウンタは動かさない。"""
     phase, produced, counts = ctx["phase"], ctx["produced"], ctx["counts"]
     show = phase == 2
 
@@ -432,7 +531,7 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
 
 
 def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
-    """作問経路：ai_judge で同定 → 状態機械（仕様 v2 2-5）で応答の種類と強さを決定 → ai_dialogue が声かけ。
+    """作問経路：ai_judge で同定 → 状態機械（仕様 v2 2-5）で応答の種類と強さを決定 → ai_dialogue が文言。
 
     カウンタの規則（2-3）：
       不成立            → stuck / miss は変化しない
@@ -441,23 +540,23 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
       予告あり・一致    → declaration_met = 1、miss = 0
       予告あり・不一致  → declaration_met = 0、miss += 1
     状態機械はフェーズ2でだけ動く。フェーズ1・3は判定だけ記録する（カウンタも動かさない）。
+    中・強ではシステムが未到達構造を declared_by="system" で立てる（中はステップ3でそれを文言で伝える）。
     """
     phase, expression, produced, counts = ctx["phase"], ctx["expression"], ctx["produced"], ctx["counts"]
     session = ctx["session"]
     show = phase == 2
     jr = ai_judge.judge(message, expression, user_id=user_id)
 
-    # 技術的失敗（規定回数リトライしても API が応答しない）→ 判定保留として「受理」する。
-    # 児童の活動を止めないことを最優先にし、一覧には載せる・構造は空のまま・再送は求めない。
-    # 児童の責任ではないので miss_count にも数えない。
+    # 技術的失敗（規定回数リトライしても API が応答しない）→ 3-2 error。一覧には載せず、送り直してもらう。
+    # 児童の責任ではないのでカウンタは動かさない。
     if jr.get("issue") == "error":
-        ai_message = JUDGE_PENDING_MESSAGE if show else None
-        result = _base_result(ai_message, "error" if show else None, "sakumon", accepted=True,
+        ai_message = ai_dialogue.FORM_MESSAGES["error"] if show else None
+        result = _base_result(ai_message, "error" if show else None, "sakumon", accepted=False,
                               prompt_strength=0 if show else None)
         database.save_log(
             session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
             input_type="sakumon", message=message, ai_message=ai_message,
-            valid=None, issue="pending", is_new=False,
+            valid=None, issue="error", is_new=False,
             response_type="error" if show else None, prompt_strength=0 if show else None,
             produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
             latency_ms=_latency(ctx),
@@ -472,6 +571,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     produced_after = list(produced) + ([structure] if is_new else [])
     all_before = set(produced) >= STRUCTURES
     completes_all = is_new and set(produced_after) >= STRUCTURES
+    ref_no = len(database.get_valid_problems(req.session_id)) + (1 if valid else 0)  # 最新の表示番号
 
     # ---- 状態機械（フェーズ2のみ。不成立は何も動かさない） ----
     stuck, miss = counts["stuck"], counts["miss"]
@@ -479,6 +579,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     declared_used, declared_by_used, met = None, None, None
     strength = None
     response_type = None
+    dialog = None
     if show and valid:
         if declared:
             declared_used, declared_by_used = declared, declared_by
@@ -498,6 +599,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
                 response_type = "praise"
             else:
                 response_type = "prompt"
+                dialog = {1: "declaration", 2: "self_label_text"}.get(strength)
                 if strength >= 2:
                     # 中・強：produced に含まれない構造を固定順で1つ指定（自己ラベルは使わない）
                     declared = ai_dialogue.pick_unreached_structure(produced_after)
@@ -512,14 +614,13 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         dlg = ai_dialogue.dialogue(
             message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
             produced, ctx["recent"], response_type, expression,
-            first_done=completes_all, prompt_strength=strength, user_id=user_id,
+            prompt_strength=strength, target=declared, ref_no=ref_no, user_id=user_id,
         )
         ai_message = dlg["message"]
 
     result = _base_result(ai_message, response_type, "sakumon")
     result.update({"valid": valid, "structure": structure, "unknown": unknown, "is_new": is_new,
-                   "prompt_strength": strength, "declaration_met": met,
-                   "declared": declared, "declared_by": declared_by})
+                   "prompt_strength": strength, "declaration_met": met, "dialog": dialog})
     database.save_log(
         session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
         input_type="sakumon", message=message, ai_message=ai_message,
@@ -572,15 +673,17 @@ def admin_set_phase(req: PhaseRequest):
     return {**cfg, "public": _cfg_public(cfg)}
 
 
-@admin.post("/api/expressions")
-def admin_set_expressions(req: ExpressionsRequest):
+@admin.post("/api/sessions/{session_id}/expression")
+def admin_set_session_expression(session_id: int, req: SessionExpressionRequest):
+    """個別の式の上書き（当日のトラブル対応用）。児童の画面には次のポーリングで反映される。"""
+    if database.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
     try:
-        a = config.normalize_expression(req.expression_a)
-        b = config.normalize_expression(req.expression_b)
+        expression = config.normalize_expression(req.expression)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    cfg = database.set_expressions(a, b)
-    return {**cfg, "public": _cfg_public(cfg)}
+    database.set_session_expression(session_id, expression)
+    return {"ok": True, "session_id": session_id, "expression": expression}
 
 
 @admin.get("/api/live")

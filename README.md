@@ -19,36 +19,41 @@
 フェーズ・式は `app_config` テーブルにあり、管理画面（`/admin`）から切り替える。
 児童の画面は5秒ごとに `/api/config` を確認し、変わったら自動で切り替わる。
 
-## 応答の種類（フェーズ2）
+## 予告支援（フェーズ2）— `docs/sakumon_spec_v2.md`
 
-| response_type | 内容 | 生成 |
+作問が成立するたびに、状態機械（`stuck`=同構造の連続回数、`miss`=予告不一致の累積）で強さを決める。
+
+| response_type | 強さ | 内容 |
 |---|---|---|
-| `form` | 不成立作問への成立性フィードバック | LLM＋ガード（失敗時は定型文） |
-| `praise` | 成立作問への称賛。新しい聞き方なら LLM、既出のくり返しなら定型文 | LLM／定型 |
-| `prompt` | 予告支援（`prompt_strength` 1=弱／2=中／3=強）。**予告支援仕様で実装**（未実装） | ─ |
-| `talk` | 作問以外の入力。困り表明も「足場不足」と解釈し、手がかりを1つ出して作問にもどす | LLM＋ガード |
-| `done` | 3構造そろった | 定型 |
-| `error` | judge が API 不通（判定保留 `issue=pending`）。受理して一覧に載せる | 定型 |
+| `form` | ─ | 不成立作問への形式の支援（issue に応じて1点だけ。定型） |
+| `praise` | 0 | 新しい問題の称賛／同じ構造1回目（定型） |
+| `prompt` | 1 弱 | 「つぎは何を求める問題にする？」→ 自由記述の予告（`/api/declare`、LLM で分類、`declared_by=child`） |
+| `prompt` | 2 中 | 自己ラベル（自由記述 → 3択、`/api/self_label`）→ システムが未到達構造を目標に指定（`declared_by=system`）。自己ラベルが判定と違っても訂正しない |
+| `prompt` | 3 強 | 目標の指定＋場面の固定「◯ばんの お話は そのままで いいよ」 |
+| `done` | ─ | 3構造そろった |
+| `talk` | ─ | 作問以外の入力（LLM＋ガード。休けい・終了は提案しない） |
+| `error` | ─ | judge が API 不通「もう一度 おくって みてね」（一覧に載せない） |
 
-- フェーズ1・3は表示しないので `response_type` / `ai_message` は記録しない（判定だけ記録）。
-- 制御変数は `produced_structures`（到達構造の集合）・`stuck_count`（困り表明の回数）・`miss_count`（不成立の回数）。
-  旧 S0〜S3・水準1〜4・「同じ／ちがう」ボタンは廃止（`sakumon_cleanup_spec.md`）。
-- LLM 生成にはコード側ガード（構造名・「1つ分」等の求める量の語・被除数と除数の同時出現などを含むと定型文へ差し替え）。
-- 構造名（等分除・包含除・倍）は児童に一切見せない。図（テープ図）は `config.ENABLE_FIGURES=False` で無効。
+- 強さ：stuck 2→弱、3→中、4以上→強／miss 1→中、2以上→強（大きい方）。新構造到達で両方 0。不成立・対話・再送では動かさない。
+- 文言は仕様3章の表を一字一句（`ai_dialogue.py`）。児童向けに「種類」「たずねる」「聞いていること」・構造名は出さない。
+- 式は出席番号の奇偶×フェーズ（`main.EXPRESSION_ASSIGNMENT`：奇数 24÷6/24÷8/24÷3、偶数 24÷3/24÷8/24÷6）。管理画面からセッション単位で上書き可。
+- 図（テープ図）は `config.ENABLE_FIGURES=False` で無効。
 
 ## 処理の流れ
 
 ```
 POST /api/judge {session_id, user_id, message}
-  ├ 所有権チェック（user_id と sessions.user_id が一致）。フェーズはセッションのもの
-  ├ 同じ本文の連続再送 → API を呼ばず直前の結果（input_type=resend）
+  ├ 所有権チェック（user_id と sessions.user_id が一致）。フェーズ・式はセッションのもの
+  ├ 判定済み本文の連続再送 → API を呼ばず直前の結果（input_type=resend）
   ├ ai_classify：作問 / 対話
   ├ 作問 → ai_judge：{valid, structure, unknown, issue}
-  │        → main.py：response_type（form / praise / done）を決定論的に決める
-  │        → ai_dialogue：声かけ（フェーズ1・3は「おくったよ」のみ）
-  └ 対話 → talk（困り表明は stuck_count に数える）
+  │        → main.py：状態機械で response_type / prompt_strength / declared を決める
+  │        → ai_dialogue：文言（フェーズ1・3は「おくったよ」のみ）
+  └ 対話 → talk
+POST /api/declare {session_id, user_id, text}        予告（弱）→ input_type=declaration
+POST /api/self_label {session_id, user_id, text|choice}  自己ラベル（中）→ input_type=self_label
   → chat_logs に全ターン記録（phase, expression, input_type, valid, structure, unknown, issue, is_new,
-     response_type, prompt_strength, produced_structures, stuck_count, miss_count, latency_ms ほか）
+     response_type, prompt_strength, declared_*, self_label*, produced_structures, stuck_count, miss_count, latency_ms）
 ```
 
 ### ai_judge の出力
@@ -102,8 +107,9 @@ cd backend && uvicorn main:app --reload --port 8000
 
 HTTP Basic 認証（ユーザー名は任意、パスワード＝`ADMIN_PASSWORD`）。
 
-- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式A・式Bの編集
-- 児童の状態（5秒更新）：接続・提出数・成立数・到達3灯・困り／不成立の回数・直近の応答。提出0問の児童を赤で強調
+- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式の割り当て表（奇偶×フェーズ）
+- 児童の状態（5秒更新）：接続・提出数・成立数・到達数・予告（誰が・何を）・反復／不一致・直近の応答。提出0問の児童を赤で強調
+- 児童詳細：セッションごとの式の上書き、予告と産出の一致／不一致、自己ラベルと判定の一致
 - 1児童1フェーズ1セッション（`UNIQUE(user_id, phase)`）。リハーサルのデータは本番前に「児童一覧・ログ」から削除する
 - 児童一覧・ログ・CSV
 

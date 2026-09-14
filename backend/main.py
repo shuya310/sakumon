@@ -6,6 +6,9 @@
   ここで決定論的に算出し、ai_dialogue に声かけを組み立てさせる。AIには判定させない。
   水準を上げるのは「成立作問の反復」と「対話での困り表明」の2つ（どちらも停滞のシグナル）。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
+- API 不通時の扱い：judge が規定回数リトライしても応答しなければ、その作問を「判定保留」として受理し
+  （一覧に載せる・構造は空のまま）、児童には「おくれたよ！先生があとで読むね」を返す。再送要求は出さない。
+  同じ本文の連続再送は API を呼ばず直前の結果を返す。
 """
 
 import csv
@@ -28,6 +31,7 @@ import database
 import ai_judge
 import ai_classify
 import ai_dialogue
+import llm_call
 
 if not config.ADMIN_PASSWORD:
     raise RuntimeError(
@@ -35,6 +39,8 @@ if not config.ADMIN_PASSWORD:
     )
 
 STRUCTURES = {"tobun", "hougan", "bai"}
+# judge が API 不通で判定できなかったときの児童向け表示（受理はする。再送は求めない）
+JUDGE_PENDING_MESSAGE = "おくれたよ！ 先生があとで読むね。つぎのお話も作ってみよう。"
 LEVEL_NAMES = database.LEVEL_NAMES
 MAX_LEVEL = len(LEVEL_NAMES)          # 水準3（場面想起）が上限
 USER_ID_PATTERN = re.compile(r"^[0-9]{2}$")
@@ -338,6 +344,11 @@ def judge(req: JudgeRequest):
     ctx = dict(session=session, phase=phase, expression=expression, history=history,
                recent=recent, last=last, button=button)
 
+    # 同じ本文の連続再送（API 不通時に児童が送り直すのが典型）は API を呼ばず直前の結果を返す
+    if _is_resend(message, button, last, phase):
+        result = _handle_resend(req, user_id, message, ctx)
+        return _finish(result, req.session_id, phase)
+
     # 水準1の問いに、ボタン押下＋短い応答で答えた場合は classify を通さない
     if phase == 2 and button in ai_dialogue.COMPARE_BUTTONS and len(message) <= 8:
         kind = _answer_kind(message, button)
@@ -345,7 +356,7 @@ def judge(req: JudgeRequest):
             result = _handle_compare_answer(req, user_id, message, kind, ctx)
             return _finish(result, req.session_id, phase)
 
-    input_kind = ai_classify.classify(message, recent, expression)
+    input_kind = ai_classify.classify(message, recent, expression, user_id=user_id)
     if input_kind == "sakumon":
         result = _handle_sakumon(req, user_id, message, ctx)
     else:
@@ -359,6 +370,44 @@ def judge(req: JudgeRequest):
     return _finish(result, req.session_id, phase)
 
 
+@app.get("/api/judge/status")
+def judge_status(user_id: str):
+    """送信中の児童が1秒間隔で見る。同時実行上限で待たされていれば "waiting"。"""
+    if not USER_ID_PATTERN.match(user_id or ""):
+        raise HTTPException(status_code=400, detail="bad user_id")
+    return {"state": llm_call.wait_state(user_id)}
+
+
+def _is_resend(message: str, button: str | None, last: dict | None, phase: int) -> bool:
+    """直前のターンと同じ本文・同じフェーズ・ボタンなし → 再送とみなす。"""
+    return (last is not None and button is None and not last.get("button_pressed")
+            and last.get("phase") == phase and (last.get("message") or "") == message)
+
+
+def _handle_resend(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
+    """同一本文の再送：API を呼ばず直前の応答をそのまま返す（多重呼び出し防止）。
+
+    ログは残す（再送の回数は計測したい）が、input_type="resend" として提出・成立・S0 判定の
+    どれにも数えない。support_level は直前の値を写し、水準の遷移を変えない。"""
+    last = ctx["last"]
+    prev = dict(last.get("response") or {})
+    result = _base_result(prev.get("message") or ai_dialogue.ACK_MESSAGE,
+                          prev.get("display_type") or "normal", "resend",
+                          state="resend", target_structure=prev.get("target_structure"))
+    result.update({"valid": prev.get("valid"), "structure": prev.get("structure"),
+                   "unknown": prev.get("unknown"), "buttons": prev.get("buttons"),
+                   "highlight_problems": bool(prev.get("highlight_problems"))})
+    database.save_log(
+        session_id=req.session_id, user_id=user_id, message=message, response_json=result,
+        structure=None, is_new=False, input_type="resend",
+        phase=ctx["phase"], support_level=last.get("support_level"), learner_state=None,
+        unknown=None, issue=None, button_pressed=None,
+        stall_count=None, target_structure=prev.get("target_structure"), expression=ctx["expression"],
+        judge_latency_ms=None, dialogue_latency_ms=None, retry_count=0, judge_status="skipped",
+    )
+    return result
+
+
 def _finish(result: dict, session_id: int, phase: int) -> dict:
     show = phase == 2
     history = database.get_history(session_id)
@@ -367,11 +416,15 @@ def _finish(result: dict, session_id: int, phase: int) -> dict:
     result["history"] = history if show else []
     result["ui_level"] = database.get_max_level(session_id, 2) if show else 0
     result["all_reached"] = show and set(history) >= STRUCTURES
+    # accepted：フロントが「作った お話」一覧に追加するか。成立した作問と、判定保留で受理した作問が対象。
+    # 再送（resend）は直前の応答を返すだけなので追加しない。
+    result.setdefault("accepted", bool(result.get("valid")) and result.get("input_type") == "sakumon")
     if not show:
         # フェーズ1・3では判定結果を画面に出さない（ログには残っている）
         for k in ("valid", "structure", "unknown", "is_new", "buttons", "target_structure"):
             result[k] = None
         result["highlight_problems"] = False
+        result["accepted"] = False
     return result
 
 
@@ -405,6 +458,7 @@ def _handle_compare_answer(req: JudgeRequest, user_id: str, message: str, kind: 
         unknown=None, issue=None, button_pressed=ctx["button"],
         stall_count=database.get_stall_count(req.session_id), target_structure=target,
         expression=ctx["expression"],
+        judge_latency_ms=None, dialogue_latency_ms=None, retry_count=0, judge_status="skipped",
     )
     return result
 
@@ -431,8 +485,11 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
     else:
         support_level, display_type = "talk", "normal"
 
+    t0 = time.perf_counter()
     dlg = ai_dialogue.dialogue(message, "taiwa", None, history, ctx["recent"], support_level,
-                               ctx["expression"], problems=problems, target_structure=target)
+                               ctx["expression"], problems=problems, target_structure=target,
+                               user_id=user_id)
+    dialogue_ms = int((time.perf_counter() - t0) * 1000)
     result = _base_result(dlg["message"], display_type, "taiwa", state=dlg.get("state"))
     result.update({"buttons": dlg.get("buttons"), "target_structure": target,
                    "highlight_problems": bool(dlg.get("highlight_problems"))})
@@ -443,6 +500,8 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
         unknown=None, issue=None, button_pressed=ctx["button"],
         stall_count=database.get_stall_count(req.session_id), target_structure=target,
         expression=ctx["expression"],
+        judge_latency_ms=None, dialogue_latency_ms=dialogue_ms,
+        retry_count=(dlg.get("meta") or {}).get("retry_count", 0), judge_status="skipped",
     )
     return result
 
@@ -451,19 +510,29 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     """作問経路：ai_judge で同定 → サーバが学習者状態・支援水準を決定 → ai_dialogue が声かけ。"""
     phase, expression, history, last = ctx["phase"], ctx["expression"], ctx["history"], ctx["last"]
     show = phase == 2
-    jr = ai_judge.judge(message, expression)
+    t0 = time.perf_counter()
+    jr = ai_judge.judge(message, expression, user_id=user_id)
+    judge_ms = int((time.perf_counter() - t0) * 1000)
+    jmeta = jr.get("meta") or {}
+    judge_status = jmeta.get("status", "ok")
+    retry_count = jmeta.get("retry_count", 0)
 
-    # 技術的失敗（リトライ後もパース不可）→ 児童向けフォールバック。児童の責任ではないので S0 判定にも数えない。
+    # 技術的失敗（規定回数リトライしても API が応答しない）→ 判定保留として「受理」する。
+    # 児童の活動を止めないことを最優先にし、一覧には載せる・構造は空のまま・再送は求めない。
+    # 児童の責任ではないので S0 判定にも数えない（issue='pending' の行は validity 集計から除外）。
     if jr.get("issue") == "error":
         learner_state = _learner_state(req.session_id, None, set(history), False, phase, last)
-        result = _base_result(ai_dialogue.FALLBACK_MESSAGE if show else ai_dialogue.ACK_MESSAGE,
-                              "normal" if show else "ack", "sakumon", state="judge_error")
+        result = _base_result(JUDGE_PENDING_MESSAGE if show else ai_dialogue.ACK_MESSAGE,
+                              "normal" if show else "ack", "sakumon", state="judge_pending",
+                              accepted=True)
         database.save_log(
             session_id=req.session_id, user_id=user_id, message=message, response_json=result,
             structure=None, is_new=False, input_type="sakumon",
-            phase=phase, support_level="error", learner_state=learner_state,
-            unknown=None, issue="error", button_pressed=ctx["button"],
+            phase=phase, support_level="pending", learner_state=learner_state,
+            unknown=None, issue="pending", button_pressed=ctx["button"],
             stall_count=None, target_structure=None, expression=expression,
+            judge_latency_ms=judge_ms, dialogue_latency_ms=None,
+            retry_count=retry_count, judge_status="failed",
         )
         return result
 
@@ -497,11 +566,13 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     if valid:
         problems.append({"text": message, "structure": structure})
 
+    t1 = time.perf_counter()
     dlg = ai_dialogue.dialogue(
         message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
         history, ctx["recent"], support_level, expression,
-        problems=problems, target_structure=target, first_goal=completes_all,
+        problems=problems, target_structure=target, first_goal=completes_all, user_id=user_id,
     )
+    dialogue_ms = int((time.perf_counter() - t1) * 1000)
 
     result = _base_result(dlg["message"], display_type, "sakumon", state=dlg.get("state"))
     result.update({
@@ -515,6 +586,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         phase=phase, support_level=support_level, learner_state=learner_state,
         unknown=unknown, issue=issue, button_pressed=ctx["button"],
         stall_count=stall_count, target_structure=target, expression=expression,
+        judge_latency_ms=judge_ms, dialogue_latency_ms=dialogue_ms,
+        retry_count=retry_count, judge_status=judge_status,
     )
     return result
 

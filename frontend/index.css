@@ -91,6 +91,29 @@ body {
   min-height: 1.2em;
 }
 
+/* ===== 出席番号の確認 ===== */
+.confirm-number {
+  font-size: 4.5rem;
+  font-weight: 800;
+  color: var(--green);
+  letter-spacing: .15em;
+  line-height: 1.1;
+  margin-bottom: 12px;
+}
+
+.confirm-text {
+  font-size: 1.05rem;
+  color: #555;
+  line-height: 1.7;
+  margin-bottom: 24px;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+}
+
 /* ===== ボタン共通 ===== */
 .btn {
   border: none;
@@ -586,6 +609,12 @@ body {
   background: #9CA3AF;
   border-radius: 50%;
   animation: bounce .9s infinite;
+}
+.loading-bubble .loading-text {
+  font-style: normal;
+  font-size: .95rem;
+  color: #6B7280;
+  margin-left: 6px;
 }
 .loading-bubble span:nth-child(2) { animation-delay: .15s; }
 .loading-bubble span:nth-child(3) { animation-delay: .3s; }

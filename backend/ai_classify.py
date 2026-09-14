@@ -3,16 +3,13 @@
 judge を呼ぶ前に1回だけ、児童の入力が「作問（新しいお話）」か
 「対話（質問・つぶやき・こまった）」かを軽量な1コールで分類する。
 構造同定は行わない。失敗時は安全側（対話）に倒す。
+API 呼び出し（タイムアウト・リトライ・同時実行制御）は judge / dialogue と同じ llm_call を通す。
 """
 
 import json
-import os
-
-import anthropic
 
 from config import MODEL, parse_expression
-
-_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+import llm_call
 
 SYSTEM_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの入力仕分け係です。
 児童が今おくった入力を、「作問」か「対話」かに分類することだけが仕事です。
@@ -56,7 +53,8 @@ def _system(expression: str) -> str:
     return SYSTEM_PROMPT.replace("{dividend}", str(dividend)).replace("{divisor}", str(divisor))
 
 
-def classify(message: str, recent_turns: list[dict] | None = None, expression: str = "24 ÷ 4") -> str:
+def classify(message: str, recent_turns: list[dict] | None = None, expression: str = "24 ÷ 4",
+             user_id: str | None = None) -> str:
     """作問(sakumon) か 対話(taiwa) かを返す。失敗時は 'taiwa'。"""
     context = ""
     if recent_turns:
@@ -70,19 +68,22 @@ def classify(message: str, recent_turns: list[dict] | None = None, expression: s
             context = "これまでのやりとり:\n" + "\n".join(lines) + "\n\n"
     user_content = f"{context}今の入力: {message}"
 
-    for attempt in range(2):  # 1回リトライ
-        try:
-            response = _client.messages.create(
-                model=MODEL,
-                max_tokens=64,
-                thinking={"type": "disabled"},  # 分類に思考は不要（sonnet-5は既定でonのため明示off）
-                system=_system(expression),
-                messages=[{"role": "user", "content": user_content}],
-            )
-            result = _parse(_text_from(response))
-            t = result.get("type")
-            if t in ("sakumon", "taiwa"):
-                return t
-        except Exception as e:
-            print(f"[ai_classify] classify failed (attempt {attempt + 1}): {type(e).__name__}: {e}")
-    return "taiwa"  # 分類失敗時は安全側（対話）に倒す（judge に対話文が流れ込むのを防ぐ）
+    def parse(response) -> str:
+        t = _parse(_text_from(response)).get("type")
+        if t not in ("sakumon", "taiwa"):
+            raise ValueError(f"unexpected type: {t!r}")
+        return t
+
+    try:
+        kind, _meta = llm_call.call(
+            user_id, parse,
+            model=MODEL,
+            max_tokens=64,
+            thinking={"type": "disabled"},  # 分類に思考は不要（sonnet-5は既定でonのため明示off）
+            system=_system(expression),
+            messages=[{"role": "user", "content": user_content}],
+        )
+        return kind
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_classify] classify failed after {e.retry_count} retries: {e}")
+        return "taiwa"  # 分類失敗時は安全側（対話）に倒す（judge に対話文が流れ込むのを防ぐ）

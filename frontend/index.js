@@ -60,27 +60,74 @@ inputId.addEventListener("input", () => { loginError.textContent = ""; });
 btnLogin.addEventListener("click", doLogin);
 inputId.addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
 
-async function doLogin() {
+// 「次へ」→ 形式チェック → 確認画面（13/31 のような桁の取り違えを本人に見せて防ぐ）
+function doLogin() {
   const val = inputId.value.trim().toLowerCase();
   if (!ID_RE.test(val)) {
     loginError.textContent = "数字2文字で入力してね";
     return;
   }
   loginError.textContent = "";
-  btnLogin.disabled = true;
+  showConfirm(val);
+}
+
+// ===== 出席番号の確認画面（ID入力の直後に1回だけ。復元・フェーズ切替では出さない） =====
+const screenConfirm = document.getElementById("screen-confirm");
+const btnConfirmYes = document.getElementById("btn-confirm-yes");
+const btnConfirmNo = document.getElementById("btn-confirm-no");
+let pendingUserId = null;
+
+function showConfirm(val) {
+  pendingUserId = val;
+  document.getElementById("confirm-number").textContent = val;
+  document.getElementById("confirm-number-text").textContent = val;
+  btnConfirmYes.disabled = false;
+  btnConfirmNo.disabled = false;
+  showScreen("screen-confirm");
+  // どちらのボタンにもフォーカスを置かない（Enter で意図せず確定させない）
+  if (document.activeElement) document.activeElement.blur();
+}
+
+// 確認画面ではボタンのクリック以外を受け付けない（Enter / Space で確定しない）
+document.addEventListener("keydown", (e) => {
+  if (!screenConfirm.classList.contains("active")) return;
+  if (e.key === "Enter" || e.key === " ") e.preventDefault();
+}, true);
+
+btnConfirmYes.addEventListener("click", async () => {
+  const val = pendingUserId;
+  if (!val) return;
+  btnConfirmYes.disabled = true;
+  btnConfirmNo.disabled = true;
   try {
     const { ok, data } = await postJson("/api/login", { user_id: val });
     if (!ok) {
+      // 失敗時は入力画面に戻して理由を見せる
+      showScreen("screen-login");
       loginError.textContent = (data && data.detail) || "エラーがおきました";
+      inputId.focus();
       return;
     }
+    pendingUserId = null;
     enter(data);
   } catch (e) {
+    showScreen("screen-login");
     loginError.textContent = "つうしんエラーがおきました";
+    inputId.focus();
   } finally {
-    btnLogin.disabled = false;
+    btnConfirmYes.disabled = false;
+    btnConfirmNo.disabled = false;
   }
-}
+});
+
+// 「ちがう」→ 入力欄を空にして戻す。エラーは出さない
+btnConfirmNo.addEventListener("click", () => {
+  pendingUserId = null;
+  inputId.value = "";
+  loginError.textContent = "";
+  showScreen("screen-login");
+  inputId.focus();
+});
 
 // ===== 入場（ログイン／フェーズ切替後の再入場） =====
 function enter(payload) {
@@ -285,6 +332,34 @@ function addLoadingBubble() {
   return el;
 }
 
+// サーバ側の同時実行上限で待たされているあいだだけ、点々の横に文言を出す（エラーではない）
+const WAITING_MESSAGE = "じゅんばんに 見ているよ。ちょっとまってね";
+function setLoaderWaiting(loader, waiting) {
+  let label = loader.querySelector(".loading-text");
+  if (waiting && !label) {
+    label = document.createElement("em");
+    label.className = "loading-text";
+    label.textContent = WAITING_MESSAGE;
+    loader.appendChild(label);
+    scrollLog();
+  } else if (!waiting && label) {
+    label.remove();
+  }
+}
+
+// 送信中、1秒間隔で /api/judge/status を見て「待ち」なら文言を出す。返り値は停止関数。
+function watchQueue(loader) {
+  const timer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/judge/status?user_id=${encodeURIComponent(state.userId)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setLoaderWaiting(loader, data.state === "waiting");
+    } catch (e) { /* 表示だけなので無視 */ }
+  }, 1000);
+  return () => clearInterval(timer);
+}
+
 // 保存済みの会話を再描画。フェーズ2のターンだけAIの吹き出しを出し、それ以外は「おくったよ」。
 function renderConversation(conversation) {
   if (!conversation || conversation.length === 0) return false;
@@ -363,11 +438,13 @@ async function sendMessage() {
 
   addUserBubble(text);
   const loader = addLoadingBubble();
+  const stopWatch = watchQueue(loader);
 
   try {
     const { ok, status, data } = await postJson("/api/judge", {
       session_id: state.sessionId, user_id: state.userId, message: text, button_pressed: pressed,
     });
+    stopWatch();
     loader.remove();
     if (!ok) {
       if (status === 403 || status === 404) {
@@ -387,7 +464,8 @@ async function sendMessage() {
     if (data.history) state.history = data.history;
     if (typeof data.ui_level === "number") state.uiLevel = data.ui_level;
     state.allReached = !!data.all_reached;
-    if (data.valid) addProblem(text, data.structure);
+    // accepted：成立した作問と、判定保留（API不通）で受理した作問。再送は追加しない
+    if (data.accepted) addProblem(text, data.structure);
     updatePanels();
 
     addAiBubble(data.message, data.display_type);
@@ -396,6 +474,7 @@ async function sendMessage() {
     if (ENABLE_FIGURES && data.figure) addFigureCard(data.figure);
     if (ENABLE_FIGURES && data.tape_diagram) addTapeDiagramCard(data.tape_diagram);
   } catch (e) {
+    stopWatch();
     loader.remove();
     addNotice("エラーが起きました。もう一度送ってみてね。");
   } finally {

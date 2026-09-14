@@ -20,6 +20,11 @@ ENABLE_FIGURES = False
 # ---- LLM ----
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+# API 呼び出しの信頼性（llm_call.py）。いずれも環境変数で上書きできる。
+LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))   # 1回あたりのタイムアウト
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))               # 再試行回数（初回を除く）
+LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "8"))       # API への同時リクエスト上限
+
 # ---- 管理者認証（HTTP Basic）----
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()

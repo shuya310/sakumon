@@ -101,6 +101,11 @@ def _migrate(con):
     _add_column(con, "chat_logs", cols, "stall_count", "INTEGER")    # その時点の反復回数
     _add_column(con, "chat_logs", cols, "target_structure", "TEXT")  # 専用カラム化
     _add_column(con, "chat_logs", cols, "expression", "TEXT")        # そのターンの式
+    # 計測（llm_call）：判定・声かけの所要時間、API リトライ回数、判定の状態
+    _add_column(con, "chat_logs", cols, "judge_latency_ms", "INTEGER")     # ai_judge の所要ms（リトライ込み）
+    _add_column(con, "chat_logs", cols, "dialogue_latency_ms", "INTEGER")  # ai_dialogue の所要ms
+    _add_column(con, "chat_logs", cols, "retry_count", "INTEGER")          # API リトライ回数（0〜3）
+    _add_column(con, "chat_logs", cols, "judge_status", "TEXT")            # ok / retried_ok / failed / skipped
 
     scols = [row[1] for row in con.execute("PRAGMA table_info(sessions)").fetchall()]
     _add_column(con, "sessions", scols, "phase", "INTEGER NOT NULL DEFAULT 1")   # 作成時のフェーズ
@@ -261,19 +266,23 @@ def save_log(session_id: int, user_id: str, message: str, response_json: dict,
              learner_state: str | None = None, unknown: str | None = None,
              issue: str | None = None, button_pressed: str | None = None,
              stall_count: int | None = None, target_structure: str | None = None,
-             expression: str | None = None) -> int:
+             expression: str | None = None,
+             judge_latency_ms: int | None = None, dialogue_latency_ms: int | None = None,
+             retry_count: int | None = None, judge_status: str | None = None) -> int:
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO chat_logs
                (session_id, user_id, message, response_json, structure, is_new, input_type, stumble,
                 phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-                target_structure, expression, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                target_structure, expression,
+                judge_latency_ms, dialogue_latency_ms, retry_count, judge_status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, message,
              json.dumps(response_json, ensure_ascii=False),
              structure, int(is_new), input_type,
              phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-             target_structure, expression, _now()),
+             target_structure, expression,
+             judge_latency_ms, dialogue_latency_ms, retry_count, judge_status, _now()),
         )
         return cur.lastrowid
 
@@ -331,16 +340,17 @@ def get_recent_turns(session_id: int, limit: int = 6) -> list[dict]:
 
 
 def get_last_turn(session_id: int) -> dict | None:
-    """直近1ターン（水準2の問いへの応答かどうかの判定用）。"""
+    """直近1ターン（水準2の問いへの応答かどうかの判定・同一本文の再送検出用）。"""
     with _conn() as con:
         r = con.execute(
-            """SELECT support_level, input_type, response_json, phase FROM chat_logs
-               WHERE session_id = ? ORDER BY id DESC LIMIT 1""",
+            """SELECT support_level, input_type, response_json, phase, message, button_pressed
+               FROM chat_logs WHERE session_id = ? ORDER BY id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
     if not r:
         return None
-    return {"support_level": r[0], "input_type": r[1], "response": _loads(r[2]), "phase": r[3]}
+    return {"support_level": r[0], "input_type": r[1], "response": _loads(r[2]), "phase": r[3],
+            "message": r[4], "button_pressed": r[5]}
 
 
 def get_history(session_id: int) -> list[str]:
@@ -355,11 +365,14 @@ def get_history(session_id: int) -> list[str]:
 
 
 def get_valid_problems(session_id: int) -> list[dict]:
-    """成立した作問を時系列で返す（is_new 問わず。水準1・2の産出一覧に使う）。"""
+    """成立した作問を時系列で返す（is_new 問わず。水準1・2の産出一覧に使う）。
+
+    判定保留（issue='pending'：API 不通で受理だけした作問）も含める。児童の一覧には載せるが
+    structure は None のまま（信号機・到達構造には数えない）。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT id, message, structure, unknown, is_new, phase FROM chat_logs
-               WHERE session_id = ? AND structure IS NOT NULL
+               WHERE session_id = ? AND (structure IS NOT NULL OR issue = 'pending')
                ORDER BY id""",
             (session_id,),
         ).fetchall()
@@ -412,12 +425,12 @@ def get_current_level(session_id: int, phase: int = 2) -> int:
 
 
 def get_recent_sakumon_validity(session_id: int, limit: int = 2) -> list[bool]:
-    """直近の作問提出の成立/不成立を新しい順で返す（S0判定用。judgeエラー行は除く）。"""
+    """直近の作問提出の成立/不成立を新しい順で返す（S0判定用。judgeエラー・判定保留の行は除く）。"""
     with _conn() as con:
         rows = con.execute(
             """SELECT structure, issue FROM chat_logs
                WHERE session_id = ? AND input_type = 'sakumon'
-                 AND (issue IS NULL OR issue != 'error')
+                 AND (issue IS NULL OR issue NOT IN ('error', 'pending'))
                ORDER BY id DESC LIMIT ?""",
             (session_id, limit),
         ).fetchall()
@@ -496,7 +509,8 @@ def admin_get_session_logs(session_id: int) -> list[dict]:
         rows = con.execute("""
             SELECT id, message, response_json, structure, is_new, input_type, stumble, created_at,
                    phase, support_level, learner_state, unknown, issue, button_pressed, stall_count,
-                   target_structure, expression
+                   target_structure, expression,
+                   judge_latency_ms, dialogue_latency_ms, retry_count, judge_status
             FROM chat_logs WHERE session_id = ? ORDER BY id
         """, (session_id,)).fetchall()
     result = []
@@ -525,6 +539,10 @@ def admin_get_session_logs(session_id: int) -> list[dict]:
             "stall_count": r[14],
             "target_structure": r[15],
             "expression": r[16],
+            "judge_latency_ms": r[17],
+            "dialogue_latency_ms": r[18],
+            "retry_count": r[19],
+            "judge_status": r[20],
         })
     return result
 
@@ -547,6 +565,7 @@ CSV_FIELDS = [
     "valid", "structure", "unknown", "issue", "is_new",
     "support_level", "learner_state", "stall_count", "button_pressed", "target_structure",
     "state", "stumble", "session_new_count",
+    "judge_latency_ms", "dialogue_latency_ms", "retry_count", "judge_status",
 ]
 
 
@@ -559,6 +578,7 @@ def admin_get_all_logs_csv() -> list[dict]:
                    cl.structure, cl.unknown, cl.issue, cl.is_new,
                    cl.support_level, cl.learner_state, cl.stall_count, cl.button_pressed, cl.target_structure,
                    cl.stumble,
+                   cl.judge_latency_ms, cl.dialogue_latency_ms, cl.retry_count, cl.judge_status,
                    (SELECT COUNT(*) FROM chat_logs c2
                     WHERE c2.session_id = cl.session_id AND c2.is_new=1
                     AND c2.structure IS NOT NULL) as session_new_count
@@ -596,7 +616,11 @@ def admin_get_all_logs_csv() -> list[dict]:
             "target_structure": r[20] or "",
             "state": resp.get("state", "") or "",
             "stumble": r[21] or "",
-            "session_new_count": r[22],
+            "judge_latency_ms": "" if r[22] is None else r[22],
+            "dialogue_latency_ms": "" if r[23] is None else r[23],
+            "retry_count": "" if r[24] is None else r[24],
+            "judge_status": r[25] or "",
+            "session_new_count": r[26],
         })
     return result
 

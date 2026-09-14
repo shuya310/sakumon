@@ -25,16 +25,12 @@
 コードは残すが呼ばれない。
 """
 
-import os
 import re
-
-import anthropic
 
 from config import MODEL, ENABLE_FIGURES, parse_expression
 from llm_json import extract_json
 from kanji_rule import KANJI_RULE
-
-_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+import llm_call
 
 FALLBACK_MESSAGE = "もう一度 おくってみてね"
 ACK_MESSAGE = "おくったよ"          # フェーズ1・3の最小表示
@@ -300,7 +296,8 @@ def _fallback(support_level: str, judge_result: dict | None, expression: str) ->
 
 def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
                  history: list[str], recent_turns: list[dict] | None,
-                 support_level: str, expression: str, target_structure: str | None) -> dict:
+                 support_level: str, expression: str, target_structure: str | None,
+                 user_id: str | None = None) -> dict:
     dividend, divisor = parse_expression(expression)
     expr = f"{dividend} ÷ {divisor}"
 
@@ -332,9 +329,19 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
 {_build_history(recent_turns)}"""
 
     system = _build_system(expression)
+
+    def parse(response) -> dict:
+        if response.stop_reason == "max_tokens":
+            raise ValueError("response truncated (max_tokens)")
+        return extract_json(_text_from(response))
+
+    # API 呼び出し（タイムアウト・リトライ・同時実行制御）は llm_call に委ねる。
+    # 境界違反・空メッセージは応答が返ったうえでの内容の問題なので、従来どおりここで1回だけ再依頼する。
+    retry_total = 0
     for attempt in range(2):  # 1回リトライ
         try:
-            response = _client.messages.create(
+            result, meta = llm_call.call(
+                user_id, parse,
                 model=MODEL,
                 max_tokens=512,
                 thinking={"type": "disabled"},
@@ -342,21 +349,23 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
                 output_config={"format": OUTPUT_SCHEMA},
                 messages=[{"role": "user", "content": user_content}],
             )
-            if response.stop_reason == "max_tokens":
-                raise ValueError("response truncated (max_tokens)")
-            result = extract_json(_text_from(response))
-            message = (result.get("message") or "").strip()
-            if not message:
-                continue
-            reason = violates_boundary(message, support_level, expression)
-            if reason:
-                print(f"[ai_dialogue] boundary violation ({support_level}, {reason}): {message}")
-                continue  # リトライ（2回目も違反なら定型文へ）
-            return {"message": message, "state": result.get("state") or support_level}
-        except Exception as e:
-            print(f"[ai_dialogue] dialogue failed (attempt {attempt + 1}): {type(e).__name__}: {e}")
+        except llm_call.LLMUnavailable as e:
+            retry_total += e.retry_count
+            print(f"[ai_dialogue] dialogue failed after {e.retry_count} retries: {e}")
+            break  # API が応答しないなら再依頼しても無駄。定型文へ
+        retry_total += meta["retry_count"]
+        message = (result.get("message") or "").strip()
+        if not message:
+            continue
+        reason = violates_boundary(message, support_level, expression)
+        if reason:
+            print(f"[ai_dialogue] boundary violation ({support_level}, {reason}): {message}")
+            continue  # リトライ（2回目も違反なら定型文へ）
+        return {"message": message, "state": result.get("state") or support_level,
+                "meta": {"retry_count": retry_total, "status": "retried_ok" if retry_total else "ok"}}
 
-    return {"message": _fallback(support_level, judge_result, expression), "state": f"{support_level}_fallback"}
+    return {"message": _fallback(support_level, judge_result, expression), "state": f"{support_level}_fallback",
+            "meta": {"retry_count": retry_total, "status": "failed"}}
 
 
 # ===== 入口 =====
@@ -366,11 +375,11 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              support_level: str, expression: str,
              problems: list[dict] | None = None,
              target_structure: str | None = None,
-             first_goal: bool = True) -> dict:
+             first_goal: bool = True, user_id: str | None = None) -> dict:
     """児童向けの声かけを組み立てる。
 
     戻り値: {"message", "buttons", "figure", "target_structure", "state", "tape_diagram",
-             "highlight_problems"}
+             "highlight_problems"}（LLM を呼んだ水準では "meta" も付く：retry_count / status）
     figure / tape_diagram は ENABLE_FIGURES=False のため常に None。
     highlight_problems は右パネルの産出一覧を参照させる水準（1と、水準3の rewrite）で True。
     """
@@ -398,7 +407,7 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
                     "highlight_problems": True}
     if support_level in ("form", "discover", "level3", "talk"):
         out = _llm_message(child_message, input_kind, judge_result, history, recent_turns,
-                           support_level, expression, target_structure)
+                           support_level, expression, target_structure, user_id=user_id)
         if support_level == "level3":
             # 水準3の2モードを CSV で機械的に分けられるよう、state の頭を固定する
             # （level3_rewrite / level3_scene。後半はLLMが読み取った状態）

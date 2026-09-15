@@ -670,35 +670,22 @@ body {
 .panel-card h3 span { color: var(--green); font-size: 1rem; margin-left: 4px; }
 
 /* ===== 仕様 v2 5章 ===== */
-/* 目標の固定表示（入力欄の直上に固定。スクロールしても見える） */
+/* 目標の固定表示（ヘッダー内に固定。スクロールしても見える） */
 .target-bar {
-  flex: 0 0 auto;
-  padding: 10px 16px;
+  margin-top: 8px;
+  padding: 8px 14px;
   background: #FFF7E6;
-  border-top: 2px solid var(--orange);
+  border: 2px solid var(--orange);
+  border-radius: 10px;
   color: #7C4700;
   font-size: 1rem;
   line-height: 1.5;
 }
 .target-bar strong { font-size: 1.1rem; }
 
-/* 予告／自己ラベルの1行自由記述 */
-.sub-input-area {
-  flex: 0 0 auto;
-  display: flex;
-  gap: 8px;
-  padding: 10px 16px 0;
-  background: #F3FAF7;
-}
-.sub-input {
-  flex: 1;
-  font-size: 1.05rem;
-  padding: 10px 12px;
-  border: 2px solid var(--green);
-  border-radius: 10px;
-  outline: none;
-}
-.btn-sub-send { padding: 0 18px; }
+/* 予告モード（弱の直後）：同じ入力欄の見た目だけ変える */
+.chat-input-area.declaring { background: #F3FAF7; }
+.chat-input-area.declaring .chat-input { border-color: var(--green); }
 
 /* 中・ステップ2の3択。選んだものだけ残して無効化する */
 .choice-buttons {

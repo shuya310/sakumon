@@ -27,8 +27,8 @@
 |---|---|---|
 | `form` | ─ | 不成立作問への形式の支援（issue に応じて1点だけ。定型） |
 | `praise` | 0 | 新しい問題の称賛／同じ構造1回目（定型） |
-| `prompt` | 1 弱 | 「つぎは何を求める問題にする？」→ 自由記述の予告（`/api/declare`、LLM で分類、`declared_by=child`） |
-| `prompt` | 2 中 | 自己ラベル（自由記述 → 3択、`/api/self_label`）→ システムが未到達構造を目標に指定（`declared_by=system`）。自己ラベルが判定と違っても訂正しない |
+| `prompt` | 1 弱 | 直前の問いの文を引用して「つぎの お話では、何を 求める？」→ 同じ入力欄から予告（LLM で分類、`declared_by=child`） |
+| `prompt` | 2 中 | 引用＋3択の自己ラベル（`/api/self_label`）→ システムが未到達構造を目標に指定（`declared_by=system`）。自己ラベルが判定と違っても訂正しない |
 | `prompt` | 3 強 | 目標の指定＋場面の固定「◯ばんの お話は そのままで いいよ」 |
 | `done` | ─ | 3構造そろった |
 | `talk` | ─ | 作問以外の入力（LLM＋ガード。休けい・終了は提案しない） |
@@ -50,8 +50,8 @@ POST /api/judge {session_id, user_id, message}
   │        → main.py：状態機械で response_type / prompt_strength / declared を決める
   │        → ai_dialogue：文言（フェーズ1・3は「おくったよ」のみ）
   └ 対話 → talk
-POST /api/declare {session_id, user_id, text}        予告（弱）→ input_type=declaration
-POST /api/self_label {session_id, user_id, text|choice}  自己ラベル（中）→ input_type=self_label
+POST /api/judge {…, declaring: true}                 弱の直後の入力。作問でなければ予告 → input_type=declaration
+POST /api/self_label {session_id, user_id, choice}   自己ラベル（中・3択）→ input_type=self_label
   → chat_logs に全ターン記録（phase, expression, input_type, valid, structure, unknown, issue, is_new,
      response_type, prompt_strength, declared_*, self_label*, produced_structures, stuck_count, miss_count, latency_ms）
 ```

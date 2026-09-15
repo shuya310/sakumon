@@ -69,8 +69,20 @@ def fake_declaration(text, user_id=None):
     return "unknown"
 
 
+QUOTE = {"on": True}
+
+
+def fake_extract_question(problem_text, user_id=None):
+    """モック：本文の「/」以降を問いの文とみなす。QUOTE["on"] が False なら抽出失敗（None）。"""
+    CALLS["quote"] = CALLS.get("quote", 0) + 1
+    if not QUOTE["on"] or "/" not in problem_text:
+        return None
+    return d.format_quote(problem_text.split("/", 1)[1])
+
+
 ai_classify.classify_declaration = fake_declaration
 main.ai_classify.classify_declaration = fake_declaration
+d.extract_question = fake_extract_question
 ai_judge.judge = fake_judge
 main.ai_judge.judge = fake_judge
 ai_classify.classify = fake_classify
@@ -319,16 +331,23 @@ with client:
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 0 and r["is_new"] is True
     r = judge(sidS, "11", "T: あめ24こを8人で")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 1
-    r = judge(sidS, "11", "T: みかん24こを8人で")
+    qb = CALLS.get("quote", 0)
+    r = judge(sidS, "11", "T: みかんが24こあります。8人で同じ数ずつ分けます。/1人分は 何こに なりますか。")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 1 and r["stuck_count"] == 2, r
-    assert r["message"] == "つぎは **何を 求める** 問題に する？\nきめてから、作って みよう。"
-    assert r["dialog"] == "declaration" and r["declared"] is None, "弱：予告の入力欄。まだ予告は立たない"
+    assert CALLS["quote"] == qb + 1, "弱で引用文を抽出する"
+    assert r["message"] == ("今までの お話は、さいごに「1人分は 何こに なりますか」と 書いて あったね。\n"
+                            "ここが、この お話で 求めて いる ものだよ。\n"
+                            "つぎの お話では、何を 求める？ みじかく 書いて みよう。"), r["message"]
+    for label in d.STRUCTURE_LABEL.values():
+        assert label not in r["message"], ("弱で構造のラベルを出さない", label)
+    assert r["dialog"] == "declaration" and r["declared"] is None, "弱：入力欄が予告モード。まだ予告は立たない"
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
-    assert resumed["dialog"] == "declaration", "再入場でも予告入力欄を復元"
-    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（3-4 の文言・予告入力欄）")
+    assert resumed["dialog"] == "declaration", "再入場でも予告モードを復元"
+    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（引用つきの 3-4 の文言・予告モード）")
 
     # (3) 弱で「いくつ分をきく」と入力 → declared=hougan, declared_by=child、目標が固定表示される
-    r = post("/api/declare", session_id=sidS, user_id="11", text="いくつ分をきく").json()
+    r = post("/api/judge", session_id=sidS, user_id="11", message="いくつ分をきく", declaring=True).json()
+    assert r["input_type"] == "declaration" and r["message"] is None and r["dialog"] is None, r
     assert r["declared"] == "hougan" and r["declared_by"] == "child" and r["target_label"] == "いくつ分", r
     st = database.get_session(sidS)
     assert st["declared"] == "hougan" and st["declared_by"] == "child"
@@ -338,16 +357,30 @@ with client:
     assert dd["message"] == "いくつ分をきく" and dd["latency_ms"] is not None
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
     assert resumed["declared"] == "hougan" and resumed["target_label"] == "いくつ分", "目標の固定表示"
-    r = post("/api/declare", session_id=sidS, user_id="11", text="りんごの問題").json()
-    assert r["classified"] == "unknown" and r["declared"] == "hougan", "unknown では立てない・既存の予告は消さない"
+    r = post("/api/judge", session_id=sidS, user_id="11", message="りんごの問題", declaring=True).json()
+    assert r["input_type"] == "declaration" and r["classified"] == "unknown" and r["declared"] == "hougan", \
+        "unknown では立てない・既存の予告は消さない・再質問しない"
+    assert logs_of(sidS)[-1]["input_type"] == "declaration" and logs_of(sidS)[-1]["declared_structure"] is None
+    # 予告モードでも作問を書けば通常の作問処理（予告として扱わない）
+    r = post("/api/judge", session_id=sidS, user_id="11", message="X: 予告モードで作問", declaring=True).json()
+    assert r["input_type"] == "sakumon" and r["response_type"] == "form" and r["declared"] == "hougan"
+    # declaring なし（通常）の対話は talk のまま。/api/declare も直接使える
+    r = judge(sidS, "11", "むずかしい")
+    assert r["input_type"] == "taiwa" and r["response_type"] == "talk"
+    r = post("/api/declare", session_id=sidS, user_id="11", text="1つ分がいくつか").json()
+    assert r["declared"] == "tobun" and r["declared_by"] == "child"
+    r = post("/api/declare", session_id=sidS, user_id="11", text="いくつ分をきく").json()
+    assert r["declared"] == "hougan"
     assert post("/api/declare", session_id=sidA, user_id="01", text="いくつ分").status_code == 400
-    print("OK 状態機械(3): 弱で「いくつ分をきく」→ declared=hougan / declared_by=child、目標ラベル「いくつ分」")
+    print("OK 状態機械(3): 予告モードの入力欄から「いくつ分をきく」→ declared=hougan / child。作問なら通常処理、unknown は立てない")
 
     # (4) その次に等分除 → declaration_met=0, miss=1 → 中（ステップ1の文言）
-    r = judge(sidS, "11", "T: えんぴつ24本を8人で")
+    r = judge(sidS, "11", "T: えんぴつが24本あります。8人で分けます。/1人分は 何本 ですか。")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 2, r
     assert r["declaration_met"] is False and r["miss_count"] == 1 and r["stuck_count"] == 3
-    assert r["message"] == "いま 作って くれた 問題は、**何を 求めて いる** のかな？" and r["dialog"] == "self_label_text"
+    assert r["message"] == ("4ばんの お話は、さいごに「1人分は 何本 ですか」と 求めて いたね。\n"
+                            "これは どれを 求めて いる 問題かな？"), r["message"]
+    assert r["dialog"] == "self_label_choice" and [c["value"] for c in r["choices"]] == ["tobun", "hougan", "bai"]
     row = logs_of(sidS)[-1]
     assert row["declared_structure"] == "hougan" and row["declared_by"] == "child" and row["declaration_met"] is False
     st = database.get_session(sidS)
@@ -355,15 +388,12 @@ with client:
     assert r["declared"] == "hougan" and r["declared_by"] == "system" and r["target_label"] == "いくつ分"
     print("OK 状態機械(4): 予告と違う構造 → declaration_met=0, miss=1 → 中（強さ2）")
 
-    # ---- 中段階：ステップ1→2→3 ----
-    r = post("/api/self_label", session_id=sidS, user_id="11", text="1人分をもとめている").json()
-    assert r["message"] == "それは この 3つの どれかな？\n　□ 1つ分の 大きさ　□ いくつ分　□ 何倍"
-    assert r["dialog"] == "self_label_choice" and [c["value"] for c in r["choices"]] == ["tobun", "hougan", "bai"]
-    row = logs_of(sidS)[-1]
-    assert row["input_type"] == "self_label" and row["self_label_text"] == "1人分をもとめている" and row["self_label"] is None
+    # ---- 中段階：引用＋3択 → 目標の指定（自由記述のステップは無い） ----
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
     assert resumed["dialog"] == "self_label_choice", "再入場でも3択を復元"
-    # ステップ2：わざと誤った自己ラベル（bai）を選ぶ → 訂正しない。ステップ3の目標は produced の未到達（hougan）
+    assert post("/api/self_label", session_id=sidS, user_id="11", text="1人分").status_code == 422, "自由記述は受け付けない"
+    assert post("/api/self_label", session_id=sidS, user_id="11", choice="x").status_code == 400
+    # わざと誤った自己ラベル（bai）を選ぶ → 訂正しない。目標は produced の未到達（hougan）
     r = post("/api/self_label", session_id=sidS, user_id="11", choice="bai").json()
     assert r["dialog"] is None
     assert r["message"] == ("じゃあ 今度は「**いくつ分**」を 求める 問題に して みよう。\n"
@@ -372,10 +402,11 @@ with client:
         assert w not in r["message"].split("\n")[0] or w == "それは" and False, ("訂正メッセージ", r["message"])
     row = logs_of(sidS)[-1]
     assert row["self_label"] == "bai" and row["self_label_match"] is False and row["message"] == "何倍"
+    assert row["self_label_text"] is None, "self_label_text には書き込まない"
     assert database.get_session(sidS)["declared"] == "hougan", "自己ラベル(bai)に引きずられず目標は hougan"
     st = database.get_session(sidS)
     assert st["stuck_count"] == 3 and st["miss_count"] == 1, "自己ラベルでカウンタは動かない"
-    print("OK 中段階: ステップ1→2→3、誤った自己ラベルでも訂正なし・self_label_match=0・目標は未到達構造")
+    print("OK 中段階: 引用＋3択 → 目標の指定。誤った自己ラベルでも訂正なし・self_label_match=0・目標は未到達構造")
 
     # (5) 中の直後にまた予告と違う構造 → miss=2 → 強（場面固定の文言・ref_no は最新の表示番号）
     r = judge(sidS, "11", "T: ジュース24Lを8人で")
@@ -414,6 +445,19 @@ with client:
         assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["declared"] is None and r["dialog"] is None, r
     print("OK 状態機械(7): 3構造で done、以降くり返しても予告支援は出ない")
 
+    # 引用が取れないときは定型文（弱・中とも）
+    QUOTE["on"] = False
+    sidQ = post("/api/login", user_id="14").json()["session_id"]
+    judge(sidQ, "14", "T: a"); judge(sidQ, "14", "T: b")
+    r = judge(sidQ, "14", "T: c")
+    assert r["prompt_strength"] == 1 and r["message"] == d.PROMPT_WEAK_FALLBACK, r["message"]
+    r = judge(sidQ, "14", "T: d")
+    assert r["prompt_strength"] == 2 and r["message"] == "4ばんの お話は、どれを 求めて いる 問題かな？", r["message"]
+    QUOTE["on"] = True
+    assert d.format_quote("　1人分は 何こ  ですか。") == "1人分は 何こ ですか"
+    assert d.format_quote("「何倍ですか？」") == "何倍ですか？" and d.format_quote("。") is None and d.format_quote(None) is None
+    print("OK 引用: 抽出失敗時は定型文（弱・中）。format_quote は句点・空白・かぎかっこを整える")
+
     # (8) taiwa / resend でカウンタが動かない
     sidT = post("/api/login", user_id="12").json()["session_id"]
     judge(sidT, "12", "T: a"); judge(sidT, "12", "T: b")
@@ -439,13 +483,16 @@ with client:
         "24こを 6人で 同じ数ずつ 分けたら、1人分は いくつに なるかな。")
     assert d.target_message("bai", "24 ÷ 8") == ("8を **1つの かたまり**と みると、24の 中に かたまりは いくつ あるかな。\n"
         "それを「8の **何倍**」と いうよ。\n8を もとにして、「**何倍**」を 求める 問題に して みよう。")
-    for text in [d.PRAISE_NEW, d.PRAISE_REPEAT, d.PROMPT_WEAK, d.SELF_LABEL_STEP1, d.SELF_LABEL_STEP2, d.DONE_MESSAGE,
+    for text in [d.PRAISE_NEW, d.PRAISE_REPEAT, d.PROMPT_WEAK, d.PROMPT_WEAK_FALLBACK, d.SELF_LABEL_PROMPT,
+                 d.SELF_LABEL_PROMPT_FALLBACK, d.DONE_MESSAGE,
                  d.TALK_FALLBACK, d.TALK_FALLBACK_REWRITE, *d.FORM_MESSAGES.values(), *d.TARGET_MESSAGES.values(),
                  *d.STRONG_MESSAGES.values(), *d.STRUCTURE_LABEL.values()]:
         no_banned(text)
     assert d.violates_boundary("この種類のお話はいいね", "talk", "24 ÷ 8") == "banned_vocab:種類"
     assert d.violates_boundary("何をたずねているかな", "talk", "24 ÷ 8") == "banned_vocab:たずね"
-    print("OK 語彙(6章): 児童向け文言に「種類」「たずねる」「聞いていること」「等分除」「包含除」が無い。LLM 出力もガード")
+    for label in d.STRUCTURE_LABEL.values():
+        assert label not in d.PROMPT_WEAK and label not in d.PROMPT_WEAK_FALLBACK.replace("いくつ分？", ""), label
+    print("OK 語彙(6章): 児童向け文言に「種類」「たずねる」「聞いていること」「等分除」「包含除」が無い。弱に構造ラベルなし。LLM 出力もガード")
 
     # ===== 教師画面 live =====
     live = client.get("/admin/api/live", headers=AUTH).json()
@@ -486,10 +533,13 @@ with client:
             assert r["response_type"] is None and r["prompt_strength"] is None and r["message"] == "おくったよ"
             assert r["declared"] is None and r["stuck_count"] is None and r["dialog"] is None
         assert post("/api/declare", session_id=sidP, user_id="13", text="いくつ分").status_code == 400
-        assert post("/api/self_label", session_id=sidP, user_id="13", text="x").status_code == 400
+        assert post("/api/self_label", session_id=sidP, user_id="13", choice="tobun").status_code == 400
+        assert post("/api/judge", session_id=sidP, user_id="13", message="いくつ分", declaring=True).json()["input_type"] == "taiwa", \
+            "フェーズ1・3では declaring を無視して対話として記録"
         lp = logs_of(sidP)
         assert all(l["response_type"] is None and l["prompt_strength"] is None and l["ai_message"] is None for l in lp)
-        assert [l["stuck_count"] for l in lp] == [0] * 5 and [l["is_new"] for l in lp] == [True, False, False, False, False]
+        assert [l["stuck_count"] for l in lp] == [0] * 6 and [l["is_new"] for l in lp[:5]] == [True, False, False, False, False]
+        assert lp[-1]["input_type"] == "taiwa"
         assert database.get_session(sidP)["stuck_count"] == 0
     print("OK 状態機械(9): フェーズ1・3では予告支援なし・カウンタも動かない")
 
@@ -520,7 +570,7 @@ with client:
     decl = [x for x in rows if x["input_type"] == "declaration"]
     assert decl and decl[0]["declared_structure"] == "hougan" and decl[0]["declared_by"] == "child"
     sl = [x for x in rows if x["input_type"] == "self_label"]
-    assert len(sl) == 2 and sl[0]["self_label_text"] == "1人分をもとめている" and sl[1]["self_label"] == "bai" and sl[1]["self_label_match"] == "0"
+    assert len(sl) == 1 and sl[0]["self_label"] == "bai" and sl[0]["self_label_match"] == "0" and sl[0]["self_label_text"] == ""
     assert all(x["latency_ms"] != "" for x in rows if x["input_type"] != "resend")
     assert any(x["declaration_met"] == "1" for x in rows) and any(x["prompt_strength"] == "3" for x in rows)
     assert all(x["created_at"][:4] == str(now_jst.year) for x in rows)

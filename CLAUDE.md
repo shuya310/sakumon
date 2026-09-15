@@ -26,9 +26,12 @@ cd backend && uvicorn main:app --reload --port 8000
     新構造到達で両方 0。強さは main.decide_strength（stuck 2→弱, 3→中, 4+→強／miss 1→中, 2+→強）
   - response_type: form / praise / prompt / talk / done / error。文言は ai_dialogue の表（仕様3章を一字一句。言い換えない）。
     LLM を呼ぶのは talk だけ。`**…**` は強調、フロントで太字にする
-  - 予告は POST /api/declare（classify_declaration。unknown なら立てない）。中は POST /api/self_label（text→choice の2ステップ）。
+  - 入力欄は1つ。弱の直後は /api/judge に declaring=true で送られ、classify が作問でなければ予告として分類
+    （classify_declaration。unknown なら立てない。/api/declare も残す）。中は3択のタップだけ（/api/self_label の choice。
+    self_label_text は書かない）。弱・中は直前の成立作問の問いの文を ai_dialogue.extract_question（LLM）で引用、
+    取れなければ定型文。弱に構造ラベル（1つ分の 大きさ／いくつ分／何倍）を出すのは禁止（中の自己ラベル測定が壊れる）。
     中・強の declared=system は prompt 発行と同時に立てる。自己ラベルが判定と違っても訂正しない（禁止）。
-    児童がステップに答えず作問を送ったら対話は打ち切り、通常処理（予告は立ったまま）
+    児童が3択に答えず作問を送ったら対話は打ち切り、通常処理（予告は立ったまま）。目標バーはチャットのヘッダーに固定
   - 式は main.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。24÷4 は使わない）。セッション開始時に sessions.expression に固定。
     管理画面からセッション単位で上書き可（/admin/api/sessions/{id}/expression）。app_config.expression_a/b は未使用
   - 語彙：児童向けに「種類」「たずねる」「聞いていること」「ちがうことを聞く」を出さない（LLM 出力もガード）

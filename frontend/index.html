@@ -41,18 +41,14 @@
     <div class="chat-header">
       <div class="expression" id="game-expression">　</div>
       <div class="subtitle">この 式に なる 問題を 作ろう</div>
+      <!-- 目標の固定表示（予告が確定している間だけ。ヘッダーに固定＝スクロールしても見える） -->
+      <div class="target-bar" id="target-bar" hidden>
+        いま めざして いるのは「<strong id="target-label"></strong>」を 求める 問題
+      </div>
     </div>
     <div class="chat-log" id="chat-log"></div>
-    <!-- 目標の固定表示（予告が確定している間だけ。入力欄の上に固定） -->
-    <div class="target-bar" id="target-bar" hidden>
-      いま めざして いるのは「<strong id="target-label"></strong>」を 求める 問題
-    </div>
-    <!-- 予告（弱）／自己ラベル（中・ステップ1）の1行自由記述。プレースホルダは置かない -->
-    <div class="sub-input-area" id="sub-input-area" hidden>
-      <input class="sub-input" id="sub-input" type="text" autocomplete="off" spellcheck="false">
-      <button class="btn-send btn-sub-send" id="btn-sub-send">送る</button>
-    </div>
-    <div class="chat-input-area">
+    <!-- 入力欄は1つ。弱の直後は同じ欄から予告を送る（そのときはプレースホルダを消す） -->
+    <div class="chat-input-area" id="chat-input-area">
       <textarea class="chat-input" id="chat-input"
         rows="2" placeholder="問題をここに書いてね…"></textarea>
       <button class="btn-send" id="btn-send">送る</button>

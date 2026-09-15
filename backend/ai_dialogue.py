@@ -4,7 +4,8 @@
 
   form     不成立作問への形式の支援（issue に応じて1点だけ。定型）             3-2
   praise   新構造の称賛／同じ構造1回目（定型）                                   3-3
-  prompt   予告支援。1=弱（予告を書かせる）2=中（自己ラベル→目標の指定）3=強（目標＋場面固定） 3-4〜3-6
+  prompt   予告支援。1=弱（直前の問いの文を引用して予告を書かせる）2=中（引用＋3択の自己ラベル→目標の指定）
+           3=強（目標＋場面固定） 3-4〜3-6。引用文は extract_question（LLM）で直前の成立作問から取り出す
   done     3つそろった（定型）                                                    3-7
   talk     作問以外の入力（LLM＋コード側ガード、失敗時は定型文）
   error    judge が API 不通（定型。3-2 の error）
@@ -55,12 +56,17 @@ _FORM_ALIAS = {
 PRAISE_NEW = "新しい 問題が できたね！\nほかにも、**求めるものが ちがう** 問題は 作れるかな？"
 PRAISE_REPEAT = "いいね、また 一つ できたね。\n今度は **求めるものが ちがう** 問題も 作れそうかな？"
 
-# 3-4 弱（強度1）
-PROMPT_WEAK = "つぎは **何を 求める** 問題に する？\nきめてから、作って みよう。"
+# 3-4 弱（強度1）。{quoted} は直前の成立作問の問いの文。構造のラベルは弱では出さない（中の自己ラベル測定を守るため）
+PROMPT_WEAK = ("今までの お話は、さいごに「{quoted}」と 書いて あったね。\n"
+               "ここが、この お話で 求めて いる ものだよ。\n"
+               "つぎの お話では、何を 求める？ みじかく 書いて みよう。")
+PROMPT_WEAK_FALLBACK = ("つぎの お話では、何を 求める？\n"
+                        "「1人分は いくつ？」「いくつ分？」のように、みじかく 書いて みよう。")
 
-# 3-5 中（強度2）— 2ステップ対話
-SELF_LABEL_STEP1 = "いま 作って くれた 問題は、**何を 求めて いる** のかな？"
-SELF_LABEL_STEP2 = "それは この 3つの どれかな？\n　□ 1つ分の 大きさ　□ いくつ分　□ 何倍"
+# 3-5 中（強度2）— 引用＋3択（自己ラベル）。{n} は直前の成立作問の表示番号
+SELF_LABEL_PROMPT = ("{n}ばんの お話は、さいごに「{quoted}」と 求めて いたね。\n"
+                     "これは どれを 求めて いる 問題かな？")
+SELF_LABEL_PROMPT_FALLBACK = "{n}ばんの お話は、どれを 求めて いる 問題かな？"
 TARGET_MESSAGES = {
     "tobun": "じゃあ 今度は「**1つ分の 大きさ**」を 求める 問題に して みよう。\n"
              "{dividend}こを {divisor}人で 同じ数ずつ 分けたら、1人分は いくつに なるかな。",
@@ -104,6 +110,20 @@ def form_message(issue: str | None, expression: str) -> str:
     return _fill(FORM_MESSAGES.get(key, FORM_MESSAGES["not_problem"]), expression)
 
 
+def weak_message(quoted: str | None) -> str:
+    """弱。引用文が取れなければ定型の例で促す。"""
+    if quoted:
+        return PROMPT_WEAK.replace("{quoted}", quoted)
+    return PROMPT_WEAK_FALLBACK
+
+
+def self_label_message(n: int, quoted: str | None) -> str:
+    """中（引用＋3択）。"""
+    if quoted:
+        return SELF_LABEL_PROMPT.replace("{n}", str(n)).replace("{quoted}", quoted)
+    return SELF_LABEL_PROMPT_FALLBACK.replace("{n}", str(n))
+
+
 def target_message(target: str, expression: str) -> str:
     """中・ステップ3。"""
     return _fill(TARGET_MESSAGES[target], expression)
@@ -120,6 +140,73 @@ def pick_unreached_structure(history: list[str]) -> str | None:
         if s not in history:
             return s
     return None
+
+
+# ===== 問いの文の抽出（弱・中の引用用。LLM） =====
+
+_QUESTION_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {"question": {"type": "string"}},
+        "required": ["question"],
+        "additionalProperties": False,
+    },
+}
+
+_QUESTION_PROMPT = """児童（小学4年生）が作った わり算の文章題から、問いの文（最後の疑問文）だけを取り出します。
+
+- 問いの文は、何を求めるかを聞いている文（「〜は何こですか」「〜何人に配れますか」「〜の何倍ですか」など）。
+- ふつうは文の最後にある。取り出すのはその1文だけ。場面の説明の文は含めない。
+- 文中の数や言葉はそのまま使う。言い換えない・足さない。
+- 出力は文節ごとに半角スペースで区切る（わかち書き）。例：「1人分は 何まいに なりますか」
+- 末尾の句点「。」は付けない。疑問符「？」は元の文にあれば残す。
+- 文字づかい：{KANJI_RULE}
+- 問いの文が見つからない（場面だけ・途中で切れている・疑問文がない）ときは question を空文字 "" にする。
+
+JSON のみを返す：{"question": "..."}"""
+
+
+def format_quote(text: str | None) -> str | None:
+    """引用文の整形：前後の空白と末尾の句点を落とし、空白を半角1つにそろえる。空なら None。"""
+    if not text:
+        return None
+    q = str(text).strip().strip("「」")
+    q = re.sub(r"[　\s]+", " ", q).strip()
+    q = re.sub(r"[。．.]+$", "", q).strip()
+    return q or None
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[　\s]", "", s or "")
+
+
+def extract_question(problem_text: str, user_id: str | None = None) -> str | None:
+    """成立した作問から問いの文（最後の疑問文）を取り出し、わかち書きで整形して返す。取れなければ None。
+
+    元の文に無い言い換え（空白を除いて部分一致しない）は引用しない。"""
+    def parse(response) -> str:
+        if response.stop_reason == "max_tokens":
+            raise ValueError("response truncated (max_tokens)")
+        return str(extract_json(_text_from(response)).get("question") or "")
+
+    try:
+        raw, _meta = llm_call.call(
+            user_id, parse,
+            model=MODEL,
+            max_tokens=200,
+            thinking={"type": "disabled"},
+            system=_QUESTION_PROMPT.replace("{KANJI_RULE}", KANJI_RULE),
+            output_config={"format": _QUESTION_SCHEMA},
+            messages=[{"role": "user", "content": f"文章題: {problem_text}"}],
+        )
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_dialogue] extract_question failed after {e.retry_count} retries: {e}")
+        return None
+    q = format_quote(raw)
+    if not q or len(q) > 60 or _squash(q) not in _squash(problem_text):
+        return None
+    return q
 
 
 # ===== LLM（talk のみ） =====
@@ -320,7 +407,8 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              history: list[str], recent_turns: list[dict] | None,
              response_type: str, expression: str,
              prompt_strength: int | None = None, target: str | None = None,
-             ref_no: int | None = None, user_id: str | None = None) -> dict:
+             ref_no: int | None = None, quoted: str | None = None,
+             user_id: str | None = None) -> dict:
     """児童向けの文言を組み立てる。
 
     戻り値: {"message", "state"}（LLM を呼んだ talk では "meta" も付く：retry_count / status）
@@ -338,9 +426,10 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
         return {"message": PRAISE_REPEAT, "state": "praise_repeat"}
     if response_type == "prompt":
         if prompt_strength == 1:
-            return {"message": PROMPT_WEAK, "state": "prompt_weak"}
+            return {"message": weak_message(quoted), "state": "prompt_weak" + ("" if quoted else "_noquote")}
         if prompt_strength == 2:
-            return {"message": SELF_LABEL_STEP1, "state": "prompt_mid_step1"}
+            return {"message": self_label_message(ref_no or 1, quoted),
+                    "state": "prompt_mid" + ("" if quoted else "_noquote")}
         if prompt_strength == 3 and target:
             return {"message": strong_message(target, expression, ref_no or 1), "state": f"prompt_strong_{target}"}
         return {"message": FALLBACK_MESSAGE, "state": "prompt_invalid"}

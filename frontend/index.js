@@ -13,7 +13,7 @@ const state = {
   problems: [],
   allReached: false,
   sending: false,
-  dialog: null,           // null / declaration / self_label_text / self_label_choice
+  dialog: null,           // null / declaration（弱：入力欄が予告モード）/ self_label_choice（中：3択）
   choices: [],            // 中・ステップ2の3択（サーバから受け取る）
   pollTimer: null,
   pollSeconds: 5,
@@ -164,7 +164,6 @@ function resetGame() {
   document.getElementById("game-user-name").textContent = state.userId ? `${state.userId} さん` : "";
   document.getElementById("game-expression").textContent = state.expression || "";
   document.getElementById("chat-input").value = "";
-  document.getElementById("sub-input").value = "";
 }
 
 document.getElementById("btn-logout").addEventListener("click", () => {
@@ -402,18 +401,17 @@ function setTarget(declared, label) {
   }
 }
 
-// dialog: null / "declaration"（弱：予告入力）/ "self_label_text"（中・ステップ1）/ "self_label_choice"（中・ステップ2）
+// dialog: null / "declaration"（弱：入力欄が予告モード。プレースホルダは置かない）/ "self_label_choice"（中：3択）
+const CHAT_PLACEHOLDER = "問題をここに書いてね…";
 function setDialog(dialog) {
   state.dialog = dialog || null;
-  const area = document.getElementById("sub-input-area");
-  const useSub = state.dialog === "declaration" || state.dialog === "self_label_text";
-  area.hidden = !useSub;
-  if (useSub) {
-    document.getElementById("sub-input").value = "";
-    document.getElementById("sub-input").focus();
-  }
+  const input = document.getElementById("chat-input");
+  const declaring = state.dialog === "declaration";
+  document.getElementById("chat-input-area").classList.toggle("declaring", declaring);
+  input.placeholder = declaring ? "" : CHAT_PLACEHOLDER;
   if (state.dialog === "self_label_choice") addChoiceButtons(state.choices);
-  else if (!useSub) disableChoiceButtons();
+  else disableChoiceButtons();
+  input.focus();
 }
 
 function applySupport(data) {
@@ -461,7 +459,9 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
-  // 予告・自己ラベルの途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
+  // 予告モードなら、作問でない文は予告として扱われる（サーバが判断）。
+  // 3択の途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
+  const declaring = state.dialog === "declaration";
   setDialog(null);
 
   addUserBubble(text);
@@ -470,7 +470,7 @@ async function sendMessage() {
 
   try {
     const { ok, status, data } = await postJson("/api/judge", {
-      session_id: state.sessionId, user_id: state.userId, message: text,
+      session_id: state.sessionId, user_id: state.userId, message: text, declaring,
     });
     stopWatch();
     loader.remove();
@@ -492,7 +492,8 @@ async function sendMessage() {
     // accepted：成立した作問だけ一覧に追加（再送・判定エラーは追加しない）
     if (data.accepted) addProblem(text, data.structure);
     applySupport(data);
-    addAiBubble(data.message, data.response_type, data.is_new, data.prompt_strength);
+    // 予告として扱われた入力：目標を固定表示するだけ（unknown なら何も出さず作問に戻る。再質問しない）
+    if (data.message) addAiBubble(data.message, data.response_type, data.is_new, data.prompt_strength);
     setDialog(data.dialog);
   } catch (e) {
     stopWatch();
@@ -501,46 +502,11 @@ async function sendMessage() {
   } finally {
     state.sending = false;
     document.getElementById("btn-send").disabled = false;
-    if (!state.dialog) input.focus();
+    input.focus();
   }
 }
 
-// ===== 予告（弱）／自己ラベル（中・ステップ1）の送信 =====
-async function sendSubInput() {
-  if (state.sending || state.switching || !state.dialog) return;
-  const input = document.getElementById("sub-input");
-  const text = input.value.trim();
-  if (!text) return;
-  const mode = state.dialog;
-  state.sending = true;
-  document.getElementById("btn-sub-send").disabled = true;
-  input.value = "";
-  addUserBubble(text);
-  try {
-    if (mode === "declaration") {
-      const { ok, data } = await postJson("/api/declare", { session_id: state.sessionId, user_id: state.userId, text });
-      if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
-      // 分類できれば目標を固定表示。unknown なら何も出さず作問入力に戻す（再質問しない）
-      applySupport(data);
-      setDialog(null);
-    } else if (mode === "self_label_text") {
-      const { ok, data } = await postJson("/api/self_label", { session_id: state.sessionId, user_id: state.userId, text });
-      if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
-      applySupport(data);
-      addAiBubble(data.message, "prompt", false, 2);
-      state.choices = data.choices || state.choices;
-      setDialog(data.dialog);   // self_label_choice → 3択
-    }
-  } catch (e) {
-    addNotice("エラーが起きました。もう一度送ってみてね。");
-  } finally {
-    state.sending = false;
-    document.getElementById("btn-sub-send").disabled = false;
-    if (!state.dialog) document.getElementById("chat-input").focus();
-  }
-}
-
-// 中・ステップ2：3択の送信 → ステップ3（目標の指定）
+// 中：3択の送信 → 目標の指定
 async function sendSelfLabelChoice(value, label) {
   if (state.switching) return;
   state.dialog = null;
@@ -558,7 +524,6 @@ async function sendSelfLabelChoice(value, label) {
 }
 
 document.getElementById("btn-send").addEventListener("click", sendMessage);
-document.getElementById("btn-sub-send").addEventListener("click", sendSubInput);
 
 let isComposing = false;
 let compositionJustEnded = false;
@@ -579,7 +544,6 @@ function bindEnter(el, handler) {
   });
 }
 bindEnter(document.getElementById("chat-input"), sendMessage);
-bindEnter(document.getElementById("sub-input"), sendSubInput);
 
 // ===== Boot =====
 async function showLoginExpression() {

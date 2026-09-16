@@ -122,7 +122,7 @@ function renderLive(data) {
   students.forEach(s => {
     const tr = document.createElement("tr");
     if (s.submitted === 0) tr.className = "row-zero";
-    const counts = `反復 ${s.stuck_count ?? 0} ／ 不一致 ${s.miss_count ?? 0}`;
+    const counts = `反復 ${s.stuck_count ?? 0} ／ 不一致 ${s.miss_count ?? 0} ／ 支援要求 ${s.help_count ?? 0}<br>強度 ${s.strength ?? 0}`;
     const declared = s.declared
       ? `<span class="badge ${s.declared_by === "child" ? "badge-blue" : "badge-orange"}">${s.declared_by === "child" ? "児童" : "システム"}</span> ${STRUCT_LABEL[s.declared] || s.declared}`
       : '<span class="muted">—</span>';
@@ -322,7 +322,7 @@ function buildLogsTable(logs) {
 const UNKNOWN_LABEL = { one_unit: "1つ分", num_units: "いくつ分", ratio: "倍率", base: "基準量", rate: "割合" };
 const ROLE_LABEL = { people: "人数", per_one: "1人分の数", base: "比べる相手の量", dont_know: "わからない", unknown: "判別不能" };
 const ISSUE_LABEL = {
-  scene_contradiction: "場面矛盾", wrong_number: "式ちがい", wrong_operation: "演算ちがい",
+  scene_contradiction: "場面矛盾", wrong_number: "式ちがい", reversed: "向きが逆", wrong_operation: "演算ちがい",
   incomplete_text: "途中で切れ", no_question: "問いなし", not_problem: "文章題でない", error: "判定エラー（API不通）",
 };
 
@@ -360,6 +360,7 @@ function buildLogRow(log) {
     ? `<div class="small">予告: ${STRUCT_LABEL[log.declared_structure] || log.declared_structure}（${log.declared_by === "child" ? "児童" : "システム"}）${log.declaration_met == null ? "" : (log.declaration_met ? ' <span class="met-ok">一致 ✓</span>' : ' <span class="met-ng">不一致 ✗</span>')}</div>` : "";
   const selfLabel = (log.self_label || log.self_label_text)
     ? `<div class="small">自己ラベル: ${log.self_label ? (STRUCT_LABEL[log.self_label] || log.self_label) : esc(log.self_label_text)}${log.self_label_match == null ? "" : (log.self_label_match ? ' <span class="met-ok">判定と一致</span>' : ' <span class="met-ng">判定と不一致</span>')}</div>` : "";
+  const helpReq = log.is_help_request ? '<div class="small"><span class="badge badge-orange">支援要求</span></div>' : "";
   const roleAnswer = log.role_answer
     ? `<div class="small">役割の答え: ${ROLE_LABEL[log.role_answer] || log.role_answer}${log.role_corrected ? ' <span class="met-ng">訂正</span>' : ""}</div>` : "";
   const timingHtml = log.latency_ms != null ? `<div class="muted small">${(log.latency_ms / 1000).toFixed(1)}s</div>` : "";
@@ -376,7 +377,7 @@ function buildLogRow(log) {
       ${timingHtml}
     </td>
     <td>${judgeCell}</td>
-    <td>${responseBadge(log.response_type, log.prompt_strength)}${declared}${roleAnswer}${selfLabel}</td>
+    <td>${responseBadge(log.response_type, log.prompt_strength)}${declared}${roleAnswer}${helpReq}${selfLabel}</td>
     <td>${lightsHtml(produced)}${countsHtml}</td>
     <td><button class="btn btn-danger btn-sm">削除</button></td>
   `;

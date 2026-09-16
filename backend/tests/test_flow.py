@@ -68,7 +68,8 @@ def fake_llm(child_message, input_kind, judge_result, history, recent_turns, res
     CALLS["llm"] += 1
     LAST_TALK.clear()
     LAST_TALK.update(history=list(history), context=context, expression=expression)
-    return {"message": f"[{response_type}] llm", "state": response_type}
+    is_help = any(k in child_message for k in ("ヒント", "わからない", "どうすれば", "思いつかない"))
+    return {"message": f"[{response_type}] llm", "state": response_type, "is_help_request": is_help}
 
 
 def fake_declaration(text, user_id=None):
@@ -160,7 +161,7 @@ with client:
         "response_type", "prompt_strength",
         "declared_structure", "declared_by", "declaration_met",
         "self_label", "self_label_text", "self_label_match",
-        "role_answer", "role_corrected",
+        "role_answer", "role_corrected", "is_help_request",
         "produced_structures", "stuck_count", "miss_count", "latency_ms",
     ], cols
     scols = [r[1] for r in raw("PRAGMA table_info(sessions)")]
@@ -168,7 +169,7 @@ with client:
                      "declared", "declared_by", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 30列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 31列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
 
     # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
     ds = main.decide_strength
@@ -589,7 +590,36 @@ with client:
     assert [l["miss_count"] for l in lt] == [0] * 6
     st1 = database.get_session(sidT)
     assert st1["stuck_count"] == 2 and st1["miss_count"] == 0 and st1["strength"] == 1
-    print("OK 状態機械(8): taiwa / resend ではカウンタが動かない")
+    assert st1["help_count"] == 1, "「わからない」は支援要求 → help=1（強度0では強度は上がらない）"
+    assert [l["is_help_request"] for l in lt] == [None, None, True, None, None, None], "taiwa だけ判定。resend は未判定"
+    print("OK 状態機械(8): taiwa / resend では stuck / miss が動かない。支援要求で help だけ動く")
+
+    # ---- 支援要求（フェーズE）：強度1以上では help が増えるたびに +1。中に上がれば目標を立てる。反映は次ターン ----
+    r = judge(sidT, "12", "ヒント ちょうだい")
+    assert r["is_help_request"] is True and r["prompt_strength"] == 1, "文言は更新前の強度（1）で生成"
+    assert r["strength"] == 2 and r["strength_trigger"] == "help" and r["help_count"] == 2
+    assert r["declared"] == "hougan" and r["declared_by"] == "system" and r["target_label"] == "いくつ分", "中に上がったので目標を立てる"
+    assert r["dialog"] is None
+    st = database.get_session(sidT)
+    assert st["strength"] == 2 and st["help_count"] == 2 and st["stuck_count"] == 2 and st["miss_count"] == 0
+    r = judge(sidT, "12", "これって足し算？")
+    assert r["is_help_request"] is False and r["strength"] == 2 and r["strength_trigger"] == "none" and r["help_count"] == 2
+    assert LAST_TALK["context"]["strength"] == 2 and LAST_TALK["context"]["target"] == "hougan", "次ターンから新しい強度・目標で talk"
+    r = judge(sidT, "12", "どうすればいいの")
+    assert r["strength"] == 3 and r["strength_trigger"] == "help" and r["help_count"] == 3 and r["declared"] == "hougan"
+    r = judge(sidT, "12", "ヒント")
+    assert r["strength"] == 3 and r["help_count"] == 4, "上限3"
+    # 目標（hougan）と一致する新構造 → 全カウンタと強度が 0、予告は消費
+    r = judge(sidT, "12", "H: あめ24こを8こずつ")
+    assert r["is_new"] is True and r["declaration_met"] is True and r["response_type"] == "praise"
+    assert r["strength"] == 0 and r["help_count"] == 0 and r["stuck_count"] == 0 and r["miss_count"] == 0 and r["declared"] is None
+    lt = logs_of(sidT)
+    assert lt[-2]["is_help_request"] is True and lt[-2]["prompt_strength"] == 3 and lt[-1]["is_help_request"] is None
+    # 3つそろった後は支援要求でも何も動かない
+    judge(sidT, "12", "B: 24本は8本の何倍")
+    r = judge(sidT, "12", "ヒント")
+    assert r["is_help_request"] is True and r["strength"] == 0 and r["help_count"] == 0 and r["declared"] is None
+    print("OK 支援要求(E): help で 1→2（目標を立てる）→3（上限）。文言は更新前の強度、反映は次ターン。新構造で全部 0")
 
     # 中・強の3構造の文言（要件定義 4-5 を一字一句。{item}{unit}{dividend}{divisor} の埋め込み）
     assert d.mid_message("tobun", "24 ÷ 8", 2, "あめ", "こ") == "あめの お話は そのままで いいよ。8を「何人で 分けるか」の 数に して みよう。"
@@ -631,12 +661,26 @@ with client:
             assert label not in text, ("弱（役割の宣言）に構造ラベルを出さない", label)
     print("OK 語彙(6章): 児童向け文言に「種類」「たずねる」「聞いていること」「等分除」「包含除」が無い。弱に構造ラベルなし。LLM 出力もガード")
 
+    # ===== 付随バグ（フェーズF）：理由なしの不成立を not_problem に落とさない／逆向きの倍は reversed =====
+    nz = lambda raw, text: ai_judge.normalize(raw, text)["issue"]
+    NO_ISSUE = {"valid": False, "structure": "invalid", "unknown": None, "issue": None}
+    assert nz(NO_ISSUE, "あめが24こあります。8人にくばります。") == "no_question", "場面はある・問いが無い"
+    assert nz(NO_ISSUE, "あめが24こあります。8人にくばります。1人何こですか。") == "wrong_number", "場面も問いもある"
+    assert nz(NO_ISSUE, "わりざん たのしい") == "not_problem" and nz(NO_ISSUE, "") == "not_problem", "場面の文が無いときだけ not_problem"
+    assert nz({"valid": True, "structure": "invalid", "unknown": None, "issue": None}, "りんごが24こあります。") == "no_question", \
+        "valid=true なのに structure=invalid でも not_problem に落とさない"
+    assert nz({"valid": False, "structure": "invalid", "unknown": None, "issue": "reversed"}, "x") == "reversed"
+    assert nz({"valid": False, "structure": "invalid", "unknown": None, "issue": "bogus"}, "24人を3人ずつ") == "no_question"
+    assert d.form_message("reversed", "24 ÷ 8") == d.form_message("wrong_number", "24 ÷ 8"), "児童向け文言は暫定で wrong_number と同じ"
+    assert "reversed" in ai_judge.ISSUES
+    print("OK バグ修正(F): 理由なしの不成立は本文から no_question / wrong_number に寄せる。逆向きの倍は issue=reversed（文言は暫定）")
+
     # ===== 教師画面 live =====
     live = client.get("/admin/api/live", headers=AUTH).json()
     users = {s["user_id"]: s for s in live["students"]}
     assert users["01"]["submitted"] == 9 and users["01"]["valid"] == 5, users["01"]
     assert users["01"]["structures"] == ["tobun", "hougan", "bai"]
-    assert users["12"]["stuck_count"] == 2 and users["12"]["declared"] is None
+    assert users["12"]["stuck_count"] == 0 and users["12"]["help_count"] == 0 and users["12"]["strength"] == 0 and users["12"]["declared"] is None
     assert users["03"]["submitted"] == 0 and users["03"]["online"] is True
     print("OK 教師画面: 提出数・成立数・到達・予告・反復/不一致・直近の応答・接続状態")
 
@@ -702,7 +746,7 @@ with client:
     rows = list(csv.DictReader(io.StringIO(r.content.decode("utf-8-sig"))))
     assert list(rows[0].keys()) == database.CSV_FIELDS
     for col in ("declared_structure", "declared_by", "declaration_met", "self_label", "self_label_text",
-                "self_label_match", "role_answer", "role_corrected",
+                "self_label_match", "role_answer", "role_corrected", "is_help_request",
                 "prompt_strength", "produced_structures", "stuck_count", "miss_count", "latency_ms"):
         assert col in rows[0], col
     decl = [x for x in rows if x["input_type"] == "declaration"]

@@ -549,19 +549,36 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
     show = phase == 2
 
     ai_message = None
+    is_help = None
+    strength, trigger = (session["strength"] if show else None), "none"
+    help_count, declared, declared_by = counts["help"], session["declared"], session["declared_by"]
     if show:
         dlg = ai_dialogue.dialogue(message, "taiwa", None, produced, ctx["recent"], "talk",
                                    ctx["expression"], user_id=user_id,
                                    context=_talk_context(session, ctx["expression"]))
         ai_message = dlg["message"]
+        is_help = dlg.get("is_help_request")
+        # 支援要求（フェーズE）：help += 1 → 強度規則で段階を更新（文言は更新前の強度で生成済み。反映は次ターンから）。
+        # 3つそろった後は支援なし（カウンタも動かさない）
+        if is_help and not (set(produced) >= STRUCTURES):
+            help_count += 1
+            strength, trigger = decide_strength(session["strength"], help_up=True)
+            if strength >= 2 and not declared:
+                # 中・強に上がったのに目標が無ければ、ここでシステムが未到達構造を立てる
+                declared = ai_dialogue.pick_unreached_structure(produced)
+                declared_by = "system" if declared else None
+            database.set_state(req.session_id, declared=declared, declared_by=declared_by,
+                               stuck_count=counts["stuck"], miss_count=counts["miss"],
+                               help_count=help_count, strength=strength)
 
-    strength = session["strength"] if show else None
     result = _base_result(ai_message, "talk" if show else None, "taiwa")
-    result["prompt_strength"] = strength
+    result.update({"prompt_strength": session["strength"] if show else None,
+                   "is_help_request": is_help, "strength_trigger": trigger if show else None})
     database.save_log(
         session_id=req.session_id, user_id=user_id, phase=phase, expression=ctx["expression"],
         input_type="taiwa", message=message, ai_message=ai_message,
-        response_type="talk" if show else None, prompt_strength=strength,
+        response_type="talk" if show else None, prompt_strength=session["strength"] if show else None,
+        is_help_request=is_help,
         produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
         latency_ms=_latency(ctx),
     )

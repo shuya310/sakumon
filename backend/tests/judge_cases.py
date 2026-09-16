@@ -45,9 +45,9 @@ CASES = [
     ("表記寛容", "あめが24こあります4人でわけると1人なんこになりますか", (True, "tobun", "one_unit", None), []),
     ("表記寛容", "おりがみが24まいあります。4にんでおなじかずずつわけると、ひとりぶんはなんまいですか。", (True, "tobun", "one_unit", None), []),
     ("表記寛容", "クッキーが24こあります。4人にくばると、1人何本ですか。", (True, "tobun", "one_unit", None), []),
-    # --- 逆立式 → wrong_number ---
-    ("逆立式", "4こは24この何倍ですか。", (False, "invalid", None, "wrong_number"), []),
-    ("逆立式", "青いリボンは4cm、赤いリボンは24cmです。青いリボンは赤いリボンの何倍ですか。", (False, "invalid", None, "wrong_number"), []),
+    # --- 逆立式（比較の向きが逆）→ reversed ---
+    ("逆立式", "4こは24この何倍ですか。", (False, "invalid", None, "reversed"), []),
+    ("逆立式", "青いリボンは4cm、赤いリボンは24cmです。青いリボンは赤いリボンの何倍ですか。", (False, "invalid", None, "reversed"), []),
     # --- 場面矛盾（9/1実データ）---
     ("場面矛盾", "24人が4人のグループに分かれます。そうすると1グループ何人ですか。", (False, "invalid", None, "scene_contradiction"), []),
     ("場面矛盾", "4人あわせて100まもっています。Aくんは24まいもっています。20人います。1人4まいだと何人にわたしますか?", (False, "invalid", None, "scene_contradiction"), []),

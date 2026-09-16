@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     -- 弱・ターン1（役割の宣言）：児童の答えの分類（訂正前の生の値）と、訂正を出したか
     role_answer         TEXT,
     role_corrected      INTEGER,
+    -- taiwa が支援要求（ヒント・わからない等）に分類されたか（LLM。未判定は NULL）
+    is_help_request     INTEGER,
 
     produced_structures TEXT,
     stuck_count         INTEGER,
@@ -156,7 +158,8 @@ _MIGRATIONS = {
     "sessions": (("declared", "TEXT"), ("declared_by", "TEXT"),
                  ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
                  ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
-    "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT")),
+    "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
+                  ("is_help_request", "INTEGER")),
 }
 
 
@@ -297,6 +300,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              self_label: str | None = None, self_label_text: str | None = None,
              self_label_match: bool | None = None,
              role_answer: str | None = None, role_corrected: bool | None = None,
+             is_help_request: bool | None = None,
              produced_structures: list[str] | None = None,
              stuck_count: int | None = None, miss_count: int | None = None,
              latency_ms: int | None = None) -> int:
@@ -311,16 +315,16 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
                 response_type, prompt_strength,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
-                role_answer, role_corrected,
+                role_answer, role_corrected, is_help_request,
                 produced_structures, stuck_count, miss_count, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
              b(valid), structure, unknown, issue, b(is_new), item, unit,
              response_type, prompt_strength,
              declared_structure, declared_by, b(declaration_met),
              self_label, self_label_text, b(self_label_match),
-             role_answer, b(role_corrected),
+             role_answer, b(role_corrected), b(is_help_request),
              format_structures(produced_structures) if produced_structures is not None else None,
              stuck_count, miss_count, latency_ms),
         )
@@ -463,10 +467,10 @@ LOG_COLUMNS = [
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
-    "role_answer", "role_corrected",
+    "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "latency_ms",
 ]
-_BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected")
+_BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected", "is_help_request")
 
 
 def _row_to_log(r) -> dict:
@@ -505,7 +509,7 @@ CSV_FIELDS = [
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
-    "role_answer", "role_corrected",
+    "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "latency_ms",
 ]
 

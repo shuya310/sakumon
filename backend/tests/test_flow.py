@@ -144,10 +144,33 @@ with client:
     ], cols
     scols = [r[1] for r in raw("PRAGMA table_info(sessions)")]
     assert scols == ["session_id", "user_id", "phase", "expression", "parity_group", "session_start", "session_end",
-                     "declared", "declared_by", "stuck_count", "miss_count"], scols
+                     "declared", "declared_by", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 26列・sessions 11列（状態機械4列）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 26列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
+
+    # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
+    ds = main.decide_strength
+    # 0→1 は stuck が 2 に達したときだけ
+    assert ds(0, stuck_up=True, stuck_after=1) == (0, "none"), "同構造1回目では介入しない"
+    assert ds(0, stuck_up=True, stuck_after=2) == (1, "stuck")
+    assert ds(0, miss_up=True) == (0, "none"), "強度0では miss だけでは上がらない"
+    assert ds(0, help_up=True) == (0, "none"), "強度0では help だけでは上がらない"
+    assert ds(0, stuck_up=True, stuck_after=2, miss_up=True) == (1, "stuck"), "0→1 は必ず1段"
+    # 強度1以降は stuck / miss / help のどれが増えても +1（上限3）
+    assert ds(1, stuck_up=True, stuck_after=3) == (2, "stuck")
+    assert ds(1, miss_up=True) == (2, "miss")
+    assert ds(1, help_up=True) == (2, "help")
+    assert ds(2, help_up=True) == (3, "help")
+    assert ds(3, stuck_up=True, stuck_after=9) == (3, "stuck"), "上限3"
+    assert ds(3, miss_up=True) == (3, "miss")
+    # 同じターンで stuck と miss が両方増えても +1 は1回。trigger は miss を優先
+    assert ds(1, stuck_up=True, stuck_after=3, miss_up=True) == (2, "miss")
+    # 何も増えなければ据え置き
+    assert ds(2) == (2, "none") and ds(1) == (1, "none")
+    # 新構造到達で 0
+    assert ds(3, is_new=True) == (0, "none") and ds(1, is_new=True, miss_up=True) == (0, "none")
+    print("OK 強度の遷移: 0→1 は stuck=2 のみ、1以降はどのカウンタが増えても +1（上限3）、新構造で 0")
 
     # ===== 認証 =====
     assert client.get("/admin/api/config").status_code == 401
@@ -331,9 +354,12 @@ with client:
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 0 and r["is_new"] is True
     r = judge(sidS, "11", "T: あめ24こを8人で")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 1
+    assert r["strength"] == 0 and r["strength_trigger"] == "none", "同構造1回目では強度は 0 のまま"
     qb = CALLS.get("quote", 0)
     r = judge(sidS, "11", "T: みかんが24こあります。8人で同じ数ずつ分けます。/1人分は 何こに なりますか。")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 1 and r["stuck_count"] == 2, r
+    assert r["strength"] == 1 and r["strength_trigger"] == "stuck" and r["help_count"] == 0
+    assert database.get_session(sidS)["strength"] == 1, "強度は sessions に状態として保持"
     assert CALLS["quote"] == qb + 1, "弱で引用文を抽出する"
     assert r["message"] == ("今までの お話は、さいごに「1人分は 何こに なりますか」と 書いて あったね。\n"
                             "ここが、この お話で 求めて いる ものだよ。\n"
@@ -378,6 +404,7 @@ with client:
     r = judge(sidS, "11", "T: えんぴつが24本あります。8人で分けます。/1人分は 何本 ですか。")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 2, r
     assert r["declaration_met"] is False and r["miss_count"] == 1 and r["stuck_count"] == 3
+    assert r["strength"] == 2 and r["strength_trigger"] == "miss", "stuck と miss が同時に増えても +1 は1回。trigger は miss"
     assert r["message"] == ("4ばんの お話は、さいごに「1人分は 何本 ですか」と 求めて いたね。\n"
                             "これは どれを 求めて いる 問題かな？"), r["message"]
     assert r["dialog"] == "self_label_choice" and [c["value"] for c in r["choices"]] == ["tobun", "hougan", "bai"]
@@ -412,6 +439,7 @@ with client:
     r = judge(sidS, "11", "T: ジュース24Lを8人で")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 3, r
     assert r["declaration_met"] is False and r["miss_count"] == 2 and r["stuck_count"] == 4
+    assert r["strength"] == 3 and r["strength_trigger"] == "miss"
     assert r["message"] == ("5ばんの お話は **そのままで いいよ**。\n"
                             "おなじ ものを 8こずつ まとめて、**まとまりの 数**を 求める 問題に かえられるかな？"), r["message"]
     assert r["dialog"] is None and r["declared"] == "hougan" and r["declared_by"] == "system"
@@ -422,6 +450,7 @@ with client:
     # 中・強の対話に答えず作問を送っても止まらない（対話は打ち切り、予告は立ったまま）
     r = judge(sidS, "11", "X: 途中で作問")
     assert r["response_type"] == "form" and r["declared"] == "hougan" and r["miss_count"] == 2
+    assert r["strength"] == 3 and r["strength_trigger"] == "none", "不成立では強度も動かない"
     print("OK 対話を無視した作問: ブロックしない・予告は立ったまま")
 
     # (6) 包含除に到達 → stuck / miss が両方 0 に戻り、強度0の称賛
@@ -429,8 +458,10 @@ with client:
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["is_new"] is True, r
     assert r["message"] == d.PRAISE_NEW
     assert r["stuck_count"] == 0 and r["miss_count"] == 0 and r["declaration_met"] is True and r["declared"] is None
+    assert r["strength"] == 0 and r["help_count"] == 0 and r["strength_trigger"] == "none"
     st = database.get_session(sidS)
     assert st["stuck_count"] == 0 and st["miss_count"] == 0 and st["declared"] is None
+    assert st["strength"] == 0 and st["help_count"] == 0, "新構造到達で3カウンタと強度を全て 0"
     row = logs_of(sidS)[-1]
     assert row["declared_structure"] == "hougan" and row["declared_by"] == "system" and row["declaration_met"] is True
     assert row["produced_structures"] == "tobun,hougan"
@@ -443,6 +474,7 @@ with client:
     for i in range(4):
         r = judge(sidS, "11", f"T: 3つそろった後の反復{i}")
         assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["declared"] is None and r["dialog"] is None, r
+        assert r["strength"] == 0
     print("OK 状態機械(7): 3構造で done、以降くり返しても予告支援は出ない")
 
     # 引用が取れないときは定型文（弱・中とも）
@@ -471,7 +503,7 @@ with client:
     assert [l["stuck_count"] for l in lt] == [0, 1, 1, 1, 2, 2]
     assert [l["miss_count"] for l in lt] == [0] * 6
     st1 = database.get_session(sidT)
-    assert st1["stuck_count"] == 2 and st1["miss_count"] == 0
+    assert st1["stuck_count"] == 2 and st1["miss_count"] == 0 and st1["strength"] == 1
     print("OK 状態機械(8): taiwa / resend ではカウンタが動かない")
 
     # 強の bai 文言と、中の tobun / bai 文言（数値の埋め込み）
@@ -532,6 +564,7 @@ with client:
             r = judge(sidP, "13", msg)
             assert r["response_type"] is None and r["prompt_strength"] is None and r["message"] == "おくったよ"
             assert r["declared"] is None and r["stuck_count"] is None and r["dialog"] is None
+            assert r["strength"] is None and r["help_count"] is None and r["strength_trigger"] is None
         assert post("/api/declare", session_id=sidP, user_id="13", text="いくつ分").status_code == 400
         assert post("/api/self_label", session_id=sidP, user_id="13", choice="tobun").status_code == 400
         assert post("/api/judge", session_id=sidP, user_id="13", message="いくつ分", declaring=True).json()["input_type"] == "taiwa", \

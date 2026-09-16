@@ -50,11 +50,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     parity_group   TEXT    NOT NULL,
     session_start  TEXT    NOT NULL,
     session_end    TEXT,
-    -- 予告支援の状態機械（仕様 v2 2-2。フェーズスコープ＝セッションごと）
+    -- 支援の状態機械（フェーズスコープ＝セッションごと）
     declared       TEXT,
     declared_by    TEXT,
     stuck_count    INTEGER NOT NULL DEFAULT 0,
-    miss_count     INTEGER NOT NULL DEFAULT 0
+    miss_count     INTEGER NOT NULL DEFAULT 0,
+    help_count     INTEGER NOT NULL DEFAULT 0,   -- taiwa が支援要求に分類された回数
+    strength       INTEGER NOT NULL DEFAULT 0    -- 現在の強度 0=促し／1=弱／2=中／3=強（状態として保持）
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_phase ON sessions(user_id, phase);
 
@@ -148,7 +150,8 @@ def _migrate(con):
     """新スキーマ以降の列追加（既存 DB を壊さない）。SCHEMA にも同じ列を書いておくこと。"""
     cols = _columns(con, "sessions")
     for name, ddl in (("declared", "TEXT"), ("declared_by", "TEXT"),
-                      ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0")):
+                      ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
+                      ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")):
         if cols and name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {name} {ddl}")
 
@@ -244,7 +247,7 @@ def get_session(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
             """SELECT session_id, user_id, phase, expression, parity_group, session_start, session_end,
-                      declared, declared_by, stuck_count, miss_count
+                      declared, declared_by, stuck_count, miss_count, help_count, strength
                FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -252,17 +255,19 @@ def get_session(session_id: int) -> dict | None:
         return None
     return {"session_id": r[0], "user_id": r[1], "phase": r[2], "expression": r[3],
             "parity_group": r[4], "session_start": r[5], "session_end": r[6],
-            "declared": r[7], "declared_by": r[8], "stuck_count": r[9] or 0, "miss_count": r[10] or 0}
+            "declared": r[7], "declared_by": r[8], "stuck_count": r[9] or 0, "miss_count": r[10] or 0,
+            "help_count": r[11] or 0, "strength": r[12] or 0}
 
 
 def set_state(session_id: int, *, declared: str | None, declared_by: str | None,
-              stuck_count: int, miss_count: int):
-    """状態機械の変数を保存する（仕様 v2 2-2）。"""
+              stuck_count: int, miss_count: int, help_count: int, strength: int):
+    """状態機械の変数を保存する（3カウンタ＋強度＋予告）。"""
     with _conn() as con:
         con.execute(
-            """UPDATE sessions SET declared = ?, declared_by = ?, stuck_count = ?, miss_count = ?
+            """UPDATE sessions SET declared = ?, declared_by = ?, stuck_count = ?, miss_count = ?,
+                                   help_count = ?, strength = ?
                WHERE session_id = ?""",
-            (declared, declared_by, stuck_count, miss_count, session_id),
+            (declared, declared_by, stuck_count, miss_count, help_count, strength, session_id),
         )
 
 
@@ -409,7 +414,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
     with _conn() as con:
         rows = con.execute("""
             SELECT s.session_id, s.phase, s.expression, s.parity_group, s.session_start, s.session_end,
-                   s.declared, s.declared_by, s.stuck_count, s.miss_count,
+                   s.declared, s.declared_by, s.stuck_count, s.miss_count, s.help_count, s.strength,
                    COUNT(CASE WHEN cl.is_new = 1 THEN 1 END) as new_count,
                    COUNT(CASE WHEN cl.input_type = 'sakumon' THEN 1 END) as sakumon_count,
                    COUNT(CASE WHEN cl.input_type = 'taiwa' THEN 1 END) as taiwa_count,
@@ -425,8 +430,9 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
             "session_id": r[0], "phase": r[1], "expression": r[2], "parity_group": r[3],
             "session_start": r[4], "session_end": r[5],
             "declared": r[6], "declared_by": r[7], "stuck_count": r[8] or 0, "miss_count": r[9] or 0,
-            "new_count": r[10] or 0, "sakumon_count": r[11] or 0, "taiwa_count": r[12] or 0,
-            "structures": [s for s in (r[13] or "").split(",") if s],
+            "help_count": r[10] or 0, "strength": r[11] or 0,
+            "new_count": r[12] or 0, "sakumon_count": r[13] or 0, "taiwa_count": r[14] or 0,
+            "structures": [s for s in (r[15] or "").split(",") if s],
         }
         for r in rows
     ]
@@ -506,11 +512,11 @@ def admin_live_status(phase: int) -> list[dict]:
     """現在のフェーズにおける児童ごとの状態（教師用フェーズ画面）。"""
     with _conn() as con:
         sess = con.execute(
-            """SELECT user_id, session_id, declared, declared_by, stuck_count, miss_count
+            """SELECT user_id, session_id, declared, declared_by, stuck_count, miss_count, help_count, strength
                FROM sessions WHERE phase = ? ORDER BY user_id""", (phase,)
         ).fetchall()
         result = []
-        for user_id, sid, declared, declared_by, stuck, miss in sess:
+        for user_id, sid, declared, declared_by, stuck, miss, help_count, strength in sess:
             agg = con.execute(
                 """SELECT COUNT(CASE WHEN input_type = 'sakumon' THEN 1 END),
                           COUNT(CASE WHEN valid = 1 THEN 1 END),
@@ -533,6 +539,8 @@ def admin_live_status(phase: int) -> list[dict]:
                 "declared_by": declared_by,
                 "stuck_count": stuck or 0,
                 "miss_count": miss or 0,
+                "help_count": help_count or 0,
+                "strength": strength or 0,
                 "last_activity": agg[2],
             })
     return result

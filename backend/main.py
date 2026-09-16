@@ -8,8 +8,9 @@
 - フェーズ2：応答の種類（response_type: form / praise / prompt / done / talk / error）を状態機械
   （仕様 v2 2章）で決定論的に決め、ai_dialogue に文言を組み立てさせる。AIには判定させない。
   状態（sessions に保持・フェーズスコープ）：produced（到達構造の集合）、declared / declared_by（予告）、
-  stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）。
-  不成立・対話・再送ではカウンタを動かさない。新構造到達で stuck / miss を両方 0 に戻す。
+  stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）、
+  help（taiwa が支援要求に分類された回数）、strength（現在の強度 0〜3。decide_strength で遷移）。
+  不成立・再送ではカウンタを動かさない。新構造到達で3カウンタと強度を全て 0 に戻す。
 - 弱（強度1）の予告は、児童の画面では作問と同じ入力欄から送る（入力欄は1つ）。予告待ちの状態で届いた
   入力は、classify が作問なら通常の作問処理、そうでなければ予告として分類する（/api/judge の declaring）。
 - 中（強度2）は引用＋3択の自己ラベル（/api/self_label）。児童が答えずに作問を送ってきたら
@@ -218,6 +219,8 @@ def _support_state(session: dict, show: bool) -> dict:
         "target_label": ai_dialogue.STRUCTURE_LABEL.get(declared) if declared else None,
         "stuck_count": session["stuck_count"] if show else None,
         "miss_count": session["miss_count"] if show else None,
+        "help_count": session["help_count"] if show else None,
+        "strength": session["strength"] if show else None,
     }
 
 
@@ -260,13 +263,34 @@ def _enter_current(user_id: str) -> dict:
     return _enter_payload(database.get_session(session_id), cfg)
 
 
-# ===== 状態機械（仕様 v2 2章） =====
+# ===== 状態機械 =====
 
-def decide_strength(stuck: int, miss: int) -> int:
-    """予告支援の強さ（0=なし／1=弱／2=中／3=強）。仕様 v2 2-4 のとおり。"""
-    from_stuck = 0 if stuck <= 1 else (1 if stuck == 2 else (2 if stuck == 3 else 3))
-    from_miss = 0 if miss == 0 else (2 if miss == 1 else 3)
-    return max(from_stuck, from_miss)
+MAX_STRENGTH = 3
+TRIGGERS = ("stuck", "miss", "help", "none")
+
+
+def decide_strength(prev: int, *, is_new: bool = False, stuck_after: int = 0,
+                    stuck_up: bool = False, miss_up: bool = False, help_up: bool = False) -> tuple[int, str]:
+    """支援の強度（0=促し／1=弱／2=中／3=強）の遷移。(新しい強度, strength_trigger) を返す。
+
+    強度は sessions.strength に状態として保持し、カウンタから毎回計算し直さない（随伴的指導の原則：
+    失敗で1段強め、成功で1段弱める。Wood & Middleton）。
+      - 新構造到達（is_new）      → 0 に戻す（カウンタも呼び出し側で全て 0）
+      - 強度 0 → 1               → stuck が 2 に達したときだけ（同じ構造を1回くり返しただけでは介入しない）
+      - 強度 1 以上              → stuck / miss / help のいずれかが増えたターンごとに +1（上限 3）
+    同じターンで stuck と miss が両方増えても +1 は1回（1回の失敗＝1段）。trigger は miss > stuck > help の
+    優先で1つだけ記録する。強度が上がらなかったターンの trigger は "none"。
+    """
+    if is_new:
+        return 0, "none"
+    trigger = "miss" if miss_up else ("stuck" if stuck_up else ("help" if help_up else "none"))
+    if trigger == "none":
+        return prev, "none"
+    if prev == 0:
+        if stuck_up and stuck_after >= 2:
+            return 1, "stuck"
+        return 0, "none"
+    return min(prev + 1, MAX_STRENGTH), trigger
 
 
 # ===== Routes（児童） =====
@@ -333,7 +357,8 @@ def judge(req: JudgeRequest):
     last = database.get_last_turn(req.session_id)
     ctx = dict(session=session, phase=phase, expression=expression, produced=produced,
                recent=database.get_recent_turns(req.session_id), last=last,
-               counts={"stuck": session["stuck_count"], "miss": session["miss_count"]},
+               counts={"stuck": session["stuck_count"], "miss": session["miss_count"],
+                       "help": session["help_count"], "strength": session["strength"]},
                t_start=t_start)
 
     # すでに判定済みの本文の連続再送は API を呼ばず直前の結果を返す
@@ -359,7 +384,8 @@ def _handle_declaration(session: dict, user_id: str, text: str, t_start: float) 
     declared_by = "child" if declared else None
     if declared:
         database.set_state(session["session_id"], declared=declared, declared_by="child",
-                           stuck_count=session["stuck_count"], miss_count=session["miss_count"])
+                           stuck_count=session["stuck_count"], miss_count=session["miss_count"],
+                           help_count=session["help_count"], strength=session["strength"])
     produced = database.get_produced(user_id, 2)
     database.save_log(
         session_id=session["session_id"], user_id=user_id, phase=2, expression=session["expression"],
@@ -423,7 +449,8 @@ def self_label(req: SelfLabelRequest):
         target = ai_dialogue.pick_unreached_structure(produced)
         if target:
             database.set_state(req.session_id, declared=target, declared_by="system",
-                               stuck_count=session["stuck_count"], miss_count=session["miss_count"])
+                               stuck_count=session["stuck_count"], miss_count=session["miss_count"],
+                               help_count=session["help_count"], strength=session["strength"])
     ai_message = ai_dialogue.target_message(target, session["expression"]) if target else ai_dialogue.DONE_MESSAGE
     database.save_log(**common, message=ai_dialogue.STRUCTURE_LABEL[choice], ai_message=ai_message,
                       self_label=choice, self_label_match=match,
@@ -574,27 +601,33 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     quoted = None
 
     # ---- 状態機械（フェーズ2のみ。不成立は何も動かさない） ----
-    stuck, miss = counts["stuck"], counts["miss"]
+    stuck, miss, help_count = counts["stuck"], counts["miss"], counts["help"]
+    prev_strength = counts["strength"]
     declared, declared_by = session["declared"], session["declared_by"]
     declared_used, declared_by_used, met = None, None, None
     strength = None
+    trigger = "none"
     response_type = None
     dialog = None
     if show and valid:
+        stuck_up = miss_up = False
         if declared:
             declared_used, declared_by_used = declared, declared_by
             met = structure == declared
+            miss_up = not met
             miss = 0 if met else miss + 1
         if is_new:
-            stuck, miss = 0, 0
+            stuck, miss, help_count = 0, 0, 0
         else:
             stuck += 1
-        # 予告はこの作問で消費される（2-5）。中・強はこのあとシステムが新しい目標を立てる
+            stuck_up = True
+        # 予告はこの作問で消費される。中・強はこのあとシステムが新しい目標を立てる
         declared, declared_by = None, None
         if completes_all or all_before:
             response_type, strength = "done", 0
         else:
-            strength = decide_strength(stuck, miss)
+            strength, trigger = decide_strength(prev_strength, is_new=is_new, stuck_after=stuck,
+                                                stuck_up=stuck_up, miss_up=miss_up)
             if strength == 0:
                 response_type = "praise"
             else:
@@ -608,7 +641,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
                     declared = ai_dialogue.pick_unreached_structure(produced_after)
                     declared_by = "system" if declared else None
         database.set_state(req.session_id, declared=declared, declared_by=declared_by,
-                           stuck_count=stuck, miss_count=miss)
+                           stuck_count=stuck, miss_count=miss, help_count=help_count, strength=strength)
     elif show:
         response_type, strength = "form", 0
 
@@ -623,7 +656,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
 
     result = _base_result(ai_message, response_type, "sakumon")
     result.update({"valid": valid, "structure": structure, "unknown": unknown, "is_new": is_new,
-                   "prompt_strength": strength, "declaration_met": met, "dialog": dialog})
+                   "prompt_strength": strength, "strength_trigger": trigger if show else None,
+                   "declaration_met": met, "dialog": dialog})
     database.save_log(
         session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
         input_type="sakumon", message=message, ai_message=ai_message,

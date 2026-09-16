@@ -14,7 +14,9 @@ API 呼び出し（タイムアウト・リトライ・同時実行制御・計�
    "structure": "tobun" | "hougan" | "bai" | "invalid",
    "unknown": "one_unit" | "num_units" | "ratio" | "base" | "rate" | None,
    "issue": None | "scene_contradiction" | "wrong_number" | "incomplete_text"
-            | "wrong_operation" | "no_question" | "not_problem"}
+            | "wrong_operation" | "no_question" | "not_problem",
+   "item": str | None,    # 被除数が数えている物の名前（中・強の文言の {物}。読み取れなければ None）
+   "unit": str | None}    # 被除数に付く助数詞（{unit}。読み取れなければ None）
 """
 
 import time
@@ -45,8 +47,11 @@ OUTPUT_SCHEMA = {
             # null 許容の enum は anyOf で書く（type を配列にすると 400 になる）
             "unknown": {"anyOf": [{"type": "string", "enum": list(UNKNOWNS)}, {"type": "null"}]},
             "issue": {"anyOf": [{"type": "string", "enum": list(ISSUES)}, {"type": "null"}]},
+            # 中・強の文言に埋める {物}{unit}。判定の後ろに置く（判定に影響させない）
+            "item": {"type": "string"},
+            "unit": {"type": "string"},
         },
-        "required": ["reasoning", "valid", "structure", "unknown", "issue"],
+        "required": ["reasoning", "valid", "structure", "unknown", "issue", "item", "unit"],
         "additionalProperties": False,
     },
 }
@@ -132,6 +137,11 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
 - "no_question"：場面だけで、何を求めるかが書かれていない
 - "not_problem"：場面の記述自体がなく、文章題として成立しない（単語の羅列・意味不明・作問ではない文）
 
+## 物と単位（item / unit。判定とは別に、場面から読み取る）
+- item：被除数 {dividend} が数えている物の名前（「えんぴつ」「あめ」「リボン」「ジュース」「子ども」）。文中の表記のまま。
+- unit：被除数 {dividend} に付いている助数詞（「こ」「本」「まい」「人」「cm」「L」など）。文中の表記のまま。
+- 読み取れなければ空文字 ""。valid=false でも場面から読み取れれば書く。
+
 ## 判定の原則
 - 表記の不備には寛容に、論理と式の一致には厳格に。
 - 誤字・脱字・助詞の誤り・助数詞の不一致・ひらがな表記・句読点の欠けは不問。文の意図が読めるなら成立性を否定しない。
@@ -146,7 +156,9 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
   "valid": true or false,
   "structure": "tobun" or "hougan" or "bai" or "invalid",
   "unknown": "one_unit" or "num_units" or "ratio" or "base" or "rate" or null,
-  "issue": null or "scene_contradiction" or "wrong_number" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem"
+  "issue": null or "scene_contradiction" or "wrong_number" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem",
+  "item": "被除数が数えている物の名前（読み取れなければ \"\"）",
+  "unit": "被除数に付く助数詞（読み取れなければ \"\"）"
 }"""
 
 
@@ -173,15 +185,22 @@ def normalize(result: dict) -> dict:
     structure = result.get("structure")
     unknown = result.get("unknown")
     issue = result.get("issue")
+    extra = {"item": _short(result.get("item")), "unit": _short(result.get("unit"))}
     if valid and structure in ALL_STRUCTURES:
         allowed = UNKNOWN_FOR_STRUCTURE[structure]
         if unknown not in allowed:
             unknown = allowed[0]
-        return {"valid": True, "structure": structure, "unknown": unknown, "issue": None}
+        return {"valid": True, "structure": structure, "unknown": unknown, "issue": None, **extra}
     issue = _LEGACY_ISSUE.get(issue, issue)
     if issue not in ISSUES:
         issue = "not_problem"
-    return {"valid": False, "structure": "invalid", "unknown": None, "issue": issue}
+    return {"valid": False, "structure": "invalid", "unknown": None, "issue": issue, **extra}
+
+
+def _short(v, limit: int = 12) -> str | None:
+    """item / unit の正規化：空・長すぎる（文言に埋められない）ものは None。"""
+    v = str(v or "").strip()
+    return v if v and len(v) <= limit else None
 
 
 def _parse_response(response) -> dict:
@@ -217,4 +236,4 @@ def judge(message: str, expression: str, user_id: str | None = None) -> dict:
     except llm_call.LLMUnavailable as e:
         print(f"[ai_judge] judge failed after {e.retry_count} retries: {e}")
         return {"valid": False, "structure": "invalid", "unknown": None, "issue": "error",
-                "error": str(e), "meta": llm_call.failed_meta(e, started)}
+                "item": None, "unit": None, "error": str(e), "meta": llm_call.failed_meta(e, started)}

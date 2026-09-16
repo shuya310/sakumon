@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     unknown             TEXT,
     issue               TEXT,
     is_new              INTEGER,
+    item                TEXT,       -- 判定が読み取った物の名前（中・強の文言の {物}）
+    unit                TEXT,       -- 判定が読み取った助数詞（{unit}）
 
     response_type       TEXT,
     prompt_strength     INTEGER,
@@ -154,7 +156,7 @@ _MIGRATIONS = {
     "sessions": (("declared", "TEXT"), ("declared_by", "TEXT"),
                  ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
                  ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
-    "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER")),
+    "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT")),
 }
 
 
@@ -288,6 +290,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              input_type: str, message: str | None, ai_message: str | None,
              valid: bool | None = None, structure: str | None = None, unknown: str | None = None,
              issue: str | None = None, is_new: bool | None = None,
+             item: str | None = None, unit: str | None = None,
              response_type: str | None = None, prompt_strength: int | None = None,
              declared_structure: str | None = None, declared_by: str | None = None,
              declaration_met: bool | None = None,
@@ -304,16 +307,16 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
             """INSERT INTO chat_logs
                (session_id, user_id, phase, expression, created_at,
                 input_type, message, ai_message,
-                valid, structure, unknown, issue, is_new,
+                valid, structure, unknown, issue, is_new, item, unit,
                 response_type, prompt_strength,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected,
                 produced_structures, stuck_count, miss_count, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
-             b(valid), structure, unknown, issue, b(is_new),
+             b(valid), structure, unknown, issue, b(is_new), item, unit,
              response_type, prompt_strength,
              declared_structure, declared_by, b(declaration_met),
              self_label, self_label_text, b(self_label_match),
@@ -388,13 +391,13 @@ def get_valid_problems(session_id: int) -> list[dict]:
     """成立した作問を時系列で返す（児童の「つくった お話」一覧用。表示番号＝この並びの 1 始まり）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT log_id, message, structure, unknown, is_new, phase FROM chat_logs
+            """SELECT log_id, message, structure, unknown, is_new, phase, item, unit FROM chat_logs
                WHERE session_id = ? AND valid = 1
                ORDER BY log_id""",
             (session_id,),
         ).fetchall()
     return [{"id": r[0], "text": r[1], "structure": r[2], "unknown": r[3],
-             "is_new": bool(r[4]), "phase": r[5]} for r in rows]
+             "is_new": bool(r[4]), "phase": r[5], "item": r[6], "unit": r[7]} for r in rows]
 
 
 def get_max_prompt_strength(session_id: int) -> int:
@@ -456,7 +459,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
 LOG_COLUMNS = [
     "log_id", "session_id", "user_id", "phase", "expression", "created_at",
     "input_type", "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
@@ -498,7 +501,7 @@ CSV_FIELDS = [
     "user_id", "session_id", "parity_group", "session_start", "session_end",
     "log_id", "created_at", "phase", "expression", "input_type",
     "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",

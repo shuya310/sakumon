@@ -46,8 +46,13 @@ CALLS = {"judge": 0, "classify": 0, "llm": 0, "declare": 0}
 
 
 def fake_judge(message, expression, user_id=None):
+    """モック：先頭の記号で判定。本文末尾の「@物/助数詞」で item / unit を返す（無ければ None）。"""
     CALLS["judge"] += 1
-    return dict(_JUDGE[message[0]])
+    jr = dict(_JUDGE[message[0]], item=None, unit=None)
+    if "@" in message:
+        item, _, unit = message.rsplit("@", 1)[1].partition("/")
+        jr["item"], jr["unit"] = item or None, unit or None
+    return jr
 
 
 def fake_classify(message, recent=None, expression=None, user_id=None):
@@ -146,7 +151,7 @@ with client:
     assert cols == [
         "log_id", "session_id", "user_id", "phase", "expression", "created_at",
         "input_type", "message", "ai_message",
-        "valid", "structure", "unknown", "issue", "is_new",
+        "valid", "structure", "unknown", "issue", "is_new", "item", "unit",
         "response_type", "prompt_strength",
         "declared_structure", "declared_by", "declaration_met",
         "self_label", "self_label_text", "self_label_match",
@@ -158,7 +163,7 @@ with client:
                      "declared", "declared_by", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 28列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 30列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
 
     # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
     ds = main.decide_strength
@@ -431,11 +436,13 @@ with client:
     print("OK 状態機械(3): ターン2で「いくつ分をきく」→ declared=hougan / child。作問なら通常処理、unknown は立てない")
 
     # (4) その次に等分除 → declaration_met=0, miss=1 → 中（目標の指定。3択は無い）
-    r = judge(sidS, "11", "T: えんぴつが24本あります。8人で分けます。1人分は何本ですか。")
+    r = judge(sidS, "11", "T: えんぴつが24本あります。8人で分けます。1人分は何本ですか。@えんぴつ/本")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 2, r
     assert r["declaration_met"] is False and r["miss_count"] == 1 and r["stuck_count"] == 3
     assert r["strength"] == 2 and r["strength_trigger"] == "miss", "stuck と miss が同時に増えても +1 は1回。trigger は miss"
-    assert r["message"] == d.target_message("hougan", "24 ÷ 8"), r["message"]
+    assert r["message"] == "えんぴつの お話は そのままで いいよ。8を「1人分の 数」に して みよう。", r["message"]
+    row = logs_of(sidS)[-1]
+    assert row["item"] == "えんぴつ" and row["unit"] == "本", "判定が読み取った物・助数詞をログに残す"
     assert r["dialog"] is None and "choices" not in r, "中：3択は出さない。入力欄は作問モードのまま"
     row = logs_of(sidS)[-1]
     assert row["declared_structure"] == "hougan" and row["declared_by"] == "child" and row["declaration_met"] is False
@@ -447,16 +454,15 @@ with client:
     print("OK 状態機械(4): 予告と違う構造 → declaration_met=0, miss=1 → 中（目標の指定。3択・/api/self_label は廃止）")
 
     # (5) 中の直後にまた予告と違う構造 → miss=2 → 強（場面固定の文言・ref_no は最新の表示番号）
-    r = judge(sidS, "11", "T: ジュース24Lを8人で")
+    r = judge(sidS, "11", "T: ジュース24Lを8人で@ジュース/L")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 3, r
     assert r["declaration_met"] is False and r["miss_count"] == 2 and r["stuck_count"] == 4
     assert r["strength"] == 3 and r["strength_trigger"] == "miss"
-    assert r["message"] == ("5ばんの お話は **そのままで いいよ**。\n"
-                            "おなじ ものを 8こずつ まとめて、**まとまりの 数**を 求める 問題に かえられるかな？"), r["message"]
+    assert r["message"] == "「ジュースが 24L あります。1人に 8Lずつ 分けます。」 この あとに、求める 文を 書いて みよう。", r["message"]
     assert r["dialog"] is None and r["declared"] == "hougan" and r["declared_by"] == "system"
     row = logs_of(sidS)[-1]
     assert row["declared_by"] == "system" and row["declaration_met"] is False
-    print("OK 状態機械(5): 中の直後にまた不一致 → miss=2 → 強（3-6 の文言、5ばん）")
+    print("OK 状態機械(5): 中の直後にまた不一致 → miss=2 → 強（場面文提示：いくつ分）")
 
     # 中・強の対話に答えず作問を送っても止まらない（対話は打ち切り、予告は立ったまま）
     r = judge(sidS, "11", "X: 途中で作問")
@@ -508,6 +514,8 @@ with client:
     r = judge(sidQ, "14", "H: ドーナツが24こあります。8こずつ箱に入れます。箱は何箱いりますか。")
     assert r["prompt_strength"] == 2 and r["strength"] == 2 and r["strength_trigger"] == "stuck"
     assert r["declared"] == "bai" and r["declared_by"] == "system", "未到達は bai"
+    assert r["message"] == ("6ばんの お話は そのままで いいよ。8を、もう 1人が もっている ものの 数に して みよう。"
+                            "24こと くらべると、どんな ことが 求められるかな？"), ("item が取れないときの中", r["message"])
     # 「わからない」→ 訂正せずターン2へ
     sidR = post("/api/login", user_id="16").json()["session_id"]
     judge(sidR, "16", "T: a"); judge(sidR, "16", "T: b")
@@ -552,19 +560,20 @@ with client:
     assert st1["stuck_count"] == 2 and st1["miss_count"] == 0 and st1["strength"] == 1
     print("OK 状態機械(8): taiwa / resend ではカウンタが動かない")
 
-    # 強の bai 文言と、中の tobun / bai 文言（数値の埋め込み）
-    assert d.strong_message("bai", "24 ÷ 8", 3) == ("3ばんの お話は **そのままで いいよ**。\n"
-        "8こを もとに すると、24こは その **何倍**かな。それを 求める 問題に かえられるかな？")
-    assert d.strong_message("tobun", "24 ÷ 8", 2) == ("2ばんの お話は **そのままで いいよ**。\n"
-        "おなじ ものを 8人で 分けて、**1人分の 大きさ**を 求める 問題に かえられるかな？")
-    assert d.target_message("tobun", "24 ÷ 6") == ("じゃあ 今度は「**1つ分の 大きさ**」を 求める 問題に して みよう。\n"
-        "24こを 6人で 同じ数ずつ 分けたら、1人分は いくつに なるかな。")
-    assert d.target_message("bai", "24 ÷ 8") == ("8を **1つの かたまり**と みると、24の 中に かたまりは いくつ あるかな。\n"
-        "それを「8の **何倍**」と いうよ。\n8を もとにして、「**何倍**」を 求める 問題に して みよう。")
+    # 中・強の3構造の文言（要件定義 4-5 を一字一句。{item}{unit}{dividend}{divisor} の埋め込み）
+    assert d.mid_message("tobun", "24 ÷ 8", 2, "あめ", "こ") == "あめの お話は そのままで いいよ。8を「何人で 分けるか」の 数に して みよう。"
+    assert d.mid_message("bai", "24 ÷ 8", 2, "えんぴつ", "本") == ("えんぴつは そのままで いいよ。8を、もう 1人が もっている えんぴつの 数に して みよう。"
+                                                                  "24本と くらべると、どんな ことが 求められるかな？")
+    assert d.mid_message("tobun", "24 ÷ 8", 4, None, None) == "4ばんの お話は そのままで いいよ。8を「何人で 分けるか」の 数に して みよう。"
+    assert d.strong_message("tobun", "24 ÷ 8", 2, "あめ", "こ") == "「あめが 24こ あります。8人で 同じ 数ずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
+    assert d.strong_message("bai", "24 ÷ 8", 2, "えんぴつ", "本", session_id=10) == (
+        "「たろうさんは えんぴつを 24本、お友だちは 8本 もって います。」 この あとに、「何倍」を つかって 求める 文を 書いて みよう。")
+    assert d.strong_message("bai", "24 ÷ 8", 2, "えんぴつ", "本", session_id=11).startswith("「はなこさんは"), "人物名はセッションごとに周期的"
+    assert d.strong_message("hougan", "24 ÷ 6", 2, None, None) == "「ものが 24こ あります。1人に 6こずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
     for text in [d.PRAISE_NEW, d.PRAISE_REPEAT, d.ROLE_ASK, d.ROLE_CORRECTION, d.ROLE_CORRECTION_FALLBACK,
                  d.ROLE_NEXT, d.DONE_MESSAGE,
-                 d.TALK_FALLBACK, d.TALK_FALLBACK_REWRITE, *d.FORM_MESSAGES.values(), *d.TARGET_MESSAGES.values(),
-                 *d.STRONG_MESSAGES.values(), *d.STRUCTURE_LABEL.values()]:
+                 d.TALK_FALLBACK, d.TALK_FALLBACK_REWRITE, *d.FORM_MESSAGES.values(), *d.MID_MESSAGES.values(),
+                 *d.MID_MESSAGES_NOITEM.values(), *d.STRONG_MESSAGES.values(), *d.STRUCTURE_LABEL.values()]:
         no_banned(text)
     assert d.violates_boundary("この種類のお話はいいね", "talk", "24 ÷ 8") == "banned_vocab:種類"
     assert d.violates_boundary("何をたずねているかな", "talk", "24 ÷ 8") == "banned_vocab:たずね"

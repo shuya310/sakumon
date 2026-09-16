@@ -79,26 +79,35 @@ def expected_divisor_role(structure: str | None, unknown: str | None) -> str | N
     return None
 
 
-# 中（強度2）— 目標の指定
-TARGET_MESSAGES = {
-    "tobun": "じゃあ 今度は「**1つ分の 大きさ**」を 求める 問題に して みよう。\n"
-             "{dividend}こを {divisor}人で 同じ数ずつ 分けたら、1人分は いくつに なるかな。",
-    "hougan": "じゃあ 今度は「**いくつ分**」を 求める 問題に して みよう。\n"
-              "{dividend}こを {divisor}こずつの まとまりに したら、まとまりは いくつ できるかな。",
-    "bai": "{divisor}を **1つの かたまり**と みると、{dividend}の 中に かたまりは いくつ あるかな。\n"
-           "それを「{divisor}の **何倍**」と いうよ。\n"
-           "{divisor}を もとにして、「**何倍**」を 求める 問題に して みよう。",
+# 中（強度2）— 役割指定＋題材固定（要件定義 4-5 の「強度2」を一字一句）。
+# {item} は直前の成立作問の物の名前、{unit} はその助数詞（ai_judge の item / unit）。
+# {item} が取れないときは文頭の「{item}の お話は／{item}は」を「{ref_no}ばんの お話は」に置き換える（MID_MESSAGES_NOITEM）。
+MID_MESSAGES = {
+    "tobun": "{item}の お話は そのままで いいよ。{divisor}を「何人で 分けるか」の 数に して みよう。",
+    "hougan": "{item}の お話は そのままで いいよ。{divisor}を「1人分の 数」に して みよう。",
+    "bai": "{item}は そのままで いいよ。{divisor}を、もう 1人が もっている {item}の 数に して みよう。"
+           "{dividend}{unit}と くらべると、どんな ことが 求められるかな？",
+}
+MID_MESSAGES_NOITEM = {
+    "tobun": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を「何人で 分けるか」の 数に して みよう。",
+    "hougan": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を「1人分の 数」に して みよう。",
+    "bai": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を、もう 1人が もっている {item}の 数に して みよう。"
+           "{dividend}{unit}と くらべると、どんな ことが 求められるかな？",
 }
 
-# 3-6 強（強度3）— 目標の指定＋場面の固定。「お話は そのままで いいよ」は文頭
+# 強（強度3）— 場面文提示（要件定義 4-5 の「強度3」を一字一句）。
+# 倍の人物名は学級の実在児童との重複を避けるため固定名にしない：{friend_name} は FRIEND_NAMES から
+# セッションごとに周期的に選び、{friend_name_alt} は「お友だち」で統一する。
 STRONG_MESSAGES = {
-    "tobun": "{ref_no}ばんの お話は **そのままで いいよ**。\n"
-             "おなじ ものを {divisor}人で 分けて、**1人分の 大きさ**を 求める 問題に かえられるかな？",
-    "hougan": "{ref_no}ばんの お話は **そのままで いいよ**。\n"
-              "おなじ ものを {divisor}こずつ まとめて、**まとまりの 数**を 求める 問題に かえられるかな？",
-    "bai": "{ref_no}ばんの お話は **そのままで いいよ**。\n"
-           "{divisor}こを もとに すると、{dividend}こは その **何倍**かな。それを 求める 問題に かえられるかな？",
+    "tobun": "「{item}が {dividend}{unit} あります。{divisor}人で 同じ 数ずつ 分けます。」 この あとに、求める 文を 書いて みよう。",
+    "hougan": "「{item}が {dividend}{unit} あります。1人に {divisor}{unit}ずつ 分けます。」 この あとに、求める 文を 書いて みよう。",
+    "bai": "「{friend_name}さんは {item}を {dividend}{unit}、{friend_name_alt}は {divisor}{unit} もって います。」"
+           " この あとに、「何倍」を つかって 求める 文を 書いて みよう。",
 }
+FRIEND_NAMES = ("たろう", "はなこ")
+FRIEND_NAME_ALT = "お友だち"
+ITEM_FALLBACK = "もの"      # {item} が取れないとき（文頭以外の穴）
+UNIT_FALLBACK = "こ"        # {unit} が取れないとき
 
 # 3-7 完了
 DONE_MESSAGE = "3つ とも できたね！\n1つ分の 大きさ、いくつ分、何倍——ぜんぶ ちがう ものを 求める 問題が そろったよ。"
@@ -140,14 +149,23 @@ def role_next_message(expression: str) -> str:
     return _fill(ROLE_NEXT, expression)
 
 
-def target_message(target: str, expression: str) -> str:
-    """中・ステップ3。"""
-    return _fill(TARGET_MESSAGES[target], expression)
+def mid_message(target: str, expression: str, ref_no: int, item: str | None, unit: str | None) -> str:
+    """中：役割指定＋題材固定。item が取れなければ文頭を「{ref_no}ばんの お話は」にする。"""
+    table = MID_MESSAGES if item else MID_MESSAGES_NOITEM
+    return _fill(table[target], expression, ref_no=ref_no, item=item or ITEM_FALLBACK, unit=unit or UNIT_FALLBACK)
 
 
-def strong_message(target: str, expression: str, ref_no: int) -> str:
-    """強。ref_no は児童の成立問題のうち最新の表示番号。"""
-    return _fill(STRONG_MESSAGES[target], expression, ref_no=ref_no)
+def friend_name(session_id: int | None) -> str:
+    """倍の場面文の人物名。セッションごとに周期的に選ぶ（固定名にしない）。"""
+    return FRIEND_NAMES[(session_id or 0) % len(FRIEND_NAMES)]
+
+
+def strong_message(target: str, expression: str, ref_no: int, item: str | None, unit: str | None,
+                   session_id: int | None = None) -> str:
+    """強：場面文提示。ref_no は児童の成立問題のうち最新の表示番号（文言には使わないがログ・整合のため受け取る）。"""
+    return _fill(STRONG_MESSAGES[target], expression, ref_no=ref_no,
+                 item=item or ITEM_FALLBACK, unit=unit or UNIT_FALLBACK,
+                 friend_name=friend_name(session_id), friend_name_alt=FRIEND_NAME_ALT)
 
 
 def pick_unreached_structure(history: list[str]) -> str | None:
@@ -483,8 +501,8 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              history: list[str], recent_turns: list[dict] | None,
              response_type: str, expression: str,
              prompt_strength: int | None = None, target: str | None = None,
-             ref_no: int | None = None, quoted: str | None = None,
-             user_id: str | None = None) -> dict:
+             ref_no: int | None = None, item: str | None = None, unit: str | None = None,
+             session_id: int | None = None, user_id: str | None = None) -> dict:
     """児童向けの文言を組み立てる。
 
     戻り値: {"message", "state"}（LLM を呼んだ talk では "meta" も付く：retry_count / status）
@@ -504,9 +522,11 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
         if prompt_strength == 1:
             return {"message": weak_message(ref_no or 1, expression), "state": "prompt_weak"}
         if prompt_strength == 2 and target:
-            return {"message": target_message(target, expression), "state": f"prompt_mid_{target}"}
+            return {"message": mid_message(target, expression, ref_no or 1, item, unit),
+                    "state": f"prompt_mid_{target}" + ("" if item else "_noitem")}
         if prompt_strength == 3 and target:
-            return {"message": strong_message(target, expression, ref_no or 1), "state": f"prompt_strong_{target}"}
+            return {"message": strong_message(target, expression, ref_no or 1, item, unit, session_id=session_id),
+                    "state": f"prompt_strong_{target}" + ("" if item else "_noitem")}
         return {"message": FALLBACK_MESSAGE, "state": "prompt_invalid"}
     if response_type == "talk":
         return _llm_message(child_message, input_kind, judge_result, history, recent_turns,

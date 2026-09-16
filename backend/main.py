@@ -640,7 +640,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         dlg = ai_dialogue.dialogue(
             message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
             produced, ctx["recent"], response_type, expression,
-            prompt_strength=strength, target=declared, ref_no=ref_no, user_id=user_id,
+            prompt_strength=strength, target=declared, ref_no=ref_no,
+            item=jr.get("item"), unit=jr.get("unit"), session_id=req.session_id, user_id=user_id,
         )
         ai_message = dlg["message"]
 
@@ -652,6 +653,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
         input_type="sakumon", message=message, ai_message=ai_message,
         valid=valid, structure=structure, unknown=unknown, issue=issue, is_new=is_new,
+        item=jr.get("item"), unit=jr.get("unit"),
         response_type=response_type, prompt_strength=strength,
         declared_structure=declared_used, declared_by=declared_by_used, declaration_met=met,
         produced_structures=produced_after, stuck_count=stuck, miss_count=miss,

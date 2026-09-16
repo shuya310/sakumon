@@ -526,23 +526,42 @@ def _handle_resend(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> 
     return result
 
 
+def _talk_context(session: dict, expression: str) -> dict:
+    """taiwa の LLM に渡す状況：現在の強度・目標・成立作問の一覧（本文と、わる数が指していたもの）。
+    わる数の役割は ai_judge の判定（structure / unknown）から引く（ai_dialogue.divisor_role_label）。"""
+    _dividend, divisor = config.parse_expression(expression)
+    problems = database.get_valid_problems(session["session_id"])
+    listed = [{"text": p["text"], "divisor_role": ai_dialogue.divisor_role_label(p["structure"], p["unknown"], divisor)}
+              for p in problems]
+    last = None
+    if problems:
+        p = problems[-1]
+        last = {"text": p["text"], "structure": p["structure"], "unknown": p["unknown"],
+                "divisor_role": listed[-1]["divisor_role"], "item": p["item"], "unit": p["unit"]}
+    return {"strength": session["strength"], "target": session["declared"], "problems": listed, "last_problem": last}
+
+
 def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
-    """対話経路：judge は通さない。フェーズ1・3は「おくったよ」。カウンタは動かさない。"""
+    """対話経路：judge は通さない。フェーズ1・3は「おくったよ」。カウンタは動かさない。
+    フェーズ2では現在の強度・目標・到達構造・成立作問を LLM に渡す（話してよいことは強度で決まる）。"""
     phase, produced, counts = ctx["phase"], ctx["produced"], ctx["counts"]
+    session = ctx["session"]
     show = phase == 2
 
     ai_message = None
     if show:
         dlg = ai_dialogue.dialogue(message, "taiwa", None, produced, ctx["recent"], "talk",
-                                   ctx["expression"], user_id=user_id)
+                                   ctx["expression"], user_id=user_id,
+                                   context=_talk_context(session, ctx["expression"]))
         ai_message = dlg["message"]
 
+    strength = session["strength"] if show else None
     result = _base_result(ai_message, "talk" if show else None, "taiwa")
-    result["prompt_strength"] = 0 if show else None
+    result["prompt_strength"] = strength
     database.save_log(
         session_id=req.session_id, user_id=user_id, phase=phase, expression=ctx["expression"],
         input_type="taiwa", message=message, ai_message=ai_message,
-        response_type="talk" if show else None, prompt_strength=0 if show else None,
+        response_type="talk" if show else None, prompt_strength=strength,
         produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
         latency_ms=_latency(ctx),
     )

@@ -51,6 +51,7 @@ FORM_MESSAGES = {
 _FORM_ALIAS = {
     "wrong_operation": "wrong_number",   # しきが ちがう
     "incomplete_text": "no_question",    # 求める文まで書けていない
+    "reversed": "wrong_number",          # 比較の向きが逆（ログでは区別。児童向け文言は暫定で wrong_number と同じ）
 }
 
 # 3-3 なし（強度0）
@@ -314,8 +315,10 @@ OUTPUT_SCHEMA = {
             "check": {"type": "string"},
             "message": {"type": "string"},
             "state": {"type": "string"},
+            # 支援要求か（フェーズE）。文言と同じ1回の呼び出しで分類させる
+            "is_help_request": {"type": "boolean"},
         },
-        "required": ["check", "message", "state"],
+        "required": ["check", "message", "state", "is_help_request"],
         "additionalProperties": False,
     },
 }
@@ -373,11 +376,21 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 # 文字づかい
 {KANJI_RULE}
 
+# 支援要求の判定（is_help_request）
+子どもの発話が「支援要求」かどうかも判定する。
+- true：作問を進めるための助けを求めている発話。「ヒント」「わからない」「思いつかない」「どうすればいい」
+  「なにを書けばいい」「むずかしい、できない」「答え教えて」など（困りの表明も含む）。
+- false：雑談・感想・あいさつ（「あーなるほど」「やった」「こんにちは」）、
+  自分の考えの確認や疑問への応答依頼（「これって足し算？」「これでいいの？」「8ってなんの数？」）、
+  作問とは関係ない話。
+判定は発話そのものから行い、声かけの内容には影響させない。
+
 # 出力（JSONのみ。JSON以外の文字は出力しない）
 {
   "check": "これから書く声かけが「話してよいこと」の範囲を超えていないかの自己確認（1文・ログ用）",
   "message": "子どもへの声かけ（1〜2文）",
-  "state": "読み取った子どもの状態（ログ用・短く）"
+  "state": "読み取った子どもの状態（ログ用・短く）",
+  "is_help_request": true or false
 }"""
 
 # 強度ごとの「話してよいこと」。強度0・1は問い返しのみ、2は役割の指定＋題材固定、3は場面文まで
@@ -604,10 +617,12 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
             print(f"[ai_dialogue] boundary violation ({response_type}, strength={strength}, {reason}): {message}")
             continue  # リトライ（2回目も違反なら定型文へ）
         return {"message": message, "state": result.get("state") or response_type,
+                "is_help_request": bool(result.get("is_help_request")),
                 "meta": {"retry_count": retry_total, "status": "retried_ok" if retry_total else "ok"}}
 
+    # LLM が応答しなかった（分類もできていない）→ is_help_request は None（未判定）
     return {"message": _fallback(expression, has_problem=bool(history)),
-            "state": f"{response_type}_fallback",
+            "state": f"{response_type}_fallback", "is_help_request": None,
             "meta": {"retry_count": retry_total, "status": "failed"}}
 
 
@@ -622,7 +637,7 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              context: dict | None = None) -> dict:
     """児童向けの文言を組み立てる。
 
-    戻り値: {"message", "state"}（LLM を呼んだ talk では "meta" も付く：retry_count / status）
+    戻り値: {"message", "state"}（LLM を呼んだ talk では "is_help_request" と "meta"（retry_count / status）も付く）
     """
     jr = judge_result or {}
     if response_type == "done":

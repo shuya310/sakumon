@@ -13,12 +13,13 @@ API 呼び出し（タイムアウト・リトライ・同時実行制御・計�
   {"valid": bool,
    "structure": "tobun" | "hougan" | "bai" | "invalid",
    "unknown": "one_unit" | "num_units" | "ratio" | "base" | "rate" | None,
-   "issue": None | "scene_contradiction" | "wrong_number" | "incomplete_text"
+   "issue": None | "scene_contradiction" | "wrong_number" | "reversed" | "incomplete_text"
             | "wrong_operation" | "no_question" | "not_problem",
    "item": str | None,    # 被除数が数えている物の名前（中・強の文言の {物}。読み取れなければ None）
    "unit": str | None}    # 被除数に付く助数詞（{unit}。読み取れなければ None）
 """
 
+import re
 import time
 
 from config import MODEL, parse_expression
@@ -27,7 +28,7 @@ import llm_call
 
 ALL_STRUCTURES = ("tobun", "hougan", "bai")
 UNKNOWNS = ("one_unit", "num_units", "ratio", "base", "rate")
-ISSUES = ("scene_contradiction", "wrong_number", "incomplete_text",
+ISSUES = ("scene_contradiction", "wrong_number", "reversed", "incomplete_text",
           "wrong_operation", "no_question", "not_problem")
 
 # structured outputs（output_config.format）のスキーマ。
@@ -63,8 +64,9 @@ UNKNOWN_FOR_STRUCTURE = {
     "bai": ("ratio", "base", "rate"),
 }
 
-# 旧コードの不成立コードを新コードへ写す（"reversed" は廃止。逆立式は wrong_number）
-_LEGACY_ISSUE = {"reversed": "wrong_number", "error": "error"}
+# 旧コードの不成立コードを新コードへ写す。"reversed"（比較の向きが逆）は 9/16 に復活：
+# wrong_number（使う数がちがう）と区別してログに残す。児童向け文言は ai_dialogue の _FORM_ALIAS で決める
+_LEGACY_ISSUE = {"error": "error"}
 
 SYSTEM_PROMPT = """あなたは小学4年生の算数文章題を分析する判定器です。
 児童が入力した文章題について、式 {expression} で解ける文章題として成立しているか、
@@ -106,8 +108,8 @@ JSON以外の文字は一切出力しないでください。
 - 倍率を問う文「AはBの何倍ですか」では、A（〜は）が比較量、B（〜の）が基準量で、式は A÷B。
   A÷B が {expression} になるときだけ成立。A={divisor}, B={dividend} の向き
   （例「青いリボンは{divisor}cm、赤いリボンは{dividend}cmです。青いリボンは赤いリボンの何倍ですか」＝{divisor}÷{dividend}）は
-  逆立式なので valid=false, issue="wrong_number"。数値が両方そろっていても、向きが逆なら成立にしない。
-- 短い逆立式（「{divisor}こは{dividend}この何倍ですか」）も同じく wrong_number。
+  比較の向きが逆なので valid=false, issue="reversed"。数値が両方そろっていても、向きが逆なら成立にしない。
+- 短い逆立式（「{divisor}こは{dividend}この何倍ですか」）も同じく reversed。
 
 ### 第3層：求める量（unknown）と整合チェック
 unknown を次の5つから選ぶ。
@@ -131,11 +133,16 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
   要素は揃っていて文章としては読めるが、場面と問いがかみ合っていない状態。
   「意味が読めない・要素が欠けている」（not_problem）とは別物として扱う。
 - "wrong_number"：文章題としては成立するが、式が {expression} にならない
-  （使う数値がちがう、逆立式 {divisor}÷{dividend} になる、答えが {quotient} にならない）
+  （使う数値がちがう、答えが {quotient} にならない）
+- "reversed"：数値は {dividend} と {divisor} の両方を使っているが、比較の向きが逆で {divisor}÷{dividend} になる
+  （「AはBの何倍」で A={divisor}, B={dividend}）。使う数がちがう wrong_number とは区別する
 - "wrong_operation"：わり算では解けない（かけ算・たし算・ひき算の問題になっている）
 - "incomplete_text"：文が途中で切れていて、求める量を特定できない
 - "no_question"：場面だけで、何を求めるかが書かれていない
-- "not_problem"：場面の記述自体がなく、文章題として成立しない（単語の羅列・意味不明・作問ではない文）
+- "not_problem"：場面の記述自体がなく、文章題として成立しない（単語の羅列・意味不明・作問ではない文）。
+  ★「〜があります」「〜います」のように物と数量を述べる文が1つでもあれば not_problem にしない
+  （問いが無ければ no_question、途中で切れていれば incomplete_text、式が合わなければ wrong_number）。
+- ★valid=false のとき issue を null にしない。必ず上のどれか1つを入れる。
 
 ## 物と単位（item / unit。判定とは別に、場面から読み取る）
 - item：被除数 {dividend} が数えている物の名前（「えんぴつ」「あめ」「リボン」「ジュース」「子ども」）。文中の表記のまま。
@@ -156,7 +163,7 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
   "valid": true or false,
   "structure": "tobun" or "hougan" or "bai" or "invalid",
   "unknown": "one_unit" or "num_units" or "ratio" or "base" or "rate" or null,
-  "issue": null or "scene_contradiction" or "wrong_number" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem",
+  "issue": null or "scene_contradiction" or "wrong_number" or "reversed" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem",
   "item": "被除数が数えている物の名前（読み取れなければ \"\"）",
   "unit": "被除数に付く助数詞（読み取れなければ \"\"）"
 }"""
@@ -179,8 +186,12 @@ def _text_from(response) -> str:
     raise ValueError("no text block in response")
 
 
-def normalize(result: dict) -> dict:
-    """LLMの生JSONを仕様の形に正規化する（structure と unknown の整合をコード側で強制）。"""
+def normalize(result: dict, message: str = "") -> dict:
+    """LLMの生JSONを仕様の形に正規化する（structure と unknown の整合をコード側で強制）。
+
+    valid=false なのに issue が無い／未知（または valid=true なのに structure が invalid）のときは、
+    以前は一律 not_problem（「まだ お話に なって いない」）にしていたが、「〜があります」から書けている
+    入力にもその文言が出てしまうため、本文から最も近い理由に寄せる（_fallback_issue）。"""
     valid = bool(result.get("valid"))
     structure = result.get("structure")
     unknown = result.get("unknown")
@@ -193,8 +204,27 @@ def normalize(result: dict) -> dict:
         return {"valid": True, "structure": structure, "unknown": unknown, "issue": None, **extra}
     issue = _LEGACY_ISSUE.get(issue, issue)
     if issue not in ISSUES:
-        issue = "not_problem"
+        fallback = _fallback_issue(message)
+        print(f"[ai_judge] issue missing (valid={result.get('valid')!r}, structure={structure!r}, "
+              f"issue={issue!r}) → {fallback}: {message[:40]!r}")
+        issue = fallback
     return {"valid": False, "structure": "invalid", "unknown": None, "issue": issue, **extra}
+
+
+_QUESTION_MARK = re.compile(r"(ですか|でしょう|なさい|かな|か[。？?]?$|？|\?)")
+_SCENE = re.compile(r"(あります|います|もっています|ありました|いました|ずつ|人で|人に|に分け|にくば|わけ)")
+
+
+def _fallback_issue(message: str) -> str:
+    """判定が理由を返さなかったときの保険。本文の形から最も近い理由を選ぶ（not_problem は場面の文が無いときだけ）。"""
+    text = (message or "").strip()
+    has_number = re.search(r"[0-9０-９〇一二三四五六七八九十百]", text) is not None
+    has_scene = _SCENE.search(text) is not None
+    if not text or not (has_number or has_scene):
+        return "not_problem"
+    if not _QUESTION_MARK.search(text):
+        return "no_question"
+    return "wrong_number"
 
 
 def _short(v, limit: int = 12) -> str | None:
@@ -203,11 +233,11 @@ def _short(v, limit: int = 12) -> str | None:
     return v if v and len(v) <= limit else None
 
 
-def _parse_response(response) -> dict:
+def _parse_response(response, message: str = "") -> dict:
     """応答を検査して正規化済みの判定にする。ValueError は llm_call が再試行する。"""
     if response.stop_reason == "max_tokens":
         raise ValueError("response truncated (max_tokens)")
-    return normalize(extract_json(_text_from(response)))
+    return normalize(extract_json(_text_from(response)), message)
 
 
 def judge(message: str, expression: str, user_id: str | None = None) -> dict:
@@ -224,7 +254,7 @@ def judge(message: str, expression: str, user_id: str | None = None) -> dict:
     started = time.perf_counter()
     try:
         result, meta = llm_call.call(
-            user_id, _parse_response,
+            user_id, lambda response: _parse_response(response, message),
             model=MODEL,
             max_tokens=512,
             thinking={"type": "disabled"},  # sonnet-5 は既定でonのため明示off

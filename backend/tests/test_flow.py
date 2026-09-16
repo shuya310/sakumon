@@ -60,9 +60,14 @@ def fake_classify(message, recent=None, expression=None, user_id=None):
     return "sakumon" if len(message) > 1 and message[1] == ":" and message[0] in _JUDGE else "taiwa"
 
 
+LAST_TALK = {}
+
+
 def fake_llm(child_message, input_kind, judge_result, history, recent_turns, response_type, expression,
-             user_id=None):
+             user_id=None, context=None):
     CALLS["llm"] += 1
+    LAST_TALK.clear()
+    LAST_TALK.update(history=list(history), context=context, expression=expression)
     return {"message": f"[{response_type}] llm", "state": response_type}
 
 
@@ -453,6 +458,32 @@ with client:
     assert client.post("/api/self_label", json={"session_id": sidS, "user_id": "11", "choice": "bai"}).status_code == 404, "/api/self_label は廃止"
     print("OK 状態機械(4): 予告と違う構造 → declaration_met=0, miss=1 → 中（目標の指定。3択・/api/self_label は廃止）")
 
+    # ---- taiwa に渡す状況（フェーズD）：強度・目標・到達構造名・成立作問の一覧と直前の問題（本文＋わる数の役割＋物） ----
+    r = judge(sidS, "11", "8ってなんの数？")
+    assert r["input_type"] == "taiwa" and r["response_type"] == "talk" and r["prompt_strength"] == 2
+    c = LAST_TALK["context"]
+    assert LAST_TALK["history"] == ["tobun"], "到達構造は構造名で渡す"
+    assert c["strength"] == 2 and c["target"] == "hougan", c
+    assert c["last_problem"]["text"] == "T: えんぴつが24本あります。8人で分けます。1人分は何本ですか。@えんぴつ/本"
+    assert c["last_problem"]["structure"] == "tobun" and c["last_problem"]["divisor_role"] == "分ける相手の数（人数など）"
+    assert c["last_problem"]["item"] == "えんぴつ" and c["last_problem"]["unit"] == "本"
+    assert len(c["problems"]) == 4 and all(p["divisor_role"] == "分ける相手の数（人数など）" for p in c["problems"])
+    assert logs_of(sidS)[-1]["prompt_strength"] == 2 and logs_of(sidS)[-1]["input_type"] == "taiwa"
+    assert database.get_session(sidS)["stuck_count"] == 3 and database.get_session(sidS)["miss_count"] == 1, "taiwa でカウンタ不動"
+    # システムプロンプト：強度2では役割の指示・3語・題材固定が許可、場面文は不可。強度0・1では3語を出さない
+    sys2 = d._build_system("24 ÷ 8", ["tobun"], c)
+    assert "支援の強さ: 2" in sys2 and "『1人分の 数』に して みよう" in sys2 and "場面文（お話の文そのもの）は渡さない" in sys2
+    assert "えんぴつの お話は そのままで いいよ" in sys2 and "8 が表しているもの: 分ける相手の数" in sys2 and "答え（数値 3）" in sys2
+    sys0 = d._build_system("24 ÷ 8", [], {"strength": 0})
+    assert "先生から答え（役割）を言わない" in sys0 and "「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない" in sys0
+    sys3 = d._build_system("24 ÷ 8", ["tobun"], {**c, "strength": 3})
+    assert "場面文を渡してよい" in sys3 and "えんぴつが 24本 あります" in sys3
+    for text in (sys0, sys2, sys3):
+        assert "数量関係（だれが何をどう分けるか" not in text, "旧の全面禁止は撤廃"
+        assert "「同じ」「ちがう」という主張が判定と食い違っていたら、共感のために肯定しない" in text
+        assert "内容を確かめずに褒めない" in text
+    print("OK taiwa の状況: 強度・目標・到達構造名・成立作問（本文＋役割＋物）を渡し、話してよいことは強度で切り替わる")
+
     # (5) 中の直後にまた予告と違う構造 → miss=2 → 強（場面固定の文言・ref_no は最新の表示番号）
     r = judge(sidS, "11", "T: ジュース24Lを8人で@ジュース/L")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 3, r
@@ -577,6 +608,24 @@ with client:
         no_banned(text)
     assert d.violates_boundary("この種類のお話はいいね", "talk", "24 ÷ 8") == "banned_vocab:種類"
     assert d.violates_boundary("何をたずねているかな", "talk", "24 ÷ 8") == "banned_vocab:たずね"
+    # 境界は強度依存：求める量の語・両方の数は強度0・1でだけ禁止。構造名・答え・語彙・休けいは全強度で禁止
+    m = "8を「1人分の 数」に して みよう。えんぴつの お話は そのままで いいよ。"
+    assert d.violates_boundary(m, "talk", "24 ÷ 8", strength=1) == "banned_unknown:1人分"
+    assert d.violates_boundary(m, "talk", "24 ÷ 8", strength=2) is None
+    assert d.violates_boundary("24こを 8こずつ 分けたら？", "talk", "24 ÷ 8", strength=0) == "both_numbers"
+    assert d.violates_boundary("24こを 8こずつ 分けたら？", "talk", "24 ÷ 8", strength=3) is None
+    for st in (0, 2, 3):
+        assert d.violates_boundary("これは等分除だね", "talk", "24 ÷ 8", strength=st) == "banned:等分除"
+        assert d.violates_boundary("答えは 3こ だよ", "talk", "24 ÷ 8", strength=st) == "quotient"
+        assert d.violates_boundary("3になるね", "talk", "24 ÷ 8", strength=st) == "quotient"
+        assert d.violates_boundary("休けいしよう", "talk", "24 ÷ 8", strength=st) == "banned_talk:休"
+    assert d.violates_boundary("3ばんの お話の 8は 何かな？", "talk", "24 ÷ 8", strength=0) is None, "番号の 3 は答えではない"
+    assert d.violates_boundary("3つ とも 作れそうだね", "talk", "24 ÷ 8", strength=0) is None
+    scene = "「えんぴつが 24本 あります。1人に 8本ずつ 分けます。」 この あとに、求める 文を 書いて みよう。何倍 も いいね。えんぴつは そのままで いいよ。"
+    assert d.violates_boundary(scene, "talk", "24 ÷ 8", strength=3) is None, "強度3は場面文の長さを許容"
+    assert d.violates_boundary(scene * 3, "talk", "24 ÷ 8", strength=3) == "too_long"
+    assert d.violates_boundary(scene * 2, "talk", "24 ÷ 8", strength=2) == "too_long", "強度2は140字まで"
+    assert d.divisor_role_label("bai", "base", 8) == "倍率（8倍）" and d.divisor_role_label("invalid", None, 8) is None
     for label in d.STRUCTURE_LABEL.values():
         for text in (d.ROLE_ASK, d.ROLE_CORRECTION, d.ROLE_CORRECTION_FALLBACK, d.ROLE_NEXT):
             assert label not in text, ("弱（役割の宣言）に構造ラベルを出さない", label)

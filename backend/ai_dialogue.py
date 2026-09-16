@@ -4,8 +4,8 @@
 
   form     不成立作問への形式の支援（issue に応じて1点だけ。定型）             3-2
   praise   新構造の称賛／同じ構造1回目（定型）                                   3-3
-  prompt   予告支援。1=弱（直前の問いの文を引用して予告を書かせる）2=中（引用＋3択の自己ラベル→目標の指定）
-           3=強（目標＋場面固定） 3-4〜3-6。引用文は extract_question（LLM）で直前の成立作問から取り出す
+  prompt   予告支援。1=弱（役割の宣言・2ターン：除数が何をあらわすかを言わせ→次の作問で何の数にするかを予告させる。
+           判定と食い違えば1回だけ児童の問題文の除数の句を引用して問い返す）2=中（目標の指定）3=強（目標＋場面固定）
   done     3つそろった（定型）                                                    3-7
   talk     作問以外の入力（LLM＋コード側ガード、失敗時は定型文）
   error    judge が API 不通（定型。3-2 の error）
@@ -56,17 +56,30 @@ _FORM_ALIAS = {
 PRAISE_NEW = "新しい 問題が できたね！\nほかにも、**求めるものが ちがう** 問題は 作れるかな？"
 PRAISE_REPEAT = "いいね、また 一つ できたね。\n今度は **求めるものが ちがう** 問題も 作れそうかな？"
 
-# 3-4 弱（強度1）。{quoted} は直前の成立作問の問いの文。構造のラベルは弱では出さない（中の自己ラベル測定を守るため）
-PROMPT_WEAK = ("今までの お話は、さいごに「{quoted}」と 書いて あったね。\n"
-               "ここが、この お話で 求めて いる ものだよ。\n"
-               "つぎの お話では、何を 求める？ みじかく 書いて みよう。")
-PROMPT_WEAK_FALLBACK = ("つぎの お話では、何を 求める？\n"
-                        "「1人分は いくつ？」「いくつ分？」のように、みじかく 書いて みよう。")
+# 弱（強度1）＝役割の宣言（2ターン）。構造のラベル（1つ分の 大きさ／いくつ分／何倍）は弱では出さない。
+#   ターン1：直前の成立作問の除数が何をあらわしているかを児童に言わせる（answer → ai_classify.classify_role）
+#   訂正   ：答えが判定の役割と食い違うとき1回だけ、児童自身の問題文の除数の句を引用して問い返す（正解の役割名は言わない）
+#   ターン2：次の作問で除数を何の数にするか（予告。→ classify_declaration）
+ROLE_ASK = "{ref_no}ばんの お話で、{divisor}は 何を あらわして いるかな？"
+ROLE_CORRECTION = ("本当に そうかな？ お話では『{phrase}』と 書いて あるよ。\n"
+                   "{divisor}は 何の 数に なって いるかな？")
+ROLE_CORRECTION_FALLBACK = ("本当に そうかな？ お話を もう一度 読んで みよう。\n"
+                            "{divisor}は 何の 数に なって いるかな？")
+ROLE_NEXT = "じゃあ 次は、{divisor}を 何の 数に して みたい？"
 
-# 3-5 中（強度2）— 引用＋3択（自己ラベル）。{n} は直前の成立作問の表示番号
-SELF_LABEL_PROMPT = ("{n}ばんの お話は、さいごに「{quoted}」と 求めて いたね。\n"
-                     "これは どれを 求めて いる 問題かな？")
-SELF_LABEL_PROMPT_FALLBACK = "{n}ばんの お話は、どれを 求めて いる 問題かな？"
+# 判定結果（structure / unknown）から見た、除数の実際の役割（classify_role の分類と同じ語彙）。
+# 倍で基準量を求める問題（unknown="base"）では除数は倍率なので、この3分類では役割を確定できない → None（訂正しない）
+def expected_divisor_role(structure: str | None, unknown: str | None) -> str | None:
+    if structure == "tobun":
+        return "people"
+    if structure == "hougan":
+        return "per_one"
+    if structure == "bai" and unknown in ("ratio", "rate"):
+        return "base"
+    return None
+
+
+# 中（強度2）— 目標の指定
 TARGET_MESSAGES = {
     "tobun": "じゃあ 今度は「**1つ分の 大きさ**」を 求める 問題に して みよう。\n"
              "{dividend}こを {divisor}人で 同じ数ずつ 分けたら、1人分は いくつに なるかな。",
@@ -110,18 +123,21 @@ def form_message(issue: str | None, expression: str) -> str:
     return _fill(FORM_MESSAGES.get(key, FORM_MESSAGES["not_problem"]), expression)
 
 
-def weak_message(quoted: str | None) -> str:
-    """弱。引用文が取れなければ定型の例で促す。"""
-    if quoted:
-        return PROMPT_WEAK.replace("{quoted}", quoted)
-    return PROMPT_WEAK_FALLBACK
+def weak_message(ref_no: int, expression: str) -> str:
+    """弱・ターン1：除数が何をあらわしているかを聞く。"""
+    return _fill(ROLE_ASK, expression, ref_no=ref_no)
 
 
-def self_label_message(n: int, quoted: str | None) -> str:
-    """中（引用＋3択）。"""
-    if quoted:
-        return SELF_LABEL_PROMPT.replace("{n}", str(n)).replace("{quoted}", quoted)
-    return SELF_LABEL_PROMPT_FALLBACK.replace("{n}", str(n))
+def role_correction_message(phrase: str | None, expression: str) -> str:
+    """弱・訂正（1回だけ）：児童の問題文の除数の句を引用して問い返す。句が取れなければ引用なしの定型文。"""
+    if phrase:
+        return _fill(ROLE_CORRECTION, expression, phrase=phrase)
+    return _fill(ROLE_CORRECTION_FALLBACK, expression)
+
+
+def role_next_message(expression: str) -> str:
+    """弱・ターン2：次の作問で除数を何の数にするか（予告）。"""
+    return _fill(ROLE_NEXT, expression)
 
 
 def target_message(target: str, expression: str) -> str:
@@ -207,6 +223,66 @@ def extract_question(problem_text: str, user_id: str | None = None) -> str | Non
     if not q or len(q) > 60 or _squash(q) not in _squash(problem_text):
         return None
     return q
+
+
+# ===== 除数の句の抽出（弱の訂正の引用用。LLM → 取れなければ除数を含む文） =====
+
+_PHRASE_SCHEMA = {
+    "type": "json_schema",
+    "schema": {
+        "type": "object",
+        "properties": {"phrase": {"type": "string"}},
+        "required": ["phrase"],
+        "additionalProperties": False,
+    },
+}
+
+_PHRASE_PROMPT = """児童（小学4年生）が作った わり算の文章題から、数 {divisor} が出てくる部分（{divisor} を含む短い句）だけを取り出します。
+
+- 取り出すのは、{divisor} とその直後の言葉（助数詞・動詞）を含む短い句。例：「8人で 分けます」「8こずつ くばります」「8本の 何倍」
+- 文中の数や言葉はそのまま使う。言い換えない・足さない・省かない（元の文に無い言葉を入れない）。
+- 出力は文節ごとに半角スペースで区切る（わかち書き）。
+- 末尾の句点「。」は付けない。
+- 文字づかい：{KANJI_RULE}
+- {divisor} が文中に無いときは phrase を空文字 "" にする。
+
+JSON のみを返す：{"phrase": "..."}"""
+
+
+def _sentence_with_number(problem_text: str, n: int) -> str | None:
+    """LLM に頼らない予備：除数を含む文（。で区切る）。長すぎる（40字超）なら使わない。"""
+    for sent in re.split(r"[。\n]", problem_text or ""):
+        if re.search(rf"(?<![0-9]){n}(?![0-9])", sent):
+            q = format_quote(sent)
+            return q if q and len(q) <= 40 else None
+    return None
+
+
+def extract_divisor_phrase(problem_text: str, divisor: int, user_id: str | None = None) -> str | None:
+    """成立した作問から、除数を含む短い句を取り出す。LLM の出力は元の文にあるもの（空白を除いて部分一致）だけ採用。
+    取れなければ除数を含む文を丸ごと（短ければ）。それも無理なら None。"""
+    def parse(response) -> str:
+        if response.stop_reason == "max_tokens":
+            raise ValueError("response truncated (max_tokens)")
+        return str(extract_json(_text_from(response)).get("phrase") or "")
+
+    try:
+        raw, _meta = llm_call.call(
+            user_id, parse,
+            model=MODEL,
+            max_tokens=200,
+            thinking={"type": "disabled"},
+            system=_PHRASE_PROMPT.replace("{KANJI_RULE}", KANJI_RULE).replace("{divisor}", str(divisor)),
+            output_config={"format": _PHRASE_SCHEMA},
+            messages=[{"role": "user", "content": f"文章題: {problem_text}"}],
+        )
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_dialogue] extract_divisor_phrase failed after {e.retry_count} retries: {e}")
+        raw = ""
+    q = format_quote(raw)
+    if q and len(q) <= 30 and re.search(rf"(?<![0-9]){divisor}(?![0-9])", q) and _squash(q) in _squash(problem_text):
+        return q
+    return _sentence_with_number(problem_text, divisor)
 
 
 # ===== LLM（talk のみ） =====
@@ -426,10 +502,9 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
         return {"message": PRAISE_REPEAT, "state": "praise_repeat"}
     if response_type == "prompt":
         if prompt_strength == 1:
-            return {"message": weak_message(quoted), "state": "prompt_weak" + ("" if quoted else "_noquote")}
-        if prompt_strength == 2:
-            return {"message": self_label_message(ref_no or 1, quoted),
-                    "state": "prompt_mid" + ("" if quoted else "_noquote")}
+            return {"message": weak_message(ref_no or 1, expression), "state": "prompt_weak"}
+        if prompt_strength == 2 and target:
+            return {"message": target_message(target, expression), "state": f"prompt_mid_{target}"}
         if prompt_strength == 3 and target:
             return {"message": strong_message(target, expression, ref_no or 1), "state": f"prompt_strong_{target}"}
         return {"message": FALLBACK_MESSAGE, "state": "prompt_invalid"}

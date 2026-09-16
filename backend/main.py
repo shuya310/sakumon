@@ -11,11 +11,14 @@
   stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）、
   help（taiwa が支援要求に分類された回数）、strength（現在の強度 0〜3。decide_strength で遷移）。
   不成立・再送ではカウンタを動かさない。新構造到達で3カウンタと強度を全て 0 に戻す。
-- 弱（強度1）の予告は、児童の画面では作問と同じ入力欄から送る（入力欄は1つ）。予告待ちの状態で届いた
-  入力は、classify が作問なら通常の作問処理、そうでなければ予告として分類する（/api/judge の declaring）。
-- 中（強度2）は引用＋3択の自己ラベル（/api/self_label）。児童が答えずに作問を送ってきたら
-  対話は打ち切り、通常の作問処理に進む（予告は立ったまま）。自己ラベルが判定と違っても訂正しない。
-- 弱・中の引用文（直前の成立作問の問いの文）は ai_dialogue.extract_question（LLM）。取れなければ定型文。
+- 弱（強度1）は「役割の宣言」2ターン。ターン1「{n}ばんの お話で、{divisor}は 何を あらわして いるかな？」
+  → 答えを classify_role で分類（role_answer）。判定の役割（expected_divisor_role）と食い違えば1回だけ、
+  児童の問題文の除数の句を引用して問い返す（role_corrected。2回目以降は正誤にかかわらず進む）。
+  ターン2「じゃあ 次は、{divisor}を 何の 数に して みたい？」→ classify_declaration で予告（declared_by=child）。
+  どちらも児童の画面では作問と同じ入力欄から送る（入力欄は1つ）。対話待ちの状態で届いた入力は、
+  classify が作問なら通常の作問処理（対話は打ち切り・ブロックしない）、そうでなければ待っているターンの答え
+  として扱う（/api/judge の declaring。どのターンを待っているかはサーバが直前のログ行から決める）。
+- 中（強度2）・強（強度3）はシステムが未到達構造を目標に立てて文言で伝える（3択の自己ラベルは廃止）。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
 - judge が API 不通：response_type='error'・issue='error'。児童には「もう一度 おくって みてね」（3-2）。
   一覧には載せない。同じ本文を送り直したら判定し直す（すでに判定済みの本文の再送だけ input_type='resend' で
@@ -142,12 +145,6 @@ class DeclareRequest(BaseModel):
     text: str
 
 
-class SelfLabelRequest(BaseModel):
-    session_id: int
-    user_id: str
-    choice: str                  # tobun / hougan / bai
-
-
 class PhaseRequest(BaseModel):
     phase: int
 
@@ -199,15 +196,18 @@ def _owned_session(session_id: int, user_id: str) -> dict:
 
 
 def _pending_dialog(last: dict | None) -> str | None:
-    """再入場時に、途中だった対話（予告入力／自己ラベル）を復元するための状態。
+    """いま待っている対話のターン（直前のログ行から決める。再入場時の復元にも使う）。
 
-    declaration       … 弱の直後（入力欄を予告モードにする）
-    self_label_choice … 中の直後（3択を待つ）
+    role        … 弱・ターン1（除数の役割）の答え待ち。訂正を出した直後もここ
+    declaration … 弱・ターン2（予告）の答え待ち
+    None        … 待っていない（通常の作問入力）
     """
     if not last:
         return None
-    if last["input_type"] == "sakumon" and last.get("response_type") == "prompt":
-        return {1: "declaration", 2: "self_label_choice"}.get(last.get("prompt_strength"))
+    if last["input_type"] == "sakumon" and last.get("response_type") == "prompt" and last.get("prompt_strength") == 1:
+        return "role"
+    if last["input_type"] == "role":
+        return "role" if last.get("role_corrected") else "declaration"
     return None
 
 
@@ -243,15 +243,9 @@ def _enter_payload(session: dict, cfg: dict) -> dict:
         "conversation": database.get_conversation(session_id),
         "all_reached": show and set(history) >= STRUCTURES,
         "dialog": _pending_dialog(database.get_last_turn(session_id)) if show else None,
-        "choices": _choices(),
         **_support_state(session, show),
         "poll_seconds": config.CONFIG_POLL_SECONDS,
     }
-
-
-def _choices() -> list[dict]:
-    """中・ステップ2の3択（常に3つとも出す。到達済みかどうかで出し分けない）。"""
-    return [{"value": s, "label": ai_dialogue.STRUCTURE_LABEL[s]} for s in ai_dialogue.STRUCTURE_ORDER]
 
 
 def _enter_current(user_id: str) -> dict:
@@ -366,14 +360,57 @@ def judge(req: JudgeRequest):
         return _finish(_handle_resend(req, user_id, message, ctx), user_id, ctx)
 
     input_kind = ai_classify.classify(message, ctx["recent"], expression, user_id=user_id)
+    pending = _pending_dialog(last) if (req.declaring and phase == 2) else None
     if input_kind == "sakumon":
         result = _handle_sakumon(req, user_id, message, ctx)
-    elif req.declaring and phase == 2:
-        # 予告待ちの入力欄から届いた作問以外の文 → 予告として分類する（対話には回さない）
+    elif pending == "role":
+        # 弱・ターン1の答え（除数の役割）。対話には回さない
+        result = _handle_role(session, user_id, message, ctx)
+    elif pending == "declaration":
+        # 弱・ターン2の答え（予告）→ 構造に分類する
         result = _handle_declaration(session, user_id, message, t_start)
     else:
         result = _handle_taiwa(req, user_id, message, ctx)
     return _finish(result, user_id, ctx)
+
+
+def _handle_role(session: dict, user_id: str, text: str, ctx: dict) -> dict:
+    """弱・ターン1（役割の宣言）：「{divisor}は 何を あらわして いるかな？」への答えを処理する。
+
+    - 答えを classify_role で分類し role_answer に保存する（訂正前の生の値。必ず保存）
+    - 直前の成立作問の判定（structure / unknown）から見た除数の役割と突き合わせ、
+      不一致（役割が確定でき、答えも people / per_one / base のどれかに確定したときだけ）なら
+      1回だけ訂正：児童の問題文の除数の句を引用して問い返す（正解の役割名は言わない）→ もう一度ターン1を待つ
+    - 一致・わからない・判別不能、または訂正後の2回目の答え → 正誤にかかわらずターン2へ
+    カウンタ・強度は動かさない。input_type='role'。"""
+    sid, expression, last = session["session_id"], session["expression"], ctx["last"]
+    problems = database.get_valid_problems(sid)
+    if not problems:
+        return _handle_taiwa(JudgeRequest(session_id=sid, user_id=user_id, message=text), user_id, text, ctx)
+    latest = problems[-1]
+    _dividend, divisor = config.parse_expression(expression)
+    role = ai_classify.classify_role(text, divisor, user_id=user_id)
+    expected = ai_dialogue.expected_divisor_role(latest["structure"], latest["unknown"])
+    already_corrected = bool(last and last.get("input_type") == "role" and last.get("role_corrected"))
+    correct = (not already_corrected and expected is not None
+               and role in ("people", "per_one", "base") and role != expected)
+    if correct:
+        phrase = ai_dialogue.extract_divisor_phrase(latest["text"], divisor, user_id=user_id)
+        ai_message = ai_dialogue.role_correction_message(phrase, expression)
+        dialog = "role"
+    else:
+        ai_message = ai_dialogue.role_next_message(expression)
+        dialog = "declaration"
+    database.save_log(
+        session_id=sid, user_id=user_id, phase=2, expression=expression,
+        input_type="role", message=text, ai_message=ai_message,
+        response_type="prompt", prompt_strength=1,
+        role_answer=role, role_corrected=correct,
+        produced_structures=ctx["produced"], stuck_count=session["stuck_count"], miss_count=session["miss_count"],
+        latency_ms=_latency(ctx),
+    )
+    return _base_result(ai_message, "prompt", "role", prompt_strength=1, role_answer=role, role_corrected=correct,
+                        dialog=dialog, accepted=False)
 
 
 def _handle_declaration(session: dict, user_id: str, text: str, t_start: float) -> dict:
@@ -417,49 +454,6 @@ def declare(req: DeclareRequest):
     return _finish(result, user_id, ctx)
 
 
-@app.post("/api/self_label")
-def self_label(req: SelfLabelRequest):
-    """中（強度2）の自己ラベル（仕様 v2 3-5）：3択のタップだけ。自由記述はない（self_label_text は使わない）。
-
-    選択を self_label に、ai_judge 判定との一致を self_label_match に保存し、目標の指定の文言を返す。
-    目標は prompt 発行時にシステムが立てた declared（未到達構造）。
-    ★児童の選択が判定と食い違っても訂正しない（記録のみ）。カウンタは動かさない。フェーズ2以外は受け付けない。"""
-    t_start = time.perf_counter()
-    user_id = _normalize_user_id(req.user_id)
-    session = _owned_session(req.session_id, user_id)
-    _touch(user_id, req.session_id)
-    if session["phase"] != 2:
-        raise HTTPException(status_code=400, detail="フェーズ2でだけ受け付けます")
-    produced = database.get_produced(user_id, 2)
-    problems = database.get_valid_problems(req.session_id)
-    if not problems:
-        raise HTTPException(status_code=400, detail="成立した作問がありません")
-    latest = problems[-1]          # 「いま 作って くれた 問題」＝直近の成立作問
-    common = dict(session_id=req.session_id, user_id=user_id, phase=2, expression=session["expression"],
-                  input_type="self_label", produced_structures=produced,
-                  stuck_count=session["stuck_count"], miss_count=session["miss_count"])
-
-    choice = (req.choice or "").strip()
-    if choice not in STRUCTURES:
-        raise HTTPException(status_code=400, detail="choice は tobun / hougan / bai")
-    match = choice == latest["structure"]
-    # 目標：prompt 発行時に立てた declared（システム）。無ければここで未到達構造から立てる
-    target = session["declared"] if session["declared_by"] == "system" and session["declared"] else None
-    if not target:
-        target = ai_dialogue.pick_unreached_structure(produced)
-        if target:
-            database.set_state(req.session_id, declared=target, declared_by="system",
-                               stuck_count=session["stuck_count"], miss_count=session["miss_count"],
-                               help_count=session["help_count"], strength=session["strength"])
-    ai_message = ai_dialogue.target_message(target, session["expression"]) if target else ai_dialogue.DONE_MESSAGE
-    database.save_log(**common, message=ai_dialogue.STRUCTURE_LABEL[choice], ai_message=ai_message,
-                      self_label=choice, self_label_match=match,
-                      latency_ms=int((time.perf_counter() - t_start) * 1000))
-    session = database.get_session(req.session_id)
-    return {"message": ai_message, "dialog": None,
-            "phase": 2, "show_support": True, "history": produced, **_support_state(session, True)}
-
-
 @app.get("/api/judge/status")
 def judge_status(user_id: str):
     """送信中の児童が1秒間隔で見る。同時実行上限で待たされていれば "waiting"。"""
@@ -499,7 +493,6 @@ def _finish(result: dict, user_id: str, ctx: dict) -> dict:
     result["show_support"] = show
     result["history"] = history if show else []
     result["all_reached"] = show and set(history) >= STRUCTURES
-    result["choices"] = _choices()
     result.update(_support_state(session, show))
     # accepted：フロントが「つくった お話」一覧に追加するか（成立した作問だけ。再送・判定エラーは追加しない）
     result.setdefault("accepted", bool(result.get("valid")) and result.get("input_type") == "sakumon")
@@ -566,7 +559,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
       予告あり・一致    → declaration_met = 1、miss = 0
       予告あり・不一致  → declaration_met = 0、miss += 1
     状態機械はフェーズ2でだけ動く。フェーズ1・3は判定だけ記録する（カウンタも動かさない）。
-    中・強ではシステムが未到達構造を declared_by="system" で立てる（中はステップ3でそれを文言で伝える）。
+    中・強ではシステムが未到達構造を declared_by="system" で立てて文言で伝える。弱は役割の宣言（ターン1）を開く。
     """
     phase, expression, produced, counts = ctx["phase"], ctx["expression"], ctx["produced"], ctx["counts"]
     session = ctx["session"]
@@ -598,7 +591,6 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     all_before = set(produced) >= STRUCTURES
     completes_all = is_new and set(produced_after) >= STRUCTURES
     ref_no = len(database.get_valid_problems(req.session_id)) + (1 if valid else 0)  # 最新の表示番号
-    quoted = None
 
     # ---- 状態機械（フェーズ2のみ。不成立は何も動かさない） ----
     stuck, miss, help_count = counts["stuck"], counts["miss"], counts["help"]
@@ -632,12 +624,10 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
                 response_type = "praise"
             else:
                 response_type = "prompt"
-                dialog = {1: "declaration", 2: "self_label_choice"}.get(strength)
-                if strength in (1, 2):
-                    # 弱・中：いま成立した作問の問いの文を引用する（取れなければ定型文）
-                    quoted = ai_dialogue.extract_question(message, user_id=user_id)
-                if strength >= 2:
-                    # 中・強：produced に含まれない構造を固定順で1つ指定（自己ラベルは使わない）
+                if strength == 1:
+                    dialog = "role"      # 弱：役割の宣言・ターン1の答えを待つ
+                else:
+                    # 中・強：produced に含まれない構造を固定順で1つ指定
                     declared = ai_dialogue.pick_unreached_structure(produced_after)
                     declared_by = "system" if declared else None
         database.set_state(req.session_id, declared=declared, declared_by=declared_by,
@@ -650,7 +640,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         dlg = ai_dialogue.dialogue(
             message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
             produced, ctx["recent"], response_type, expression,
-            prompt_strength=strength, target=declared, ref_no=ref_no, quoted=quoted, user_id=user_id,
+            prompt_strength=strength, target=declared, ref_no=ref_no, user_id=user_id,
         )
         ai_message = dlg["message"]
 

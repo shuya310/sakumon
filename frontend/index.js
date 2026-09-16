@@ -13,8 +13,7 @@ const state = {
   problems: [],
   allReached: false,
   sending: false,
-  dialog: null,           // null / declaration（弱：入力欄が予告モード）/ self_label_choice（中：3択）
-  choices: [],            // 中・ステップ2の3択（サーバから受け取る）
+  dialog: null,           // null / role（弱・ターン1：除数の役割の答え待ち）/ declaration（弱・ターン2：予告待ち）
   pollTimer: null,
   pollSeconds: 5,
   switching: false,
@@ -136,7 +135,6 @@ function enter(payload) {
   state.history = payload.history || [];
   state.allReached = !!payload.all_reached;
   state.problems = [];
-  state.choices = payload.choices || [];
   state.pollSeconds = payload.poll_seconds || 5;
   saveSession();
 
@@ -313,31 +311,6 @@ function addAiBubble(text, responseType, isNew, strength) {
   return el;
 }
 
-// 中・ステップ2の3択。3つとも常に出す。選ぶと送信し、選んだものだけ残して無効化する。
-function addChoiceButtons(choices) {
-  disableChoiceButtons();
-  const log = document.getElementById("chat-log");
-  const wrap = document.createElement("div");
-  wrap.className = "choice-buttons";
-  choices.forEach(c => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn-choice";
-    b.textContent = c.label;
-    b.dataset.value = c.value;
-    b.addEventListener("click", () => {
-      wrap.querySelectorAll(".btn-choice").forEach(x => { x.classList.toggle("selected", x === b); x.disabled = true; });
-      sendSelfLabelChoice(c.value, c.label);
-    });
-    wrap.appendChild(b);
-  });
-  log.appendChild(wrap);
-  scrollLog();
-}
-function disableChoiceButtons() {
-  document.querySelectorAll(".choice-buttons .btn-choice").forEach(b => { b.disabled = true; });
-}
-
 function addLoadingBubble() {
   const log = document.getElementById("chat-log");
   const el = document.createElement("div");
@@ -401,16 +374,15 @@ function setTarget(declared, label) {
   }
 }
 
-// dialog: null / "declaration"（弱：入力欄が予告モード。プレースホルダは置かない）/ "self_label_choice"（中：3択）
+// dialog: null / "role"（弱・ターン1）/ "declaration"（弱・ターン2）。どちらも同じ入力欄が対話モード
+// （緑枠・プレースホルダなし）になる。どのターンを待っているかはサーバが直前のログ行から決める。
 const CHAT_PLACEHOLDER = "問題をここに書いてね…";
 function setDialog(dialog) {
   state.dialog = dialog || null;
   const input = document.getElementById("chat-input");
-  const declaring = state.dialog === "declaration";
+  const declaring = !!state.dialog;
   document.getElementById("chat-input-area").classList.toggle("declaring", declaring);
   input.placeholder = declaring ? "" : CHAT_PLACEHOLDER;
-  if (state.dialog === "self_label_choice") addChoiceButtons(state.choices);
-  else disableChoiceButtons();
   input.focus();
 }
 
@@ -459,9 +431,9 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
-  // 予告モードなら、作問でない文は予告として扱われる（サーバが判断）。
-  // 3択の途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
-  const declaring = state.dialog === "declaration";
+  // 対話モード（役割の宣言のターン1・2）なら、作問でない文はそのターンの答えとして扱われる（サーバが判断）。
+  // 対話の途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
+  const declaring = !!state.dialog;
   setDialog(null);
 
   addUserBubble(text);
@@ -492,7 +464,8 @@ async function sendMessage() {
     // accepted：成立した作問だけ一覧に追加（再送・判定エラーは追加しない）
     if (data.accepted) addProblem(text, data.structure);
     applySupport(data);
-    // 予告として扱われた入力：目標を固定表示するだけ（unknown なら何も出さず作問に戻る。再質問しない）
+    // 役割の答え（role）は訂正か次のターンの問いが返る。予告（declaration）は目標を固定表示するだけ
+    // （unknown なら何も出さず作問に戻る。再質問しない）
     if (data.message) addAiBubble(data.message, data.response_type, data.is_new, data.prompt_strength);
     setDialog(data.dialog);
   } catch (e) {
@@ -503,23 +476,6 @@ async function sendMessage() {
     state.sending = false;
     document.getElementById("btn-send").disabled = false;
     input.focus();
-  }
-}
-
-// 中：3択の送信 → 目標の指定
-async function sendSelfLabelChoice(value, label) {
-  if (state.switching) return;
-  state.dialog = null;
-  addUserBubble(label);
-  try {
-    const { ok, data } = await postJson("/api/self_label", { session_id: state.sessionId, user_id: state.userId, choice: value });
-    if (!ok) { addNotice("エラーが起きました。もう一度送ってみてね。"); return; }
-    applySupport(data);
-    addAiBubble(data.message, "prompt", false, 2);
-  } catch (e) {
-    addNotice("エラーが起きました。もう一度送ってみてね。");
-  } finally {
-    document.getElementById("chat-input").focus();
   }
 }
 

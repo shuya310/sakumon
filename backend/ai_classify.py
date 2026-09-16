@@ -133,3 +133,46 @@ def classify_declaration(text: str, user_id: str | None = None) -> str:
     except llm_call.LLMUnavailable as e:
         print(f"[ai_classify] classify_declaration failed after {e.retry_count} retries: {e}")
         return "unknown"  # 分類できなければ予告なし扱い（再質問もしない：仕様 3-4）
+
+
+# ===== 役割の宣言・ターン1（除数が何をあらわしているか）の分類 =====
+# 弱（強度1）のターン1で「{n}ばんの お話で、{divisor}は 何を あらわして いるかな？」に児童が自由記述で答えた文を
+# 4つに分ける。判断基準は「除数の役割として何を書いているか」だけ。判別不能・LLM 失敗は unknown。
+
+ROLE_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの仕分け係です。
+児童は自分の作った文章題について「{divisor}は 何を あらわして いるかな？」と聞かれ、それに答えました。
+その答えを次の5つに分類します。分類結果のJSONだけを返してください。JSON以外の文字は一切出力しないでください。
+
+- "people"：分ける相手の数（人数・班の数・いくつに分けるか）だと答えている（例「人数」「8人」「分ける人の数」「8つの班」）
+- "per_one"：1つ分の数・1人分の数・1まとまりの大きさだと答えている（例「1人分」「1人にあげる数」「1ふくろの数」「8こずつ」）
+- "base"：比べる相手の量・もとにする量だと答えている（例「くらべる方」「もとの数」「白いリボンの長さ」）
+- "dont_know"：「わからない」「知らない」と答えている
+- "unknown"：上のどれとも判断できない（題材だけ・無関係・意味が取れない）
+
+## 返すJSON（この形式のみ）
+{ "role": "people" or "per_one" or "base" or "dont_know" or "unknown" }"""
+
+ROLE_TYPES = ("people", "per_one", "base", "dont_know", "unknown")
+
+
+def classify_role(text: str, divisor: int, user_id: str | None = None) -> str:
+    """除数の役割についての児童の答えを people / per_one / base / dont_know / unknown に分類する。失敗時は 'unknown'。"""
+    def parse(response) -> str:
+        t = _parse(_text_from(response)).get("role")
+        if t not in ROLE_TYPES:
+            raise ValueError(f"unexpected role: {t!r}")
+        return t
+
+    try:
+        kind, _meta = llm_call.call(
+            user_id, parse,
+            model=CLASSIFY_MODEL,
+            max_tokens=64,
+            thinking={"type": "disabled"},
+            system=ROLE_PROMPT.replace("{divisor}", str(divisor)),
+            messages=[{"role": "user", "content": f"児童の答え: {text}"}],
+        )
+        return kind
+    except llm_call.LLMUnavailable as e:
+        print(f"[ai_classify] classify_role failed after {e.retry_count} retries: {e}")
+        return "unknown"

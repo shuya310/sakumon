@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     self_label_text     TEXT,
     self_label_match    INTEGER,
 
+    -- 弱・ターン1（役割の宣言）：児童の答えの分類（訂正前の生の値）と、訂正を出したか
+    role_answer         TEXT,
+    role_corrected      INTEGER,
+
     produced_structures TEXT,
     stuck_count         INTEGER,
     miss_count          INTEGER,
@@ -146,14 +150,21 @@ def _archive_legacy_tables(con):
             print(f"[database] legacy table archived: {table} -> {name}")
 
 
+_MIGRATIONS = {
+    "sessions": (("declared", "TEXT"), ("declared_by", "TEXT"),
+                 ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
+                 ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
+    "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER")),
+}
+
+
 def _migrate(con):
     """新スキーマ以降の列追加（既存 DB を壊さない）。SCHEMA にも同じ列を書いておくこと。"""
-    cols = _columns(con, "sessions")
-    for name, ddl in (("declared", "TEXT"), ("declared_by", "TEXT"),
-                      ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
-                      ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")):
-        if cols and name not in cols:
-            con.execute(f"ALTER TABLE sessions ADD COLUMN {name} {ddl}")
+    for table, columns in _MIGRATIONS.items():
+        cols = _columns(con, table)
+        for name, ddl in columns:
+            if cols and name not in cols:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def init_db():
@@ -282,6 +293,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              declaration_met: bool | None = None,
              self_label: str | None = None, self_label_text: str | None = None,
              self_label_match: bool | None = None,
+             role_answer: str | None = None, role_corrected: bool | None = None,
              produced_structures: list[str] | None = None,
              stuck_count: int | None = None, miss_count: int | None = None,
              latency_ms: int | None = None) -> int:
@@ -296,14 +308,16 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
                 response_type, prompt_strength,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
+                role_answer, role_corrected,
                 produced_structures, stuck_count, miss_count, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
              b(valid), structure, unknown, issue, b(is_new),
              response_type, prompt_strength,
              declared_structure, declared_by, b(declaration_met),
              self_label, self_label_text, b(self_label_match),
+             role_answer, b(role_corrected),
              format_structures(produced_structures) if produced_structures is not None else None,
              stuck_count, miss_count, latency_ms),
         )
@@ -345,7 +359,7 @@ def get_last_turn(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
             """SELECT input_type, message, ai_message, phase, valid, structure, unknown, issue,
-                      response_type, prompt_strength, self_label, self_label_text
+                      response_type, prompt_strength, self_label, self_label_text, role_answer, role_corrected
                FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
@@ -354,7 +368,8 @@ def get_last_turn(session_id: int) -> dict | None:
     return {"input_type": r[0], "message": r[1], "ai_message": r[2], "phase": r[3],
             "valid": None if r[4] is None else bool(r[4]), "structure": r[5], "unknown": r[6],
             "issue": r[7], "response_type": r[8], "prompt_strength": r[9],
-            "self_label": r[10], "self_label_text": r[11]}
+            "self_label": r[10], "self_label_text": r[11],
+            "role_answer": r[12], "role_corrected": None if r[13] is None else bool(r[13])}
 
 
 def get_produced(user_id: str, phase: int) -> list[str]:
@@ -445,9 +460,10 @@ LOG_COLUMNS = [
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
+    "role_answer", "role_corrected",
     "produced_structures", "stuck_count", "miss_count", "latency_ms",
 ]
-_BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match")
+_BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected")
 
 
 def _row_to_log(r) -> dict:
@@ -486,6 +502,7 @@ CSV_FIELDS = [
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
+    "role_answer", "role_corrected",
     "produced_structures", "stuck_count", "miss_count", "latency_ms",
 ]
 

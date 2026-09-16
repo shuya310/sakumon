@@ -683,33 +683,9 @@ body {
 }
 .target-bar strong { font-size: 1.1rem; }
 
-/* 予告モード（弱の直後）：同じ入力欄の見た目だけ変える */
+/* 対話モード（弱・役割の宣言のターン1・2）：同じ入力欄の見た目だけ変える */
 .chat-input-area.declaring { background: #F3FAF7; }
 .chat-input-area.declaring .chat-input { border-color: var(--green); }
-
-/* 中・ステップ2の3択。選んだものだけ残して無効化する */
-.choice-buttons {
-  align-self: flex-start;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: -4px;
-  padding-left: 4px;
-}
-.btn-choice {
-  background: #fff;
-  color: var(--green);
-  border: 2px solid var(--green);
-  border-radius: 999px;
-  padding: 8px 20px;
-  font-size: 1rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-.btn-choice:hover:not(:disabled) { background: #E8F5F1; }
-.btn-choice.selected { background: var(--green); color: #fff; }
-.btn-choice:disabled { opacity: .35; cursor: default; }
-.btn-choice.selected:disabled { opacity: 1; }
 
 /* 吹き出しの強調（**…**） */
 .bubble-ai strong { font-weight: 800; }

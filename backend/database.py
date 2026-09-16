@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     produced_structures TEXT,
     stuck_count         INTEGER,
     miss_count          INTEGER,
+    help_count          INTEGER,
+    -- このターン後の強度（0〜3）と、このターンで強度を上げた原因（stuck / miss / help / none）
+    strength            INTEGER,
+    strength_trigger    TEXT,
+    -- このターンの AI の発話が指した目標構造（無ければ NULL）
+    target_structure    TEXT,
 
     latency_ms          INTEGER,
 
@@ -159,7 +165,8 @@ _MIGRATIONS = {
                  ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
                  ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
     "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
-                  ("is_help_request", "INTEGER")),
+                  ("is_help_request", "INTEGER"), ("help_count", "INTEGER"), ("strength", "INTEGER"),
+                  ("strength_trigger", "TEXT"), ("target_structure", "TEXT")),
 }
 
 
@@ -302,7 +309,9 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              role_answer: str | None = None, role_corrected: bool | None = None,
              is_help_request: bool | None = None,
              produced_structures: list[str] | None = None,
-             stuck_count: int | None = None, miss_count: int | None = None,
+             stuck_count: int | None = None, miss_count: int | None = None, help_count: int | None = None,
+             strength: int | None = None, strength_trigger: str | None = None,
+             target_structure: str | None = None,
              latency_ms: int | None = None) -> int:
     def b(v):
         return None if v is None else int(bool(v))
@@ -316,8 +325,9 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected, is_help_request,
-                produced_structures, stuck_count, miss_count, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                produced_structures, stuck_count, miss_count, help_count,
+                strength, strength_trigger, target_structure, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
              b(valid), structure, unknown, issue, b(is_new), item, unit,
@@ -326,7 +336,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              self_label, self_label_text, b(self_label_match),
              role_answer, b(role_corrected), b(is_help_request),
              format_structures(produced_structures) if produced_structures is not None else None,
-             stuck_count, miss_count, latency_ms),
+             stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, latency_ms),
         )
         return cur.lastrowid
 
@@ -468,7 +478,8 @@ LOG_COLUMNS = [
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
     "role_answer", "role_corrected", "is_help_request",
-    "produced_structures", "stuck_count", "miss_count", "latency_ms",
+    "produced_structures", "stuck_count", "miss_count", "help_count",
+    "strength", "strength_trigger", "target_structure", "latency_ms",
 ]
 _BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected", "is_help_request")
 
@@ -510,7 +521,8 @@ CSV_FIELDS = [
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
     "role_answer", "role_corrected", "is_help_request",
-    "produced_structures", "stuck_count", "miss_count", "latency_ms",
+    "produced_structures", "stuck_count", "miss_count", "help_count",
+    "strength", "strength_trigger", "target_structure", "latency_ms",
 ]
 
 

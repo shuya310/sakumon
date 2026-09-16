@@ -17,24 +17,35 @@ cd backend && uvicorn main:app --reload --port 8000
 ## 注意
 - APIキー・ADMIN_PASSWORD は .env から読む（ADMIN_PASSWORD 未設定だと起動しない）
 - フェーズは app_config テーブル（管理画面 /admin で変更）。式は main.EXPRESSION_ASSIGNMENT（設定テーブル。児童ごとに sessions.expression に固定）
-- DBは data/sakumon.db。スキーマは sakumon_cleanup_spec.md 3章（database.SCHEMA）。時刻は JST
+- DBは data/sakumon.db。スキーマは database.SCHEMA（列追加は _MIGRATIONS で既存 DB へ ALTER）。時刻は JST
   - sessions は UNIQUE(user_id, phase)。1児童1フェーズ1セッション。「新しい回（run）」は廃止（リハーサル分は管理画面で削除）
   - 旧スキーマが残っていれば起動時に *_legacy_日付 へ改名して退避（DROP しない）。列追加は SCHEMA 変更＋既存 DB へ ALTER TABLE
   - is_new はフェーズスコープ（user_id + phase で到達構造を引く）
-- 支援は docs/sakumon_spec_v2.md（2〜6章 実装済み・2026-09-15）。状態は sessions に保持（declared / declared_by / stuck_count / miss_count）
-  - stuck = 新構造に到達しなかった成立作問の**連続**回数、miss = 予告不一致の累積。不成立・taiwa・resend では動かさない。
-    新構造到達で両方 0。強さは main.decide_strength（stuck 2→弱, 3→中, 4+→強／miss 1→中, 2+→強）
-  - response_type: form / praise / prompt / talk / done / error。文言は ai_dialogue の表（仕様3章を一字一句。言い換えない）。
-    LLM を呼ぶのは talk だけ。`**…**` は強調、フロントで太字にする
-  - 入力欄は1つ。弱の直後は /api/judge に declaring=true で送られ、classify が作問でなければ予告として分類
-    （classify_declaration。unknown なら立てない。/api/declare も残す）。中は3択のタップだけ（/api/self_label の choice。
-    self_label_text は書かない）。弱・中は直前の成立作問の問いの文を ai_dialogue.extract_question（LLM）で引用、
-    取れなければ定型文。弱に構造ラベル（1つ分の 大きさ／いくつ分／何倍）を出すのは禁止（中の自己ラベル測定が壊れる）。
-    中・強の declared=system は prompt 発行と同時に立てる。自己ラベルが判定と違っても訂正しない（禁止）。
-    児童が3択に答えず作問を送ったら対話は打ち切り、通常処理（予告は立ったまま）。目標バーはチャットのヘッダーに固定
+- 支援は docs/sakumon_spec_v3.md（2026-09-17。v2 の 2-4・3-4〜3-6・5-3・7章中段階は v3 で置き換え）。状態は sessions に保持
+  （declared / declared_by / stuck_count / miss_count / help_count / strength）
+  - 4段階：0=促し／1=弱（役割の宣言・2ターン）／2=中（役割指定＋題材固定）／3=強（場面文提示）
+  - stuck = 新構造に到達しなかった成立作問の**連続**回数、miss = 予告不一致の累積、help = taiwa が支援要求に分類された回数。
+    不成立・役割の答え・予告・resend では動かさない。新構造到達で3カウンタと強度を全て 0
+  - 強度は状態（main.decide_strength で遷移）：0→1 は stuck が 2 に達したときのみ。1 以降は stuck/miss/help のどれかが増えたターンごとに +1
+    （上限3。同時に増えても1回）。strength_trigger は上げた原因（上がらなければ none）。閾値は Wood & Middleton の原則に基づく設計判断で先行研究由来ではない
+  - response_type: form / praise / prompt / talk / done / error。定型文は仕様の表を一字一句（言い換えない）。`**…**` は強調
+  - 弱＝役割の宣言：ターン1「{n}ばんの お話で、{divisor}は 何を あらわして いるかな？」→ classify_role（people/per_one/base/dont_know/unknown）
+    を role_answer に必ず保存。expected_divisor_role（判定の structure/unknown）と不一致で役割が確定できるときだけ1回訂正
+    （児童の文の除数の句を引用。役割名は言わない。extract_divisor_phrase → 除数を含む文 → 引用なし）。2回目は正誤にかかわらずターン2
+    「じゃあ 次は、{divisor}を 何の 数に して みたい？」→ classify_declaration → declared_by=child。unknown なら立てない
+  - 入力欄は1つ。対話モードの入力は /api/judge に declaring=true。どのターンを待っているかはサーバが直前のログ行で決める
+    （_pending_dialog: role / declaration）。作問なら通常処理（打ち切り）。3択・/api/self_label は廃止（self_label* 列は残存・未使用）
+  - 中・強：pick_unreached_structure を declared=system で立てて文言。{item}{unit} は ai_judge の item/unit（取れなければ「◯ばんの お話」「もの」「こ」）。
+    倍の強の人物名は FRIEND_NAMES を session_id で周期選択、相手は「お友だち」
+  - talk（LLM）：_talk_context で強度・目標・成立作問一覧（本文＋除数の役割＋物）を渡す。境界は強度依存
+    （0・1：問い返しのみ・3語禁止／2：役割指定・3語・題材固定OK／3：場面文OK。答え・構造名は常に禁止）。violates_boundary(…, strength)。
+    出力の is_help_request が true なら help+=1 → 強度更新（文言は更新前の強度。2以上で目標が無ければ立てる）
+  - 弱に構造ラベル（1つ分の 大きさ／いくつ分／何倍）を出すのは禁止。自己ラベルの訂正禁止は3択廃止で失効
   - 式は main.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。24÷4 は使わない）。セッション開始時に sessions.expression に固定。
     管理画面からセッション単位で上書き可（/admin/api/sessions/{id}/expression）。app_config.expression_a/b は未使用
   - 語彙：児童向けに「種類」「たずねる」「聞いていること」「ちがうことを聞く」を出さない（LLM 出力もガード）
+- ai_judge の issue に reversed（比較の向きが逆。文言は暫定で wrong_number と同じ）。理由なしの不成立は _fallback_issue で本文から寄せる（not_problem は場面も数も無いときだけ）
 - judge が全リトライ失敗 → issue='error'・response_type='error'「もう一度 おくって みてね」（一覧に載せない。送り直しは判定し直す）。判定済み本文の連続再送だけ input_type='resend'（API を呼ばない・カウンタ不動）
-- テスト：backend/tests/test_flow.py（LLMモック・決定論）、tests/test_llm_call.py（リトライ・セマフォ）、tests/judge_cases.py（実API・判定精度）
+- テスト：backend/tests/test_flow.py（LLMモック・決定論。cd backend && ./venv/bin/python tests/test_flow.py）、tests/test_llm_call.py（リトライ・セマフォ）、
+  tests/judge_cases.py（実API・判定精度）、tests/dialogue_probe.py（実API・talk の出力）
 - 運用手順：授業当日の運用手順_0918.md

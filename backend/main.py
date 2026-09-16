@@ -6,7 +6,7 @@
 - フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す
   （response_type / ai_message は記録しない＝表示していないものは記録しない）。
 - フェーズ2：応答の種類（response_type: form / praise / prompt / done / talk / error）を状態機械
-  （仕様 v2 2章）で決定論的に決め、ai_dialogue に文言を組み立てさせる。AIには判定させない。
+  （docs/sakumon_spec_v3.md 2章）で決定論的に決め、ai_dialogue に文言を組み立てさせる。AIには判定させない。
   状態（sessions に保持・フェーズスコープ）：produced（到達構造の集合）、declared / declared_by（予告）、
   stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）、
   help（taiwa が支援要求に分類された回数）、strength（現在の強度 0〜3。decide_strength で遷移）。
@@ -273,7 +273,7 @@ def decide_strength(prev: int, *, is_new: bool = False, stuck_after: int = 0,
       - 強度 0 → 1               → stuck が 2 に達したときだけ（同じ構造を1回くり返しただけでは介入しない）
       - 強度 1 以上              → stuck / miss / help のいずれかが増えたターンごとに +1（上限 3）
     同じターンで stuck と miss が両方増えても +1 は1回（1回の失敗＝1段）。trigger は miss > stuck > help の
-    優先で1つだけ記録する。強度が上がらなかったターンの trigger は "none"。
+    優先で1つだけ記録する。強度が上がらなかったターン（上限3で据え置きを含む）の trigger は "none"。
     """
     if is_new:
         return 0, "none"
@@ -284,7 +284,9 @@ def decide_strength(prev: int, *, is_new: bool = False, stuck_after: int = 0,
         if stuck_up and stuck_after >= 2:
             return 1, "stuck"
         return 0, "none"
-    return min(prev + 1, MAX_STRENGTH), trigger
+    if prev >= MAX_STRENGTH:
+        return MAX_STRENGTH, "none"      # 上限で据え置き（カウンタは動くが強度は上がらない）
+    return prev + 1, trigger
 
 
 # ===== Routes（児童） =====
@@ -407,6 +409,8 @@ def _handle_role(session: dict, user_id: str, text: str, ctx: dict) -> dict:
         response_type="prompt", prompt_strength=1,
         role_answer=role, role_corrected=correct,
         produced_structures=ctx["produced"], stuck_count=session["stuck_count"], miss_count=session["miss_count"],
+        help_count=session["help_count"], strength=session["strength"], strength_trigger="none",
+        target_structure=session["declared"],
         latency_ms=_latency(ctx),
     )
     return _base_result(ai_message, "prompt", "role", prompt_strength=1, role_answer=role, role_corrected=correct,
@@ -429,6 +433,8 @@ def _handle_declaration(session: dict, user_id: str, text: str, t_start: float) 
         input_type="declaration", message=text, ai_message=None,
         declared_structure=declared, declared_by=declared_by,
         produced_structures=produced, stuck_count=session["stuck_count"], miss_count=session["miss_count"],
+        help_count=session["help_count"], strength=session["strength"], strength_trigger="none",
+        target_structure=declared or session["declared"],
         latency_ms=int((time.perf_counter() - t_start) * 1000),
     )
     return _base_result(None, None, "declaration", classified=kind, accepted=False)
@@ -521,6 +527,8 @@ def _handle_resend(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> 
         input_type="resend", message=message, ai_message=last.get("ai_message"),
         response_type=last.get("response_type"), prompt_strength=last.get("prompt_strength"),
         produced_structures=ctx["produced"], stuck_count=counts["stuck"], miss_count=counts["miss"],
+        help_count=counts["help"] if phase == 2 else None, strength=counts["strength"] if phase == 2 else None,
+        strength_trigger="none" if phase == 2 else None, target_structure=ctx["session"]["declared"],
         latency_ms=None,
     )
     return result
@@ -580,6 +588,8 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
         response_type="talk" if show else None, prompt_strength=session["strength"] if show else None,
         is_help_request=is_help,
         produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
+        help_count=help_count if show else None, strength=strength, strength_trigger=trigger if show else None,
+        target_structure=session["declared"] if show else None,   # 発話（talk）が参照した目標＝更新前
         latency_ms=_latency(ctx),
     )
     return result
@@ -614,6 +624,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
             valid=None, issue="error", is_new=False,
             response_type="error" if show else None, prompt_strength=0 if show else None,
             produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
+            help_count=counts["help"] if show else None, strength=counts["strength"] if show else None,
+            strength_trigger="none" if show else None, target_structure=session["declared"] if show else None,
             latency_ms=_latency(ctx),
         )
         return result
@@ -670,6 +682,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
                            stuck_count=stuck, miss_count=miss, help_count=help_count, strength=strength)
     elif show:
         response_type, strength = "form", 0
+    # ログ用：このターン後の強度（不成立は据え置き）と、AI の発話が指した目標
+    strength_after = (strength if valid else prev_strength) if show else None
 
     ai_message = None
     if show:
@@ -693,6 +707,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         response_type=response_type, prompt_strength=strength,
         declared_structure=declared_used, declared_by=declared_by_used, declaration_met=met,
         produced_structures=produced_after, stuck_count=stuck, miss_count=miss,
+        help_count=help_count if show else None, strength=strength_after, strength_trigger=trigger if show else None,
+        target_structure=declared if show else None,
         latency_ms=_latency(ctx),
     )
     return result

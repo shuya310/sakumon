@@ -365,7 +365,11 @@ function buildLogRow(log) {
     ? `<div class="small">役割の答え: ${ROLE_LABEL[log.role_answer] || log.role_answer}${log.role_corrected ? ' <span class="met-ng">訂正</span>' : ""}</div>` : "";
   const timingHtml = log.latency_ms != null ? `<div class="muted small">${(log.latency_ms / 1000).toFixed(1)}s</div>` : "";
   const produced = (log.produced_structures || "").split(",").filter(Boolean);
-  const countsHtml = `<div class="muted small">反復 ${log.stuck_count ?? 0} ／ 不一致 ${log.miss_count ?? 0}</div>`;
+  const countsHtml = log.strength == null
+    ? `<div class="muted small">反復 ${log.stuck_count ?? 0} ／ 不一致 ${log.miss_count ?? 0}</div>`
+    : `<div class="muted small">反復 ${log.stuck_count ?? 0} ／ 不一致 ${log.miss_count ?? 0} ／ 支援要求 ${log.help_count ?? 0}</div>`
+      + `<div class="muted small">強度 ${log.strength}${log.strength_trigger && log.strength_trigger !== "none" ? `（↑${log.strength_trigger}）` : ""}`
+      + `${log.target_structure ? ` ／ 目標 ${STRUCT_LABEL[log.target_structure] || log.target_structure}` : ""}</div>`;
 
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>

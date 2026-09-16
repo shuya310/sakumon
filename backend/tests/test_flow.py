@@ -162,14 +162,15 @@ with client:
         "declared_structure", "declared_by", "declaration_met",
         "self_label", "self_label_text", "self_label_match",
         "role_answer", "role_corrected", "is_help_request",
-        "produced_structures", "stuck_count", "miss_count", "latency_ms",
+        "produced_structures", "stuck_count", "miss_count", "help_count",
+        "strength", "strength_trigger", "target_structure", "latency_ms",
     ], cols
     scols = [r[1] for r in raw("PRAGMA table_info(sessions)")]
     assert scols == ["session_id", "user_id", "phase", "expression", "parity_group", "session_start", "session_end",
                      "declared", "declared_by", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 31列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 35列・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
 
     # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
     ds = main.decide_strength
@@ -184,8 +185,8 @@ with client:
     assert ds(1, miss_up=True) == (2, "miss")
     assert ds(1, help_up=True) == (2, "help")
     assert ds(2, help_up=True) == (3, "help")
-    assert ds(3, stuck_up=True, stuck_after=9) == (3, "stuck"), "上限3"
-    assert ds(3, miss_up=True) == (3, "miss")
+    assert ds(3, stuck_up=True, stuck_after=9) == (3, "none"), "上限3で据え置き（trigger は none）"
+    assert ds(3, miss_up=True) == (3, "none") and ds(3, help_up=True) == (3, "none")
     # 同じターンで stuck と miss が両方増えても +1 は1回。trigger は miss を優先
     assert ds(1, stuck_up=True, stuck_after=3, miss_up=True) == (2, "miss")
     # 何も増えなければ据え置き
@@ -258,6 +259,8 @@ with client:
     assert logs[0]["structure"] == "tobun" and logs[0]["is_new"] is True and logs[0]["produced_structures"] == "tobun"
     assert logs[1]["is_new"] is False and logs[2]["issue"] == "scene_contradiction"
     assert [l["stuck_count"] for l in logs] == [0] * 4 and [l["miss_count"] for l in logs] == [0] * 4
+    assert all(l["strength"] is None and l["strength_trigger"] is None and l["help_count"] is None and l["target_structure"] is None
+               for l in logs), "フェーズ1では支援に関わる列は空"
     assert all(l["expression"] == "24 ÷ 6" for l in logs)
     assert all(l["latency_ms"] is not None for l in logs)
     print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空")
@@ -310,6 +313,8 @@ with client:
     assert [l["response_type"] for l in p2] == ["praise", "praise", "form", "form", "form", "form", "talk", "praise", "done", "done"]
     assert [l["stuck_count"] for l in p2] == [0, 1, 1, 1, 1, 1, 1, 0, 0, 1]
     assert [l["miss_count"] for l in p2] == [0] * 10
+    assert [l["strength"] for l in p2] == [0] * 10 and [l["strength_trigger"] for l in p2] == ["none"] * 10
+    assert [l["help_count"] for l in p2] == [0] * 10 and all(l["target_structure"] is None for l in p2)
     assert all(l["ai_message"] for l in p2), "フェーズ2は全ターン ai_message を記録"
     for l in p2:
         no_banned(l["ai_message"])
@@ -402,6 +407,7 @@ with client:
     row = logs_of(sidS)[-1]
     assert row["input_type"] == "role" and row["role_answer"] == "per_one" and row["role_corrected"] is True
     assert row["message"] == "1人分の数" and row["response_type"] == "prompt" and row["stuck_count"] == 2
+    assert row["strength"] == 1 and row["strength_trigger"] == "none" and row["target_structure"] is None
     assert post("/api/session/resume", session_id=sidS, user_id="11").json()["dialog"] == "role", "訂正後もターン1を復元"
     # 2回目の答え：また食い違っても問い返さず（ループさせない）ターン2へ
     r = post("/api/judge", session_id=sidS, user_id="11", message="やっぱり1人分の数", declaring=True).json()
@@ -422,6 +428,7 @@ with client:
     assert st["stuck_count"] == 2 and st["miss_count"] == 0, "予告ではカウンタを動かさない"
     dd = logs_of(sidS)[-1]
     assert dd["input_type"] == "declaration" and dd["declared_structure"] == "hougan" and dd["declared_by"] == "child"
+    assert dd["target_structure"] == "hougan" and dd["strength"] == 1
     assert dd["message"] == "いくつ分をきく" and dd["latency_ms"] is not None
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
     assert resumed["declared"] == "hougan" and resumed["target_label"] == "いくつ分", "目標の固定表示"
@@ -449,6 +456,7 @@ with client:
     assert r["message"] == "えんぴつの お話は そのままで いいよ。8を「1人分の 数」に して みよう。", r["message"]
     row = logs_of(sidS)[-1]
     assert row["item"] == "えんぴつ" and row["unit"] == "本", "判定が読み取った物・助数詞をログに残す"
+    assert row["strength"] == 2 and row["strength_trigger"] == "miss" and row["target_structure"] == "hougan" and row["help_count"] == 0
     assert r["dialog"] is None and "choices" not in r, "中：3択は出さない。入力欄は作問モードのまま"
     row = logs_of(sidS)[-1]
     assert row["declared_structure"] == "hougan" and row["declared_by"] == "child" and row["declaration_met"] is False
@@ -494,12 +502,15 @@ with client:
     assert r["dialog"] is None and r["declared"] == "hougan" and r["declared_by"] == "system"
     row = logs_of(sidS)[-1]
     assert row["declared_by"] == "system" and row["declaration_met"] is False
+    assert row["strength"] == 3 and row["strength_trigger"] == "miss" and row["target_structure"] == "hougan"
     print("OK 状態機械(5): 中の直後にまた不一致 → miss=2 → 強（場面文提示：いくつ分）")
 
     # 中・強の対話に答えず作問を送っても止まらない（対話は打ち切り、予告は立ったまま）
     r = judge(sidS, "11", "X: 途中で作問")
     assert r["response_type"] == "form" and r["declared"] == "hougan" and r["miss_count"] == 2
     assert r["strength"] == 3 and r["strength_trigger"] == "none", "不成立では強度も動かない"
+    row = logs_of(sidS)[-1]
+    assert row["strength"] == 3 and row["strength_trigger"] == "none" and row["target_structure"] == "hougan", "form 行も強度・目標を記録"
     print("OK 対話を無視した作問: ブロックしない・予告は立ったまま")
 
     # (6) 包含除に到達 → stuck / miss が両方 0 に戻り、強度0の称賛
@@ -608,13 +619,17 @@ with client:
     r = judge(sidT, "12", "どうすればいいの")
     assert r["strength"] == 3 and r["strength_trigger"] == "help" and r["help_count"] == 3 and r["declared"] == "hougan"
     r = judge(sidT, "12", "ヒント")
-    assert r["strength"] == 3 and r["help_count"] == 4, "上限3"
+    assert r["strength"] == 3 and r["help_count"] == 4 and r["strength_trigger"] == "none", "上限3で据え置き"
     # 目標（hougan）と一致する新構造 → 全カウンタと強度が 0、予告は消費
     r = judge(sidT, "12", "H: あめ24こを8こずつ")
     assert r["is_new"] is True and r["declaration_met"] is True and r["response_type"] == "praise"
     assert r["strength"] == 0 and r["help_count"] == 0 and r["stuck_count"] == 0 and r["miss_count"] == 0 and r["declared"] is None
     lt = logs_of(sidT)
     assert lt[-2]["is_help_request"] is True and lt[-2]["prompt_strength"] == 3 and lt[-1]["is_help_request"] is None
+    assert lt[-1]["strength"] == 0 and lt[-1]["help_count"] == 0 and lt[-1]["target_structure"] is None
+    helps = [l for l in lt if l["input_type"] == "taiwa" and l["strength_trigger"] == "help"]
+    got = [(l["prompt_strength"], l["strength"], l["help_count"], l["target_structure"]) for l in helps]
+    assert got == [(1, 2, 2, None), (2, 3, 3, "hougan")], ("taiwa 行：prompt_strength=更新前、strength=更新後、target=発話が参照した目標", got)
     # 3つそろった後は支援要求でも何も動かない
     judge(sidT, "12", "B: 24本は8本の何倍")
     r = judge(sidT, "12", "ヒント")
@@ -747,7 +762,8 @@ with client:
     assert list(rows[0].keys()) == database.CSV_FIELDS
     for col in ("declared_structure", "declared_by", "declaration_met", "self_label", "self_label_text",
                 "self_label_match", "role_answer", "role_corrected", "is_help_request",
-                "prompt_strength", "produced_structures", "stuck_count", "miss_count", "latency_ms"):
+                "prompt_strength", "produced_structures", "stuck_count", "miss_count", "help_count",
+                "strength", "strength_trigger", "target_structure", "latency_ms"):
         assert col in rows[0], col
     decl = [x for x in rows if x["input_type"] == "declaration"]
     assert decl and decl[0]["declared_structure"] == "hougan" and decl[0]["declared_by"] == "child"
@@ -756,6 +772,8 @@ with client:
     assert not any(x["input_type"] == "self_label" for x in rows)
     assert all(x["latency_ms"] != "" for x in rows if x["input_type"] != "resend")
     assert any(x["declaration_met"] == "1" for x in rows) and any(x["prompt_strength"] == "3" for x in rows)
+    assert any(x["strength_trigger"] == "help" for x in rows) and any(x["strength_trigger"] == "miss" for x in rows)
+    assert any(x["target_structure"] == "hougan" and x["strength"] == "3" for x in rows)
     assert all(x["created_at"][:4] == str(now_jst.year) for x in rows)
     print("OK CSV: 新列がすべて出る（declaration / role 行・latency_ms）・JST")
 

@@ -39,6 +39,7 @@ body {
 .btn-ghost { background: #fff; color: #555; border: 1px solid var(--gray-border); }
 .btn-ghost:not(:disabled):hover { background: #F3F4F6; }
 .btn-sm { padding: 5px 12px; font-size: .78rem; }
+.expr-select { font-size: .78rem; padding: 3px 6px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; margin: 0 4px; }
 
 /* ===== レイアウト ===== */
 .page-header {

@@ -41,8 +41,9 @@ cd backend && uvicorn main:app --reload --port 8000
     （0・1：問い返しのみ・3語禁止／2：役割指定・3語・題材固定OK／3：場面文OK。答え・構造名は常に禁止）。violates_boundary(…, strength)。
     出力の is_help_request が true なら help+=1 → 強度更新（文言は更新前の強度。2以上で目標が無ければ立てる）
   - 弱に構造ラベル（1つ分の 大きさ／いくつ分／何倍）を出すのは禁止。自己ラベルの訂正禁止は3択廃止で失効
-  - 式は main.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。24÷4 は使わない）。セッション開始時に sessions.expression に固定。
-    管理画面からセッション単位で上書き可（/admin/api/sessions/{id}/expression）。app_config.expression_a/b は未使用
+  - 式は main.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。奇数 18÷3/24÷4/30÷5、偶数 30÷5/24÷4/18÷3。フェーズ2 は 9/1 の紙の調査と同じ 24÷4。
+    設定はここ1箇所。管理画面の表・「式を変更」の選択肢 EXPRESSION_CHOICES・テストの期待値もここから引く）。セッション開始時に sessions.expression に固定。
+    管理画面からセッション単位で上書き可（/admin/api/sessions/{id}/expression。UI はプルダウン3択）。app_config.expression_a/b は未使用
   - 語彙：児童向けに「種類」「たずねる」「聞いていること」「ちがうことを聞く」を出さない（LLM 出力もガード）
 - ai_judge の issue に reversed（比較の向きが逆。文言は暫定で wrong_number と同じ）。理由なしの不成立は _fallback_issue で本文から寄せる（not_problem は場面も数も無いときだけ）
 - judge が全リトライ失敗 → issue='error'・response_type='error'「もう一度 おくって みてね」（一覧に載せない。送り直しは判定し直す）。判定済み本文の連続再送だけ input_type='resend'（API を呼ばない・カウンタ不動）

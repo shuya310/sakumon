@@ -25,13 +25,13 @@
 
 | response_type | 強度 | 内容 |
 |---|---|---|
-| `form` | ─ | 不成立作問への形式の支援（issue に応じて1点だけ。定型） |
-| `praise` | 0 促し | 新しい問題の称賛／同じ構造1回目（定型） |
+| `form` | ─ | 不成立作問への形式の支援（issue に応じて1点だけ。定型。全 issue に専用文言：`missing_condition`（問いはあるが除数の条件が無い）・`incomplete_text`・`reversed`・`scene_contradiction` を分離） |
+| `praise` | 0 促し | 新しい問題の称賛／同じ構造1回目（定型。「**4が ちがう 数を 表す** 問題は 作れるかな？」＝除数の役割の軸） |
 | `prompt` | 1 弱 | **役割の宣言（2ターン）**。ターン1「◯ばんの お話で、4は 何を あらわして いるかな？」→ 答えを分類（`role_answer`）。判定の役割と食い違えば**1回だけ**児童の問題文の除数の句を引用して問い返す（`role_corrected`。正解の役割名は言わない）→ ターン2「じゃあ 次は、4を 何の 数に して みたい？」→ 予告（`declared_by=child`） |
 | `prompt` | 2 中 | **役割指定＋題材固定**「えんぴつの お話は そのままで いいよ。4を「1人分の 数」に して みよう。」システムが未到達構造を目標に指定（`declared_by=system`） |
 | `prompt` | 3 強 | **場面文提示**「「えんぴつが 24本 あります。1人に 4本ずつ 分けます。」 この あとに、求める 文を 書いて みよう。」 |
 | `done` | ─ | 3構造そろった |
-| `talk` | ─ | 作問以外の入力。LLM が**現在の強度・目標・到達構造・直前の成立問題（本文と、除数が指していたもの）**を参照し、「現在の強度が許す情報だけを話す」境界で声かけを作る（0・1：除数が何かを問い返すだけ／2：除数をどうしてほしいか直接言う・3語OK・題材固定OK／3：場面文も渡す。答え・構造名は常に禁止）。同時に支援要求かどうかを判定（`is_help_request`） |
+| `talk` | ─ | 作問以外の入力。LLM が**現在の強度・目標・到達構造・成立問題（本文と、除数が指していたもの）・直前のやりとり（児童の最新入力＋判定理由＋AI の返事）**を参照し、「現在の強度が許す情報だけを話す」境界で声かけを作る（0：促しのみ＝直前のフィードバックの説明・励まし。除数の役割を問わない・言わない／1：除数が何かを問い返す／2：除数をどうしてほしいか直接言う・3語OK・題材固定OK／3：場面文も渡す。答え・構造名は常に禁止）。児童の発話が直前のフィードバックへの疑問なら、まずそれを児童の問題文に即して説明する。境界違反はコード側ガード（`violates_boundary`。強度0の役割の問いは `role_question`）→ 理由を添えて1回再生成 → なお違反なら定型文。同時に支援要求かどうかを判定（`is_help_request`） |
 | `error` | ─ | judge が API 不通「もう一度 おくって みてね」（一覧に載せない） |
 
 ### カウンタと強度の規則
@@ -44,11 +44,13 @@
 
 強度（`sessions.strength`）は状態として保持し、`main.decide_strength` で遷移させる：
 
-> **強度0→1 は stuck が2に達したときのみ。強度1以降は stuck・miss・help のいずれか1件でも増えるたびに+1（上限3）。新構造到達で全カウンタと強度を0に戻す。**
+> **強度0→1 は stuck が2に達したとき、または help が1以上になったとき。強度1以降は stuck・miss・help のいずれか1件でも増えるたびに+1（上限3）。新構造到達で全カウンタと強度を0に戻す。**
 
-同じターンで stuck と miss が両方増えても +1 は1回。不成立・役割の答え・予告・再送では動かない。3つそろった後は動かない。
+同じターンで stuck と miss が両方増えても +1 は1回。不成立・役割の答え・予告・再送では動かない。3つそろった後は動かない。miss だけでは 0→1 にならない。
 
-この規則は Wood & Middleton の随伴的指導の原則（失敗で1段強め、成功で1段弱める）に基づく設計判断であり、**閾値の具体的な数値（0→1 は stuck=2、上限3）は先行研究から直接導かれたものではない**。
+この規則は Wood & Middleton の随伴的指導の原則（失敗で1段強め、成功で1段弱める）に基づく設計判断であり、**閾値の具体的な数値（0→1 は stuck=2、上限3）は先行研究から直接導かれたものではない**。強度0での help による増強（9/17 追加）は、明示的な援助要求を随伴的指導の原則（Wood & Middleton 1975）における支援増強の契機として扱うもの。`strength_trigger` は `help`。
+
+help で 0→1 に上がったターンは、talk の文言（強度0で生成）の後ろに弱のターン1（「◯ばんの お話で、4は 何を あらわして いるかな？」）を連結し、役割の宣言をそこから始める（成立作問が無ければ連結しない）。
 
 - 文言は仕様の表を一字一句（`ai_dialogue.py`）。児童向けに「種類」「たずねる」「聞いていること」・構造名は出さない。弱では構造ラベル（1つ分の 大きさ／いくつ分／何倍）も出さない
 - 中・強の {物}{unit} は `ai_judge` の判定出力（`item` / `unit`）から。取れなければ「◯ばんの お話」「もの」「こ」
@@ -62,17 +64,23 @@
 POST /api/judge {session_id, user_id, message, declaring}
   ├ 所有権チェック（user_id と sessions.user_id が一致）。フェーズ・式はセッションのもの
   ├ 判定済み本文の連続再送 → API を呼ばず直前の結果（input_type=resend）
-  ├ ai_classify：作問 / 対話
+  ├ 作問 / 対話の振り分け
+  │    直前の AI の発話が児童への問い（chat_logs.awaiting：弱のターン1・2、talk の問い返し）
+  │        → LLM 分類を使わず、数量2つ以上＋問いの文で終わる完全な問題文だけ作問。それ以外は対話
+  │    直前が form（不成立の指摘）で、入力が短い断片（12字以下・問いで終わらない・場面の動詞なし）→ 対話
+  │    それ以外 → ai_classify（Haiku）
   ├ 作問 → ai_judge：{valid, structure, unknown, issue, item, unit}
   │        → main.py：状態機械で response_type / strength / declared を決める
   │        → ai_dialogue：文言（フェーズ1・3は「おくったよ」のみ）
   ├ 対話モード（declaring=true）で作問以外 → 直前のログ行から待っているターンを決める
   │        role        → 役割の答え（classify_role → 訂正 or ターン2の問い）  input_type=role
+  │                      （弱のターン1の直後、訂正の直後、talk が役割を問うた直後（awaiting=role）のどれでも同じ）
   │        declaration → 予告（classify_declaration → declared）              input_type=declaration
-  └ それ以外 → talk（LLM に強度・目標・到達構造・成立作問を渡す。is_help_request なら help+=1 → 強度更新）
+  └ それ以外 → talk（LLM に強度・目標・到達構造・成立作問・直前のやりとりを渡す。is_help_request なら help+=1 → 強度更新。
+                     0→1 なら ROLE_ASK を連結して役割待ち。talk が役割を問うたら awaiting=role）
   → chat_logs に全ターン記録（phase, expression, input_type, valid, structure, unknown, issue, is_new, item, unit,
      response_type, prompt_strength, declared_*, role_answer, role_corrected, is_help_request,
-     produced_structures, stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, latency_ms）
+     produced_structures, stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms）
 ```
 
 ### ai_judge の出力
@@ -81,14 +89,15 @@ POST /api/judge {session_id, user_id, message, declaring}
 valid:     true / false
 structure: tobun / hougan / bai / invalid
 unknown:   one_unit（1つ分）/ num_units（いくつ分）/ ratio（倍率）/ base（基準量）/ rate（割合）/ null
-issue:     null / scene_contradiction / wrong_number / reversed / incomplete_text / wrong_operation / no_question / not_problem
+issue:     null / scene_contradiction / wrong_number / reversed / missing_condition / incomplete_text / wrong_operation / no_question / not_problem
 item:      被除数が数えている物の名前（中・強の文言の {物}。読み取れなければ null）
 unit:      被除数に付く助数詞（{unit}。読み取れなければ null）
 ```
 
 倍は「乗法的比較の場面」全体（倍率・基準量・割合）。基準量を問う形（□×4=24）も成立・倍。
-比較の向きが逆（4÷24 になる）は `reversed`（使う数がちがう `wrong_number` と区別。児童向け文言は暫定で同じ）。
-`valid=false` なのに理由が無いときは本文の形から寄せる（`_fallback_issue`）。`not_problem` は場面の文も数も無いときだけ。
+比較の向きが逆（4÷24 になる）は `reversed`（使う数がちがう `wrong_number` と区別。専用文言あり）。
+問いはあるが除数にあたる条件（4まいずつ・4人で）が場面に無いものは `missing_condition`（「途中で切れ」「問いなし」と分ける）。
+`valid=false` なのに理由が無いときは本文の形から寄せる（`_fallback_issue`：問いがあり被除数はあるが除数が無い → `missing_condition`）。`not_problem` は場面の文も数も無いときだけ。
 
 ---
 

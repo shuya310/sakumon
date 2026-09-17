@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     strength_trigger    TEXT,
     -- このターンの AI の発話が指した目標構造（無ければ NULL）
     target_structure    TEXT,
+    -- このターンの AI の発話のあと、サーバが児童の何を待つか（role / declaration / answer。待たないなら NULL）
+    awaiting            TEXT,
 
     latency_ms          INTEGER,
 
@@ -166,7 +168,7 @@ _MIGRATIONS = {
                  ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
     "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
                   ("is_help_request", "INTEGER"), ("help_count", "INTEGER"), ("strength", "INTEGER"),
-                  ("strength_trigger", "TEXT"), ("target_structure", "TEXT")),
+                  ("strength_trigger", "TEXT"), ("target_structure", "TEXT"), ("awaiting", "TEXT")),
 }
 
 
@@ -311,7 +313,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              produced_structures: list[str] | None = None,
              stuck_count: int | None = None, miss_count: int | None = None, help_count: int | None = None,
              strength: int | None = None, strength_trigger: str | None = None,
-             target_structure: str | None = None,
+             target_structure: str | None = None, awaiting: str | None = None,
              latency_ms: int | None = None) -> int:
     def b(v):
         return None if v is None else int(bool(v))
@@ -326,8 +328,8 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected, is_help_request,
                 produced_structures, stuck_count, miss_count, help_count,
-                strength, strength_trigger, target_structure, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                strength, strength_trigger, target_structure, awaiting, latency_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
              b(valid), structure, unknown, issue, b(is_new), item, unit,
@@ -336,7 +338,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              self_label, self_label_text, b(self_label_match),
              role_answer, b(role_corrected), b(is_help_request),
              format_structures(produced_structures) if produced_structures is not None else None,
-             stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, latency_ms),
+             stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms),
         )
         return cur.lastrowid
 
@@ -376,7 +378,8 @@ def get_last_turn(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
             """SELECT input_type, message, ai_message, phase, valid, structure, unknown, issue,
-                      response_type, prompt_strength, self_label, self_label_text, role_answer, role_corrected
+                      response_type, prompt_strength, self_label, self_label_text, role_answer, role_corrected,
+                      awaiting
                FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
@@ -386,7 +389,8 @@ def get_last_turn(session_id: int) -> dict | None:
             "valid": None if r[4] is None else bool(r[4]), "structure": r[5], "unknown": r[6],
             "issue": r[7], "response_type": r[8], "prompt_strength": r[9],
             "self_label": r[10], "self_label_text": r[11],
-            "role_answer": r[12], "role_corrected": None if r[13] is None else bool(r[13])}
+            "role_answer": r[12], "role_corrected": None if r[13] is None else bool(r[13]),
+            "awaiting": r[14]}
 
 
 def get_produced(user_id: str, phase: int) -> list[str]:
@@ -479,7 +483,7 @@ LOG_COLUMNS = [
     "self_label", "self_label_text", "self_label_match",
     "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "help_count",
-    "strength", "strength_trigger", "target_structure", "latency_ms",
+    "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
 ]
 _BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected", "is_help_request")
 
@@ -522,7 +526,7 @@ CSV_FIELDS = [
     "self_label", "self_label_text", "self_label_match",
     "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "help_count",
-    "strength", "strength_trigger", "target_structure", "latency_ms",
+    "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
 ]
 
 

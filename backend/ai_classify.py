@@ -11,9 +11,35 @@ API 呼び出し（タイムアウト・リトライ・同時実行制御）は 
 """
 
 import json
+import re
 
 from config import CLASSIFY_MODEL, parse_expression
 import llm_call
+
+# AI が児童に問いを出した直後（awaiting）の入力を作問として扱う軽量ルール（9/17 修正①）：
+# 数量（数字）が2つ以上あり、かつ問いの文で終わる完全な問題文だけを作問にする。それ以外は対話（LLM 分類は使わない）。
+_NUMBER = re.compile(r"[0-9０-９]+|[一二三四五六七八九十百千]+")
+_QUESTION_END = re.compile(r"(ですか|でしょうか|でしょう|ますか|なさい|かな|か|？|\?)[。．\s]*$")
+
+
+_SCENE_VERB = re.compile(r"(あります|います|ました|ます|配|くば|分け|わけ|入れ|もって|持って)")
+FRAGMENT_MAX_LEN = 12
+
+
+def looks_like_problem(message: str) -> bool:
+    """awaiting 中の入力が「完全な問題文」か：異なる数量が2つ以上 ＋ 問いの文で終わる。"""
+    text = (message or "").strip()
+    numbers = {n.translate(str.maketrans("０１２３４５６７８９", "0123456789")) for n in _NUMBER.findall(text)}
+    return len(numbers) >= 2 and _QUESTION_END.search(text) is not None
+
+
+def looks_like_fragment(message: str) -> bool:
+    """form（不成立への形式支援）の直後の入力が、作問ではなく「指摘への返事」の断片か（例「一人4こ」「ハコの数」）：
+    短く（FRAGMENT_MAX_LEN 字以下）、問いの文で終わらず、場面の動詞も無い。これに当たれば LLM 分類を通さず対話にする。"""
+    text = (message or "").strip()
+    return (len(text) <= FRAGMENT_MAX_LEN and _QUESTION_END.search(text) is None
+            and _SCENE_VERB.search(text) is None)
+
 
 SYSTEM_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの入力仕分け係です。
 児童が今おくった入力を、「作問」か「対話」かに分類することだけが仕事です。

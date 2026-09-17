@@ -52,6 +52,11 @@ CASES = [
     ("場面矛盾", "24人が4人のグループに分かれます。そうすると1グループ何人ですか。", (False, "invalid", None, "scene_contradiction"), []),
     ("場面矛盾", "4人あわせて100まもっています。Aくんは24まいもっています。20人います。1人4まいだと何人にわたしますか?", (False, "invalid", None, "scene_contradiction"), []),
     ("場面矛盾", "24このあめを1人に4こずつ配ります。1人何こもらえますか。", (False, "invalid", None, "scene_contradiction"), []),
+    ("場面矛盾(9/17)", "④24台の車があります。1台に4人のるとすると何台ひつようですか。", (False, "invalid", None, "scene_contradiction"), []),
+    # --- 条件（除数）の欠落（9/17。問いはあるが「4まいずつ」が無い）---
+    ("条件なし", "24まいのおりがみがあります。ぜんぶで何人におりがみをくばれますか。", (False, "invalid", None, "missing_condition"), []),
+    ("条件なし", "あめが24こあります。何人にくばれますか。", (False, "invalid", None, "missing_condition"), []),
+    ("条件なし", "24このあめを同じ数ずつ分けます。1人分は何こですか。", (False, "invalid", None, "missing_condition"), []),
     # --- その他の不成立 ---
     ("問いなし", "あめが24こあります。4人にわけます。", (False, "invalid", None, "no_question"), []),
     ("途中切れ", "あめが24こあります。4人でわけると", (False, "invalid", None, "incomplete_text"), [(False, "invalid", None, "no_question")]),

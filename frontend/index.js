@@ -13,7 +13,7 @@ const state = {
   problems: [],
   allReached: false,
   sending: false,
-  dialog: null,           // null / role（弱・ターン1：除数の役割の答え待ち）/ declaration（弱・ターン2：予告待ち）
+  dialog: null,           // null / declaration（弱：「4を どんな ふうに 使った お話に する？」の答え待ち）
   pollTimer: null,
   pollSeconds: 5,
   switching: false,
@@ -374,8 +374,8 @@ function setTarget(declared, label) {
   }
 }
 
-// dialog: null / "role"（弱・ターン1）/ "declaration"（弱・ターン2）。どちらも同じ入力欄が対話モード
-// （緑枠・プレースホルダなし）になる。どのターンを待っているかはサーバが直前のログ行から決める。
+// dialog: null / "declaration"（弱：宣言の答え待ち）。同じ入力欄が対話モード（緑枠・プレースホルダなし）になる。
+// 待っているかどうかはサーバが直前のログ行（awaiting）から決める。
 const CHAT_PLACEHOLDER = "問題をここに書いてね…";
 function setDialog(dialog) {
   state.dialog = dialog || null;
@@ -433,8 +433,8 @@ async function sendMessage() {
   state.sending = true;
   document.getElementById("btn-send").disabled = true;
   input.value = "";
-  // 対話モード（役割の宣言のターン1・2）なら、作問でない文はそのターンの答えとして扱われる（サーバが判断）。
-  // 対話の途中でも作問は受け付ける（対話は打ち切り。予告は立ったまま）
+  // 対話モード（弱の宣言待ち）なら、作問でない文は宣言として扱われる（サーバが判断）。
+  // 対話の途中でも作問は受け付ける（対話は打ち切り）
   const declaring = !!state.dialog;
   setDialog(null);
 
@@ -466,8 +466,7 @@ async function sendMessage() {
     // accepted：成立した作問だけ一覧に追加（再送・判定エラーは追加しない）
     if (data.accepted) addProblem(text, data.structure);
     applySupport(data);
-    // 役割の答え（role）は訂正か次のターンの問いが返る。予告（declaration）は目標を固定表示するだけ
-    // （unknown なら何も出さず作問に戻る。再質問しない）
+    // 宣言（declaration）には1回だけ返事が返り、目標が立てば上部に固定表示される（unknown でも返事は出す。再質問はしない）
     if (data.message) addAiBubble(data.message, data.response_type, data.is_new, data.prompt_strength);
     setDialog(data.dialog);
   } catch (e) {

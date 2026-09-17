@@ -41,9 +41,10 @@
     <div class="chat-header">
       <div class="expression" id="game-expression">　</div>
       <div class="subtitle">この 式に なる 問題を 作ろう</div>
-      <!-- 目標の固定表示（予告が確定している間だけ。ヘッダーに固定＝スクロールしても見える） -->
+      <!-- 目標の固定表示（予告が確定している間だけ。ヘッダーに固定＝スクロールしても見える）。
+           構造のラベル（何倍 など）は出さない：児童が宣言したときはその言葉、システム指定は行き先の言葉（サーバの target_label） -->
       <div class="target-bar" id="target-bar" hidden>
-        今 目指している いるのは「<strong id="target-label"></strong>」を 求める 問題
+        つぎは「<strong id="target-label"></strong>」
       </div>
     </div>
     <div class="chat-log" id="chat-log"></div>

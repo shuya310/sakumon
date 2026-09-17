@@ -429,7 +429,7 @@ function buildLogRow(log, isSelected = false) {
   const inputBadge = {
     taiwa: '<span class="badge badge-purple">対話</span>',
     resend: '<span class="badge badge-gray" title="同じ本文の再送（APIは呼ばず直前の結果を返した）">再送</span>',
-    role: '<span class="badge badge-orange">役割</span>',
+    role: '<span class="badge badge-orange" title="旧 v3 の役割の宣言（廃止）">役割</span>',
     declaration: '<span class="badge badge-orange">予告</span>',
     self_label: '<span class="badge badge-orange">自己ラベル</span>',
   }[log.input_type] || '<span class="badge badge-blue">作問</span>';
@@ -454,8 +454,9 @@ function buildLogRow(log, isSelected = false) {
   const selfLabel = (log.self_label || log.self_label_text)
     ? `<div class="small">自己ラベル: ${log.self_label ? (STRUCT_LABEL[log.self_label] || log.self_label) : esc(log.self_label_text)}${log.self_label_match == null ? "" : (log.self_label_match ? ' <span class="met-ok">判定と一致</span>' : ' <span class="met-ng">判定と不一致</span>')}</div>` : "";
   const helpReq = log.is_help_request ? '<div class="small"><span class="badge badge-orange">支援要求</span></div>' : "";
-  const roleAnswer = log.role_answer
+  const roleAnswer = log.role_answer   // 旧 v3 の行にだけ残る
     ? `<div class="small">役割の答え: ${ROLE_LABEL[log.role_answer] || log.role_answer}${log.role_corrected ? ' <span class="met-ng">訂正</span>' : ""}</div>` : "";
+  const phrase = log.divisor_phrase ? `<div class="muted small">除数の句: 『${esc(log.divisor_phrase)}』</div>` : "";
   const timingHtml = log.latency_ms != null ? `<div class="muted small">${(log.latency_ms / 1000).toFixed(1)}s</div>` : "";
   const produced = (log.produced_structures || "").split(",").filter(Boolean);
   const countsHtml = log.strength == null
@@ -473,7 +474,7 @@ function buildLogRow(log, isSelected = false) {
       ${log.ai_message ? `<div class="msg-ai ${aiCls}">${richHtml(log.ai_message)}</div>` : ""}
       ${timingHtml}
     </td>
-    <td>${judgeCell}</td>
+    <td>${judgeCell}${phrase}</td>
     <td>${responseBadge(log.response_type, log.prompt_strength)}${declared}${roleAnswer}${helpReq}${selfLabel}</td>
     <td>${lightsHtml(produced)}${countsHtml}</td>
     <td><button class="btn btn-danger btn-sm">削除</button></td>

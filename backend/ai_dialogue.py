@@ -88,8 +88,15 @@ WEAK_KURABERU = ("これまでの お話は、どれも {dividend}{unit}と {div
                  "じゃあ 次は、くらべない お話に するなら、{divisor}を どんな ふうに 使った お話に する？")
 
 # 弱の答え（予告）への返事。1回で閉じる（答えの中身を追う対話には入らない。宙に上げる）
+#   構造に分類できた                → DECLARED
+#   分類できないが中身のある言葉      → ECHO（児童の言葉をそのまま引き取る。「わからなかった」扱いにしない。9/18 模擬で
+#                                     「折り紙の数」に「わからなくても だいじょうぶ」と返して答えを受け取り損ねた）
+#   わからない・空・記号だけ          → UNKNOWN
 DECLARED_MESSAGE = "じゃあ、その お話を 作って みよう。"
+DECLARATION_ECHO_MESSAGE = "『{echo}』だね。じゃあ、その お話を 作って みよう。"
 DECLARATION_UNKNOWN_MESSAGE = "わからなくても だいじょうぶ。じゃあ、{divisor}を ちがう 使い方に した お話を 作って みよう。"
+# 「わからない」系の答え（中身が無い）。これに当たらなければ児童の言葉として引き取る
+_DONTKNOW_RE = re.compile(r"わか(ら|ん)な|分か(ら|ん)な|しらな|知らな|むずかし|難し|わかりません|分かりません|できな|無理|むり")
 
 # 画面上部「つぎは「…」」（システム指定のとき。児童が宣言したときは児童の言葉をそのまま出す）。構造のラベルは出さない
 TARGET_LABEL = {
@@ -220,18 +227,42 @@ def weak_message(problems: list[dict], expression: str) -> str:
     return _fill(WEAK_ONE_NOPHRASE, expression, no=latest.get("no", 1))
 
 
-def declaration_message(declared: str | None, expression: str) -> str:
-    """弱の答えへの返事（1回で閉じる）。構造に分類できたら「その お話を 作って みよう」、できなければ定型で作問に戻す。"""
-    return _fill(DECLARED_MESSAGE if declared else DECLARATION_UNKNOWN_MESSAGE, expression)
+def looks_like_dontknow(text: str | None) -> bool:
+    """弱の答えが「わからない」系（中身が無い）か。空・記号だけ・2字以下も含む。"""
+    q = format_quote(text)
+    if not q:
+        return True
+    body = re.sub(r"[？?！!。、,.\s　…・ー〜~]", "", q)
+    if len(body) <= 2:
+        return True
+    return bool(_DONTKNOW_RE.search(q))
+
+
+def declaration_echo(text: str | None) -> str | None:
+    """宣言 unknown のとき引き取る児童の言葉。「わからない」系・空なら None（→ UNKNOWN の定型）。"""
+    if looks_like_dontknow(text):
+        return None
+    return format_quote(text)
+
+
+def declaration_message(declared: str | None, expression: str, echo: str | None = None) -> str:
+    """弱の答えへの返事（1回で閉じる）。構造に分類できたら「その お話を 作って みよう」。
+    分類できなくても中身のある言葉（echo）なら『…』だね、と引き取る。「わからない」なら定型で作問に戻す。"""
+    if declared or (echo and len(echo) > 30):   # 長い言葉は引用せずに受ける
+        return _fill(DECLARED_MESSAGE, expression)
+    if echo:
+        return _fill(DECLARATION_ECHO_MESSAGE, expression, echo=echo)
+    return _fill(DECLARATION_UNKNOWN_MESSAGE, expression)
 
 
 def target_label(declared: str | None, declared_by: str | None, declared_text: str | None,
                  expression: str, unit: str | None = None) -> str | None:
-    """画面上部の「つぎは「…」」。児童の宣言はその言葉、システム指定は行き先の言葉（構造のラベルは出さない）。"""
-    if not declared:
-        return None
+    """画面上部の「つぎは「…」」。児童の宣言はその言葉（構造に分類できなかった言葉も同じ）、
+    システム指定は行き先の言葉（構造のラベルは出さない）。"""
     if declared_by == "child" and declared_text:
         return declared_text
+    if not declared:
+        return None
     return _fill(TARGET_LABEL[declared], expression, unit=unit or UNIT_FALLBACK)
 
 

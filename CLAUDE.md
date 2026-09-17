@@ -32,6 +32,8 @@ cd backend && uvicorn main:app --reload --port 8000
     miss だけでは 0→1 にならない。1 以降は stuck/miss/help のどれかが増えたターンごとに +1（上限3。同時に増えても1回。talk では上げない）。
     strength_trigger は上げた原因（上がらなければ none）。閾値は Wood & Middleton の原則に基づく設計判断で先行研究由来ではない
   - help / talk で 0→1 に上がったターンは talk の文言の後ろに弱の文言を連結して宣言待ち（awaiting=declaration・dialog=declaration）。成立作問が無ければ連結しない
+  - help で 1→2・2→3 に上がったターンは talk の文言の後ろに中／強の文言を連結（目標＝既存の宣言か pick_unreached_structure。題材は最新の成立作問）。
+    据え置き（上限3）や成立作問なしでは連結しない。9/18 模擬で上部ラベルだけ変わって中の指示が出なかったため
   - response_type: form / praise / prompt / talk / done / error。定型文は仕様の表を一字一句（言い換えない）。`**…**` は強調
   - 称賛（強度0）は児童自身の除数の句を引用「この お話では、4は『4個ずつ 分けると』の 4だったね。今度は、4が ちがう ものの 数に なる お話は 作れるかな？」
     句は判定と並行して extract_divisor_phrase（LLM → 除数を含む文 → なし）で取り chat_logs.divisor_phrase に残す。句が無ければ引用の文を落とす
@@ -40,7 +42,9 @@ cd backend && uvicorn main:app --reload --port 8000
     ／kuraberu（倍だけ2問以上）「どれも …くらべる お話だね。…くらべない お話に するなら、」／one（1問）「{divisor}が『{phrase}』の {divisor}じゃ ない お話に するなら、」
     → 共通「じゃあ 次は、{divisor}を どんな ふうに 使った お話に する？」。この問いは宣言させる問い（意図性Aの測定点）で、気づかせる問いではない
   - 宣言の答えは classify_declaration（式を渡す）→ 構造なら declared_by=child・declared_text=児童の言葉「じゃあ、その お話を 作って みよう。」
-    （到達済み構造の誤答も訂正しない。結果は stuck/miss で拾う）／unknown なら立てず「わからなくても だいじょうぶ。じゃあ、{divisor}を ちがう 使い方に した お話を 作って みよう。」
+    （到達済み構造の誤答も訂正しない。結果は stuck/miss で拾う）／unknown でも中身のある言葉（「折り紙の数」等）は引き取る：構造なし・declared_by=child・
+    declared_text=児童の言葉（上部「つぎは」に出す。target_label は構造なしでも児童の言葉を返す）「『{言葉}』だね。じゃあ、その お話を 作って みよう。」
+    ／「わからない」系（ai_dialogue.looks_like_dontknow）なら立てず「わからなくても だいじょうぶ。じゃあ、{divisor}を ちがう 使い方に した お話を 作って みよう。」
     どちらも1回で閉じる（awaiting 解除。答えの中身を追う対話に入らない＝宙に上げる）。旧 v3 の役割の宣言（ROLE_ASK・classify_role・訂正・role_answer）は廃止（列は残存・未使用）
   - 入力欄は1つ。対話モードの入力は /api/judge に declaring=true。待っているかはサーバが直前のログ行の awaiting=declaration で決める（_pending_dialog）。
     作問なら通常処理（打ち切り）。3択・/api/self_label は廃止（self_label* 列は残存・未使用）

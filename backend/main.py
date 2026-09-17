@@ -251,11 +251,12 @@ def _awaiting_of(response_type: str | None, dialog: str | None, ai_message: str 
 
 def _support_state(session: dict, show: bool) -> dict:
     declared = session["declared"] if show else None
+    child_text = session.get("declared_text") if (show and session["declared_by"] == "child") else None
     label = None
-    if declared:
+    if declared or child_text:
         problems = database.get_valid_problems(session["session_id"])
         unit = problems[-1]["unit"] if problems else None
-        label = ai_dialogue.target_label(declared, session["declared_by"], session.get("declared_text"),
+        label = ai_dialogue.target_label(declared, session["declared_by"], child_text,
                                          session["expression"], unit)
     return {
         "declared": declared,
@@ -451,16 +452,20 @@ def _handle_declaration(session: dict, user_id: str, text: str, t_start: float) 
 
     - 構造に分類できた → declared=その構造・declared_by=child・declared_text=児童の言葉。「じゃあ、その お話を 作って みよう。」
       すでに到達済みの構造でも訂正しない（児童の意図として記録。そのまま作れば stuck、違うものを作れば miss で段階が進む）
-    - unknown（わからない・題材だけ・質問で返した）→ 立てない。「わからなくても だいじょうぶ。…」で作問に戻す
+    - unknown だが中身のある言葉（題材だけ・「折り紙の数」など）→ 構造は立てない（miss は動かない）が、児童の言葉として
+      引き取る：declared_by=child・declared_text=児童の言葉（上部「つぎは」にそのまま出す）。「『…』だね。じゃあ、その お話を 作って みよう。」
+      （9/18 模擬：答えたのに「わからなくても だいじょうぶ」と返すのは答えを受け取り損ねている）
+    - unknown で「わからない」系 → 立てない。「わからなくても だいじょうぶ。…」で作問に戻す
     input_type='declaration' で記録する。カウンタ・強度は動かさない。"""
     kind = ai_classify.classify_declaration(text, user_id=user_id, expression=session["expression"])
     declared = kind if kind in STRUCTURES else None
-    declared_by = "child" if declared else None
-    if declared:
+    echo = None if declared else ai_dialogue.declaration_echo(text)
+    declared_by = "child" if (declared or echo) else None
+    if declared_by:
         database.set_state(session["session_id"], declared=declared, declared_by="child", declared_text=text,
                            stuck_count=session["stuck_count"], miss_count=session["miss_count"],
                            help_count=session["help_count"], strength=session["strength"])
-    ai_message = ai_dialogue.declaration_message(declared, session["expression"])
+    ai_message = ai_dialogue.declaration_message(declared, session["expression"], echo=echo)
     produced = database.get_produced(user_id, 2)
     database.save_log(
         session_id=session["session_id"], user_id=user_id, phase=2, expression=session["expression"],
@@ -669,6 +674,19 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
                 # 連結し、宣言を待つ（→ _handle_declaration）。成立作問が無ければ対比する対象が無いので連結しない
                 ai_message = f"{ai_message}\n{ai_dialogue.weak_message(problems, ctx['expression'])}"
                 dialog = "declaration"
+            elif strength >= 2 and strength != session["strength"] and declared and problems:
+                # 1→2・2→3（help）：talk の文言は更新前の強度で生成されていて行き先を言えない。ここで連結しないと
+                # 上部の「つぎは」だけが変わり、中・強の文言は次の成立作問まで出ない（9/18 模擬）。
+                # 題材は最新の成立作問（{item}{unit}・番号）
+                latest = problems[-1]
+                if strength == 2:
+                    tail = ai_dialogue.mid_message(declared, ctx["expression"], len(problems),
+                                                   latest.get("item"), latest.get("unit"))
+                else:
+                    tail = ai_dialogue.strong_message(declared, ctx["expression"], len(problems),
+                                                      latest.get("item"), latest.get("unit"),
+                                                      session_id=req.session_id)
+                ai_message = f"{ai_message}\n{tail}"
         awaiting = _awaiting_of("talk", dialog, ai_message, ctx["expression"])
 
     result = _base_result(ai_message, "talk" if show else None, "taiwa", dialog=dialog)

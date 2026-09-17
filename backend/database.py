@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -708,6 +709,28 @@ def admin_delete_session(session_id: int):
 def admin_delete_log(log_id: int):
     with _conn() as con:
         con.execute("DELETE FROM chat_logs WHERE log_id = ?", (log_id,))
+
+
+def admin_backup_and_reset(note: str = "") -> dict:
+    """全ログを退避してから消す（リハーサル分の片づけ用）。
+
+    1. DB ファイルを sqlite の backup API で data/sakumon.db.backup_<時刻>_<note> にコピー（WAL の内容も含む）
+    2. sessions / chat_logs / selection_events / teacher_calls / phase_changes を空にする。app_config（現在のフェーズ）は残す
+    バックアップは消さない（DROP も rm もしない）。戻り値はバックアップのパスと消した件数。"""
+    stamp = datetime.now(JST).strftime("%Y%m%d_%H%M%S")
+    safe = re.sub(r"[^0-9A-Za-z_\-]+", "_", note or "").strip("_")
+    backup_path = DB_PATH.with_name(f"{DB_PATH.name}.backup_{stamp}" + (f"_{safe}" if safe else "_pre_reset"))
+    with _conn() as con:
+        dst = sqlite3.connect(backup_path)
+        try:
+            con.backup(dst)
+        finally:
+            dst.close()
+        counts = {}
+        for table in ("chat_logs", "selection_events", "teacher_calls", "phase_changes", "sessions"):
+            counts[table] = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            con.execute(f"DELETE FROM {table}")
+    return {"backup": str(backup_path), "deleted": counts}
 
 
 CSV_FIELDS = [

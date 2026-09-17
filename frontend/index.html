@@ -54,7 +54,7 @@
         rows="2" placeholder="問題をここに書いてね…"></textarea>
       <button class="btn-send" id="btn-send">送る</button>
     </div>
-    <!-- フェーズ1・3だけ：作った お話を 見る（選択画面へ）。目立たせない。フェーズ2では出さない -->
+    <!-- フェーズ1・3だけ：作った お話を 見る（選択画面へ）。フェーズ2では出さない -->
     <div class="review-bar" id="review-bar" hidden>
       <button class="btn-review" id="btn-review">作った お話を 見る</button>
     </div>
@@ -81,8 +81,9 @@
       </div>
     </div>
 
-    <!-- つくった問題の一覧：フェーズ2のあいだ常に表示（強の「◯ばんの お話」はこの番号） -->
-    <div class="panel-card" id="problems-card" hidden>
+    <!-- つくった問題の一覧：全フェーズで表示。フェーズ2は成立した作問（弱・強の「◯ばんの お話」はこの番号）、
+         フェーズ1・3は送った作問の全部（「作った お話を 見る」の一覧と同じ番号） -->
+    <div class="panel-card" id="problems-card">
       <h3>作った 問題 <span id="count-number">0</span></h3>
       <ul class="problem-list" id="problem-list"></ul>
     </div>

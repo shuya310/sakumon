@@ -396,9 +396,10 @@ function applySupport(data) {
 // ===== 右パネル =====
 function updatePanels() {
   const show = state.showSupport;
-  // 進捗（信号機）と一覧はフェーズ2のあいだ常時表示。マークは到達数だけ（どの構造かは示さない）
+  // 進捗（信号機）はフェーズ2だけ。マークは到達数だけ（どの構造かは示さない）。
+  // 「作った 問題」の一覧は全フェーズ（フェーズ1・3は送った作問の全部＝「作った お話を 見る」と同じ番号）
   document.getElementById("lights-card").hidden = !show;
-  document.getElementById("problems-card").hidden = !show;
+  document.getElementById("problems-card").hidden = false;
   // 「作った お話を 見る」はフェーズ1・3だけ（フェーズ2には置かない）
   document.getElementById("review-bar").hidden = show;
   const n = Math.min(3, state.history.length);
@@ -460,6 +461,8 @@ async function sendMessage() {
     // サーバが判断したフェーズに従って描く（切替の瞬間に送った場合でもログと表示がずれない）
     if (!data.show_support) {
       addAckLine("おくったよ");
+      // フェーズ1・3：作問として受けた本文は右の「作った 問題」に載せる（判定結果は見せない。再送・対話は載せない）
+      if (data.input_type === "sakumon") addProblem(text, null);
       if (data.phase !== state.phase) pollConfig();
       return;
     }

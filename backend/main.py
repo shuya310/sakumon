@@ -3,8 +3,10 @@
 - フェーズは app_config（database.get_config）から取得する。ハードコードしない。
 - 式は児童（出席番号の奇偶）とフェーズで決まる（EXPRESSION_ASSIGNMENT。仕様 v2 4章）。
   セッション開始時に決めて sessions.expression に保存し、途中で変えない。管理画面から個別に上書きできる。
-- フェーズ1・3：classify / judge は動かしログに全記録するが、児童には「おくったよ」だけ返す
-  （response_type / ai_message は記録しない＝表示していないものは記録しない）。
+- フェーズ1・3：classify は同期で動かし、作問なら本文を judge_status='pending' で保存した時点で「おくったよ」を返す。
+  判定（ai_judge）は応答後に judge_queue が実行して同じ行を埋める（9/17。判定を待つ約 3 秒のラグをなくす）。
+  response_type / ai_message は記録しない（表示していないものは記録しない）。判定が失敗した行は judge_status='failed'
+  （issue='error'）で、管理画面の「再判定」から再投入できる。
 - フェーズ2：応答の種類（response_type: form / praise / prompt / done / talk / error）を状態機械
   （docs/sakumon_spec_v3.md 2章）で決定論的に決め、ai_dialogue に文言を組み立てさせる。AIには判定させない。
   状態（sessions に保持・フェーズスコープ）：produced（到達構造の集合）、declared / declared_by（予告）、
@@ -46,6 +48,7 @@ import ai_judge
 import ai_classify
 import ai_dialogue
 import llm_call
+import judge_queue
 
 if not config.ADMIN_PASSWORD:
     raise RuntimeError(
@@ -396,7 +399,9 @@ def judge(req: JudgeRequest):
         # 形式支援（「どこか さがして みよう」等）への短い返事（「一人4こ」）は作問ではない。判定に回さず対話にする
         input_kind = "taiwa"
     else:
-        input_kind = ai_classify.classify(message, ctx["recent"], expression, user_id=user_id)
+        # 分類に失敗したら、フェーズ2は対話（judge に対話文を流さない）、フェーズ1・3は作問（pending で残し、再判定で拾う）
+        input_kind = ai_classify.classify(message, ctx["recent"], expression, user_id=user_id,
+                                          fallback="taiwa" if phase == 2 else "sakumon")
     pending = _pending_dialog(last) if (req.declaring and phase == 2) else None
     if input_kind == "sakumon":
         result = _handle_sakumon(req, user_id, message, ctx)
@@ -668,6 +673,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     phase, expression, produced, counts = ctx["phase"], ctx["expression"], ctx["produced"], ctx["counts"]
     session = ctx["session"]
     show = phase == 2
+    if not show:
+        return _handle_sakumon_deferred(req, user_id, message, ctx)
     jr = ai_judge.judge(message, expression, user_id=user_id)
 
     # 技術的失敗（規定回数リトライしても API が応答しない）→ 3-2 error。一覧には載せず、送り直してもらう。
@@ -684,7 +691,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
             produced_structures=produced, stuck_count=counts["stuck"], miss_count=counts["miss"],
             help_count=counts["help"] if show else None, strength=counts["strength"] if show else None,
             strength_trigger="none" if show else None, target_structure=session["declared"] if show else None,
-            latency_ms=_latency(ctx),
+            latency_ms=_latency(ctx), judge_status="failed",
         )
         return result
 
@@ -767,9 +774,27 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         produced_structures=produced_after, stuck_count=stuck, miss_count=miss,
         help_count=help_count if show else None, strength=strength_after, strength_trigger=trigger if show else None,
         target_structure=declared if show else None, awaiting=dialog,
-        latency_ms=_latency(ctx),
+        latency_ms=_latency(ctx), judge_status="done",
     )
     return result
+
+
+def _handle_sakumon_deferred(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> dict:
+    """フェーズ1・3の作問：本文を judge_status='pending' で保存して即応答し、判定は judge_queue に任せる。
+
+    判定に関わる列（valid / structure / unknown / issue / is_new / item / unit / produced_structures）は判定完了時に
+    judge_queue が埋める（is_new は送信順で決まる）。カウンタ・支援の列はフェーズ1・3では従来どおり動かさない。"""
+    phase, expression, counts = ctx["phase"], ctx["expression"], ctx["counts"]
+    log_id = database.save_log(
+        session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
+        input_type="sakumon", message=message, ai_message=None,
+        valid=None, structure=None, unknown=None, issue=None, is_new=None,
+        response_type=None, prompt_strength=None,
+        produced_structures=None, stuck_count=counts["stuck"], miss_count=counts["miss"],
+        latency_ms=_latency(ctx), judge_status="pending",
+    )
+    judge_queue.enqueue(user_id, log_id)
+    return _base_result(None, None, "sakumon", accepted=False, strength_trigger=None, declaration_met=None)
 
 
 @app.get("/")
@@ -834,7 +859,14 @@ def admin_live():
         seen = _last_seen.get(r["user_id"])
         r["online"] = bool(seen and now - seen["ts"] <= config.ONLINE_WINDOW_SECONDS)
         r["last_seen_seconds"] = int(now - seen["ts"]) if seen else None
-    return {"config": _cfg_public(cfg), "students": rows}
+    return {"config": _cfg_public(cfg), "students": rows,
+            "judge": {**database.count_judge_status(), "queued": judge_queue.pending_in_queue()}}
+
+
+@admin.post("/api/rejudge")
+def admin_rejudge():
+    """未判定（pending）・失敗（failed）の作問行を判定キューに入れ直す（サーバ再起動・API エラーの復旧用）。"""
+    return {"ok": True, "requeued": judge_queue.requeue_unjudged(), **database.count_judge_status()}
 
 
 @admin.get("/api/students")

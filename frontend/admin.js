@@ -119,7 +119,27 @@ function lightsHtml(structures) {
   </span>`;
 }
 
+function renderJudge(j) {
+  if (!j) return;
+  const el = document.getElementById("judge-summary");
+  el.innerHTML = `未判定 <strong>${j.pending ?? 0}</strong> ／ 失敗 <strong class="${(j.failed ?? 0) > 0 ? "met-ng" : ""}">${j.failed ?? 0}</strong> ／ 完了 ${j.done ?? 0}`
+    + `<span class="muted"> （キュー内 ${j.queued ?? 0}）</span>`;
+}
+
+document.getElementById("btn-rejudge").addEventListener("click", async () => {
+  if (!confirm("未判定・失敗の作問をすべて再判定しますか？（API を呼びます）")) return;
+  try {
+    const r = await api("/admin/api/rejudge", { method: "POST", body: "{}" });
+    renderJudge(r);
+    alert(`${r.requeued} 件を判定キューに入れました。数秒〜数十秒で完了します。`);
+    refreshLive();
+  } catch (e) {
+    alert("再判定に失敗しました: " + e.message);
+  }
+});
+
 function renderLive(data) {
+  renderJudge(data.judge);
   const tbody = document.getElementById("live-tbody");
   const students = data.students || [];
   const online = students.filter(s => s.online).length;
@@ -372,6 +392,8 @@ function buildLogRow(log) {
   } else if (!isTaiwa && log.valid === false) {
     judgeCell = `<span class="badge badge-orange">不成立</span>`;
   }
+  if (log.judge_status === "pending") judgeCell = '<span class="badge badge-gray" title="応答後の判定がまだ終わっていない">未判定</span>';
+  else if (log.judge_status === "failed") judgeCell = '<span class="badge badge-red" title="判定に失敗（フェーズ管理の「再判定」で再投入）">判定失敗</span>';
 
   // 応答の種類と、予告・自己ラベル（予告支援仕様で記録されるようになる列）
   const declared = log.declared_structure

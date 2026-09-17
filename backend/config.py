@@ -29,6 +29,11 @@ LLM_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))   # 1�
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))               # 再試行回数（初回を除く）
 LLM_MAX_CONCURRENCY = int(os.environ.get("LLM_MAX_CONCURRENCY", "30"))      # API への同時リクエスト上限
 
+# フェーズ1・3の応答後の判定（judge_queue.py）。児童ごとに送信順で直列、児童をまたいで並列。
+JUDGE_BG_WORKERS = int(os.environ.get("JUDGE_BG_WORKERS", "8"))                  # 判定キューの同時実行数
+# llm_call の内部リトライ（3回）を使い切って失敗したあと、間隔をあけて再試行する秒数の列。空なら再試行しない
+JUDGE_BG_RETRY_WAITS = tuple(float(x) for x in os.environ.get("JUDGE_BG_RETRY_WAITS", "10,30").split(",") if x.strip())
+
 # ---- 管理者認証（HTTP Basic）----
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()

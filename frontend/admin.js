@@ -138,8 +138,37 @@ document.getElementById("btn-rejudge").addEventListener("click", async () => {
   }
 });
 
+let CURRENT_PHASE = null;
+
+function renderSelectionSummary(selection, phase) {
+  const el = document.getElementById("selection-summary");
+  if (!selection) { el.textContent = "—"; return; }
+  const parts = ["1", "3"].map(ph => {
+    const s = selection[ph] || {};
+    const call = s.teacher_call
+      ? `声がけ ${fmtTime(s.teacher_call.first_at)}${s.teacher_call.count > 1 ? `（${s.teacher_call.count}回・最後 ${fmtTime(s.teacher_call.last_at)}）` : ""}`
+      : "声がけ なし";
+    return `フェーズ${ph}: 選択送信済み <strong>${s.submitted ?? 0}</strong>人 ／ ${call}`;
+  });
+  el.innerHTML = parts.join("<br>");
+  document.getElementById("btn-teacher-call").disabled = !(phase === 1 || phase === 3);
+}
+
+document.getElementById("btn-teacher-call").addEventListener("click", async () => {
+  if (!(CURRENT_PHASE === 1 || CURRENT_PHASE === 3)) { alert("声がけはフェーズ1・3でだけ記録します"); return; }
+  if (!confirm(`フェーズ${CURRENT_PHASE} の「声がけした」を今の時刻で記録しますか？（児童の画面には何も出ません）`)) return;
+  try {
+    await api("/admin/api/teacher_call", { method: "POST", body: JSON.stringify({ phase: CURRENT_PHASE }) });
+    refreshLive();
+  } catch (e) {
+    alert("記録に失敗しました: " + e.message);
+  }
+});
+
 function renderLive(data) {
+  CURRENT_PHASE = data.config ? data.config.phase : null;
   renderJudge(data.judge);
+  renderSelectionSummary(data.selection, CURRENT_PHASE);
   const tbody = document.getElementById("live-tbody");
   const students = data.students || [];
   const online = students.filter(s => s.online).length;
@@ -270,6 +299,7 @@ function buildSessionBlock(session, userId) {
           ${session.declared ? `<span class="badge badge-orange">予告: ${STRUCT_LABEL[session.declared] || session.declared}（${session.declared_by === "child" ? "児童" : "システム"}）</span>` : ""}
         </div>
         <div class="s-stat">違う構造 ${session.new_count} ／ 作問 ${session.sakumon_count ?? 0}回・対話 ${session.taiwa_count ?? 0}回　${structs}</div>
+        ${session.selection ? `<div class="s-stat">選択画面を初めて開いた: ${session.selection.first_open_at ? fmtDate(session.selection.first_open_at) : "—"} ／ 最終選択: ${session.selection.last_log_ids ? `${session.selection.last_log_ids.length}件（${fmtDate(session.selection.last_at)}、送信 ${session.selection.submit_count}回）` : "未送信"}</div>` : ""}
       </div>
     </div>
     <div class="session-head-right">
@@ -318,11 +348,17 @@ function buildSessionBlock(session, userId) {
       try {
         const logs = await api(`/admin/api/sessions/${session.session_id}`);
         body.innerHTML = "";
+        let selected = new Set();
+        if (session.phase !== 2) {
+          const selInfo = await api(`/admin/api/sessions/${session.session_id}/selection`);
+          selected = new Set(selInfo.last_log_ids || []);
+          body.appendChild(buildSelectionBlock(selInfo));
+        }
         if (logs.length === 0) {
-          body.innerHTML = `<div class="empty">チャット履歴がありません</div>`;
+          body.appendChild(Object.assign(document.createElement("div"), { className: "empty", textContent: "チャット履歴がありません" }));
           return;
         }
-        body.appendChild(buildLogsTable(logs));
+        body.appendChild(buildLogsTable(logs, selected));
       } catch (e) {
         body.innerHTML = `<div class="empty">読み込みエラー</div>`;
       }
@@ -334,7 +370,23 @@ function buildSessionBlock(session, userId) {
   return block;
 }
 
-function buildLogsTable(logs) {
+// フェーズ1・3：最終選択の本文と、open / submit の全履歴
+function buildSelectionBlock(info) {
+  const div = document.createElement("div");
+  div.className = "selection-block";
+  const last = (info.last_problems || []).map(p => `<li><span class="num">${p.no}.</span> ${esc(p.text)}</li>`).join("");
+  const events = (info.events || []).map(ev =>
+    `<span class="badge ${ev.kind === "submit" ? "badge-green" : "badge-gray"}">${ev.kind === "submit" ? "送信" : "開いた"}</span> ${fmtTime(ev.created_at)}${ev.log_ids ? ` [${ev.log_ids.join(", ")}]` : ""}`
+  ).join("　");
+  div.innerHTML = `
+    <div class="small"><strong>最終選択</strong>${info.last_at ? `（${fmtDate(info.last_at)}）` : "：未送信"}</div>
+    ${last ? `<ul class="selection-list">${last}</ul>` : ""}
+    <div class="muted small">選択画面の履歴: ${events || "なし"}</div>
+  `;
+  return div;
+}
+
+function buildLogsTable(logs, selected = new Set()) {
   const tbl = document.createElement("table");
   tbl.className = "logs-table";
   tbl.innerHTML = `
@@ -352,7 +404,7 @@ function buildLogsTable(logs) {
     </thead>
   `;
   const tbody = document.createElement("tbody");
-  logs.forEach(log => tbody.appendChild(buildLogRow(log)));
+  logs.forEach(log => tbody.appendChild(buildLogRow(log, selected.has(log.log_id))));
   tbl.appendChild(tbody);
   return tbl;
 }
@@ -364,15 +416,16 @@ const ISSUE_LABEL = {
   incomplete_text: "途中で切れ", no_question: "問いなし", not_problem: "文章題でない", error: "判定エラー（API不通）",
 };
 
-function buildLogRow(log) {
+function buildLogRow(log, isSelected = false) {
   const tr = document.createElement("tr");
   tr.className = "log-row";
-  tr.dataset.logId = log.id;
+  tr.dataset.logId = log.log_id;
 
   const aiCls = log.response_type === "done" ? "clear"
     : (log.response_type === "praise" && log.is_new) ? "new-structure" : "";
 
   const isTaiwa = log.input_type === "taiwa";
+  const selectedBadge = isSelected ? ' <span class="badge badge-green" title="最終選択に含まれる">選択</span>' : "";
   const inputBadge = {
     taiwa: '<span class="badge badge-purple">対話</span>',
     resend: '<span class="badge badge-gray" title="同じ本文の再送（APIは呼ばず直前の結果を返した）">再送</span>',
@@ -414,7 +467,7 @@ function buildLogRow(log) {
   tr.innerHTML = `
     <td style="font-size:.78rem;color:#888;white-space:nowrap">${fmtDate(log.created_at)}</td>
     <td>${log.phase != null ? `<span class="badge badge-gray">${log.phase}</span>` : '<span style="color:#ccc">—</span>'}</td>
-    <td>${inputBadge}</td>
+    <td>${inputBadge}${selectedBadge}</td>
     <td>
       <div class="msg-user">${esc(log.message)}</div>
       ${log.ai_message ? `<div class="msg-ai ${aiCls}">${richHtml(log.ai_message)}</div>` : ""}
@@ -428,7 +481,7 @@ function buildLogRow(log) {
 
   tr.querySelector(".btn-danger").addEventListener("click", async () => {
     if (!confirm("このチャットを削除しますか？（元に戻せません）")) return;
-    await api(`/admin/api/logs/${log.id}`, { method: "DELETE" });
+    await api(`/admin/api/logs/${log.log_id}`, { method: "DELETE" });
     tr.remove();
   });
   return tr;

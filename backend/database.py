@@ -1,4 +1,4 @@
-"""SQLite（sessions / chat_logs / app_config / phase_changes）。
+"""SQLite（sessions / chat_logs / app_config / phase_changes / selection_events / teacher_calls）。
 
 - 時刻はすべて JST の 'YYYY-MM-DD HH:MM:SS' で保存する（旧実装は UTC で、書き出し時に日付がずれていた）。
 - sessions は UNIQUE(user_id, phase)。1児童1フェーズ1セッションを DB レベルで保証する
@@ -9,6 +9,7 @@
 - is_new は「同じ児童・同じフェーズ」で初めて出た構造かどうか（フェーズスコープ）。
 """
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -135,6 +136,26 @@ CREATE TABLE IF NOT EXISTS phase_changes (
     expression_b   TEXT,
     note           TEXT,
     changed_at     TEXT
+);
+
+-- フェーズ1・3「作った お話を 見る」（3つえらぶ）のイベント。開くたび・送るたびに1行（分析では最後の submit を採用）
+CREATE TABLE IF NOT EXISTS selection_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     INTEGER NOT NULL,
+    user_id        TEXT    NOT NULL,
+    phase          INTEGER NOT NULL,
+    kind           TEXT    NOT NULL,   -- open（選択画面を開いた）／ submit（選択を送った）
+    log_ids        TEXT,               -- submit のとき、選んだ作問の chat_logs.log_id の JSON 配列 "[12,15,18]"
+    created_at     TEXT    NOT NULL,   -- JST
+    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_selection_events_sess ON selection_events(session_id);
+
+-- 教師が「声がけした」を押した時刻（児童画面には何も反映しない。同じフェーズで複数回押せる）
+CREATE TABLE IF NOT EXISTS teacher_calls (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    phase          INTEGER NOT NULL,
+    called_at      TEXT    NOT NULL    -- JST
 );
 """
 
@@ -502,6 +523,80 @@ def get_max_prompt_strength(session_id: int) -> int:
     return int(r[0] or 0) if r else 0
 
 
+# ===== 「作った お話を 見る」（フェーズ1・3の選択） =====
+
+def get_sakumon_rows(session_id: int) -> list[dict]:
+    """そのセッションで児童が送った作問（input_type='sakumon'）を送信順に返す。不成立・未判定・判定失敗も含む。
+    対話（taiwa）・再送（resend）は含めない。表示番号は 1 始まり。判定結果は返さない。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT log_id, message FROM chat_logs WHERE session_id = ? AND input_type = 'sakumon' ORDER BY log_id",
+            (session_id,),
+        ).fetchall()
+    return [{"no": i + 1, "log_id": r[0], "text": r[1]} for i, r in enumerate(rows)]
+
+
+def add_selection_event(session_id: int, user_id: str, phase: int, kind: str, log_ids: list[int] | None = None) -> int:
+    with _conn() as con:
+        cur = con.execute(
+            "INSERT INTO selection_events (session_id, user_id, phase, kind, log_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, user_id, phase, kind, json.dumps(list(log_ids)) if log_ids is not None else None, _now()),
+        )
+        return cur.lastrowid
+
+
+def get_selection_state(session_id: int) -> dict:
+    """そのセッションの、選択画面を初めて開いた時刻・最後の選択（log_ids と時刻）・送信回数。"""
+    with _conn() as con:
+        first_open = con.execute(
+            "SELECT MIN(created_at) FROM selection_events WHERE session_id = ? AND kind = 'open'", (session_id,)
+        ).fetchone()[0]
+        last = con.execute(
+            """SELECT log_ids, created_at FROM selection_events WHERE session_id = ? AND kind = 'submit'
+               ORDER BY id DESC LIMIT 1""", (session_id,)
+        ).fetchone()
+        n_submit = con.execute(
+            "SELECT COUNT(*) FROM selection_events WHERE session_id = ? AND kind = 'submit'", (session_id,)
+        ).fetchone()[0]
+    return {"first_open_at": first_open,
+            "last_log_ids": json.loads(last[0]) if last and last[0] else None,
+            "last_at": last[1] if last else None,
+            "submit_count": n_submit}
+
+
+def get_selection_events(session_id: int) -> list[dict]:
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT id, kind, log_ids, created_at FROM selection_events WHERE session_id = ? ORDER BY id", (session_id,)
+        ).fetchall()
+    return [{"id": r[0], "kind": r[1], "log_ids": json.loads(r[2]) if r[2] else None, "created_at": r[3]} for r in rows]
+
+
+def add_teacher_call(phase: int) -> dict:
+    with _conn() as con:
+        now = _now()
+        con.execute("INSERT INTO teacher_calls (phase, called_at) VALUES (?, ?)", (phase, now))
+    return {"phase": phase, "called_at": now}
+
+
+def get_teacher_calls() -> dict:
+    """フェーズごとの声がけ（最初・最後の時刻と回数）。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT phase, MIN(called_at), MAX(called_at), COUNT(*) FROM teacher_calls GROUP BY phase"
+        ).fetchall()
+    return {r[0]: {"first_at": r[1], "last_at": r[2], "count": r[3]} for r in rows}
+
+
+def count_selection_submitted() -> dict:
+    """フェーズごとの、選択を1回以上送信した児童の人数。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT phase, COUNT(DISTINCT user_id) FROM selection_events WHERE kind = 'submit' GROUP BY phase"
+        ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 # ===== 管理者用 =====
 
 def admin_get_all_students() -> list[dict]:
@@ -544,6 +639,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
             "help_count": r[10] or 0, "strength": r[11] or 0,
             "new_count": r[12] or 0, "sakumon_count": r[13] or 0, "taiwa_count": r[14] or 0,
             "structures": [s for s in (r[15] or "").split(",") if s],
+            "selection": get_selection_state(r[0]) if r[1] != 2 else None,
         }
         for r in rows
     ]
@@ -584,6 +680,7 @@ def admin_get_session_logs(session_id: int) -> list[dict]:
 def admin_delete_session(session_id: int):
     with _conn() as con:
         con.execute("DELETE FROM chat_logs WHERE session_id = ?", (session_id,))
+        con.execute("DELETE FROM selection_events WHERE session_id = ?", (session_id,))
         con.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
 
@@ -604,6 +701,8 @@ CSV_FIELDS = [
     "produced_structures", "stuck_count", "miss_count", "help_count",
     "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
     "judge_status", "judged_at",
+    # フェーズ1・3の選択（セッション単位の値を各行に繰り返す）。selected は「この作問行が最終選択に含まれる」（作問行のみ 1/0）
+    "selected", "selection_first_open_at", "selection_last_at", "selection_last_log_ids", "teacher_call_first_at",
 ]
 
 
@@ -617,10 +716,23 @@ def admin_get_all_logs_csv() -> list[dict]:
             JOIN sessions s ON s.session_id = cl.session_id
             ORDER BY s.user_id, cl.session_id, cl.log_id
         """).fetchall()
+    calls = get_teacher_calls()
+    selections: dict[int, dict] = {}
     result = []
     for r in rows:
         d = dict(zip(LOG_COLUMNS, r[3:]))
         d.update({"parity_group": r[0], "session_start": r[1], "session_end": r[2]})
+        sid = d["session_id"]
+        if sid not in selections:
+            selections[sid] = get_selection_state(sid) if d["phase"] != 2 else {}
+        sel = selections[sid]
+        last_ids = sel.get("last_log_ids")
+        d["selected"] = ((1 if d["log_id"] in last_ids else 0) if (last_ids is not None and d["input_type"] == "sakumon")
+                         else None)
+        d["selection_first_open_at"] = sel.get("first_open_at")
+        d["selection_last_at"] = sel.get("last_at")
+        d["selection_last_log_ids"] = json.dumps(last_ids) if last_ids is not None else None
+        d["teacher_call_first_at"] = (calls.get(d["phase"]) or {}).get("first_at") if d["phase"] != 2 else None
         result.append({k: ("" if d.get(k) is None else d[k]) for k in CSV_FIELDS})
     return result
 

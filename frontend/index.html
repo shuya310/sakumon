@@ -53,6 +53,10 @@
         rows="2" placeholder="問題をここに書いてね…"></textarea>
       <button class="btn-send" id="btn-send">送る</button>
     </div>
+    <!-- フェーズ1・3だけ：作った お話を 見る（選択画面へ）。目立たせない。フェーズ2では出さない -->
+    <div class="review-bar" id="review-bar" hidden>
+      <button class="btn-review" id="btn-review">作った お話を 見る</button>
+    </div>
   </div>
 
   <div class="meter-panel">
@@ -80,6 +84,29 @@
     <div class="panel-card" id="problems-card" hidden>
       <h3>つくった 問題 <span id="count-number">0</span></h3>
       <ul class="problem-list" id="problem-list"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- 画面3: 作った お話を 見る（フェーズ1・3。ちがう 種類の お話を 3つ 選ぶ） -->
+<div id="screen-select" class="screen center-screen">
+  <div class="card select-card">
+    <div class="select-title" id="select-title">作った お話の 中から、ちがう 種類の お話を 3つ 選びましょう。</div>
+    <div class="select-empty" id="select-empty" hidden>お話が ないので、選ぶ ものは ありません。</div>
+    <ul class="select-list" id="select-list"></ul>
+    <div class="select-count" id="select-count"></div>
+    <div class="error-msg" id="select-error"></div>
+    <div class="confirm-actions">
+      <button class="btn btn-primary" id="btn-select-submit">これで 決定</button>
+      <button class="btn btn-secondary" id="btn-select-back">もどる</button>
+    </div>
+    <!-- 決定の前に1回だけ確認する -->
+    <div class="select-confirm" id="select-confirm" hidden>
+      <div class="confirm-text">この お話で 決定して いいかな？</div>
+      <div class="confirm-actions">
+        <button class="btn btn-primary" id="btn-select-yes">はい</button>
+        <button class="btn btn-secondary" id="btn-select-no">まだ</button>
+      </div>
     </div>
   </div>
 </div>

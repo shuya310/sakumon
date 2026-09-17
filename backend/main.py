@@ -21,6 +21,9 @@
   classify が作問なら通常の作問処理（対話は打ち切り・ブロックしない）、そうでなければ待っているターンの答え
   として扱う（/api/judge の declaring。どのターンを待っているかはサーバが直前のログ行から決める）。
 - 中（強度2）・強（強度3）はシステムが未到達構造を目標に立てて文言で伝える（3択の自己ラベルは廃止）。
+- フェーズ1・3「作った お話を 見る」（3つえらぶ）：児童はいつでも選択画面を開け（/api/selection/open。開くたびに記録）、
+  そのフェーズで送った作問（不成立・未判定も含む。対話は除く）から最大 min(3, 作問数) を選んで送る（/api/selection/submit。
+  送るたびに記録。分析では最後の選択を採用）。判定結果・構造名は返さない。教師の「声がけした」は teacher_calls に時刻だけ記録。
 - 管理画面（/admin, /admin/api/*）は HTTP Basic 認証（ADMIN_PASSWORD）。未設定なら起動しない。
 - judge が API 不通：response_type='error'・issue='error'。児童には「もう一度 おくって みてね」（3-2）。
   一覧には載せない。同じ本文を送り直したら判定し直す（すでに判定済みの本文の再送だけ input_type='resend' で
@@ -151,6 +154,16 @@ class PhaseRequest(BaseModel):
 
 class SessionExpressionRequest(BaseModel):
     expression: str
+
+
+class SelectionSubmitRequest(BaseModel):
+    session_id: int
+    user_id: str
+    log_ids: list[int]
+
+
+class TeacherCallRequest(BaseModel):
+    phase: int
 
 
 # ===== 共通ヘルパ =====
@@ -797,6 +810,59 @@ def _handle_sakumon_deferred(req: JudgeRequest, user_id: str, message: str, ctx:
     return _base_result(None, None, "sakumon", accepted=False, strength_trigger=None, declaration_met=None)
 
 
+# ===== 「作った お話を 見る」（フェーズ1・3の選択） =====
+
+SELECTION_MAX = 3
+
+
+def _selection_session(session_id: int, user_id: str) -> dict:
+    session = _owned_session(session_id, user_id)
+    if session["phase"] == 2:
+        raise HTTPException(status_code=400, detail="この画面はフェーズ1・3でだけ使えます")
+    return session
+
+
+def _selection_payload(session: dict) -> dict:
+    problems = database.get_sakumon_rows(session["session_id"])
+    state = database.get_selection_state(session["session_id"])
+    return {
+        "problems": problems,                       # [{no, log_id, text}] 送信順。判定結果は含めない
+        "max_select": min(SELECTION_MAX, len(problems)),
+        "last_log_ids": state["last_log_ids"],      # 直前の選択（選び直しの起点として画面でチェック済みにする）
+        "last_at": state["last_at"],
+    }
+
+
+@app.post("/api/selection/open")
+def selection_open(req: SessionRequest):
+    """選択画面を開いた（開くたびに記録）。そのフェーズの作問一覧と直前の選択を返す。"""
+    user_id = _normalize_user_id(req.user_id)
+    session = _selection_session(req.session_id, user_id)
+    _touch(user_id, req.session_id)
+    database.add_selection_event(req.session_id, user_id, session["phase"], "open")
+    return _selection_payload(session)
+
+
+@app.post("/api/selection/submit")
+def selection_submit(req: SelectionSubmitRequest):
+    """選択の送信（何度でも可。すべて時刻付きで記録）。自分の作問行だけ・重複なし・1〜min(3, 作問数) 個。"""
+    user_id = _normalize_user_id(req.user_id)
+    session = _selection_session(req.session_id, user_id)
+    _touch(user_id, req.session_id)
+    problems = database.get_sakumon_rows(req.session_id)
+    valid_ids = {p["log_id"] for p in problems}
+    ids = list(dict.fromkeys(req.log_ids))     # 順序を保って重複を除く
+    if not ids or len(ids) != len(req.log_ids):
+        raise HTTPException(status_code=400, detail="選ぶ お話を 1つ以上、重複なしで送ってください")
+    if not set(ids) <= valid_ids:
+        raise HTTPException(status_code=400, detail="自分の作問ではない行が含まれています")
+    max_select = min(SELECTION_MAX, len(problems))
+    if len(ids) > max_select:
+        raise HTTPException(status_code=400, detail=f"選べるのは {max_select} つまでです")
+    database.add_selection_event(req.session_id, user_id, session["phase"], "submit", ids)
+    return {"ok": True, **_selection_payload(session)}
+
+
 @app.get("/")
 def index():
     return _html_page("index.html")
@@ -859,8 +925,19 @@ def admin_live():
         seen = _last_seen.get(r["user_id"])
         r["online"] = bool(seen and now - seen["ts"] <= config.ONLINE_WINDOW_SECONDS)
         r["last_seen_seconds"] = int(now - seen["ts"]) if seen else None
+    submitted = database.count_selection_submitted()
+    calls = database.get_teacher_calls()
     return {"config": _cfg_public(cfg), "students": rows,
-            "judge": {**database.count_judge_status(), "queued": judge_queue.pending_in_queue()}}
+            "judge": {**database.count_judge_status(), "queued": judge_queue.pending_in_queue()},
+            "selection": {str(ph): {"submitted": submitted.get(ph, 0), "teacher_call": calls.get(ph)} for ph in (1, 3)}}
+
+
+@admin.post("/api/teacher_call")
+def admin_teacher_call(req: TeacherCallRequest):
+    """「声がけした」：フェーズと時刻だけを記録する（児童画面には何も反映しない。同じフェーズで複数回可）。"""
+    if req.phase not in (1, 3):
+        raise HTTPException(status_code=400, detail="声がけはフェーズ1・3でだけ記録します")
+    return {"ok": True, **database.add_teacher_call(req.phase), "calls": database.get_teacher_calls()}
 
 
 @admin.post("/api/rejudge")
@@ -882,6 +959,17 @@ def admin_student_detail(user_id: str):
 @admin.get("/api/sessions/{session_id}")
 def admin_session_logs(session_id: int):
     return database.admin_get_session_logs(session_id)
+
+
+@admin.get("/api/sessions/{session_id}/selection")
+def admin_session_selection(session_id: int):
+    """そのセッションの選択イベント（open / submit の全履歴）と最終選択の本文。"""
+    if database.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    problems = {p["log_id"]: p for p in database.get_sakumon_rows(session_id)}
+    state = database.get_selection_state(session_id)
+    last = [problems[i] for i in (state["last_log_ids"] or []) if i in problems]
+    return {**state, "last_problems": last, "events": database.get_selection_events(session_id)}
 
 
 @admin.delete("/api/sessions/{session_id}")

@@ -59,6 +59,9 @@ cd backend && uvicorn main:app --reload --port 8000
   （児童ごと送信順で直列＝is_new は送信順。並列 JUDGE_BG_WORKERS=8。失敗は JUDGE_BG_RETRY_WAITS=10,30 秒あけて再試行 → failed）。
   フェーズ2は同期のまま（保存時に done/failed）。pending/failed は管理画面「再判定」（/admin/api/rejudge）で再投入。
   フェーズ1・3で classify が失敗した入力は sakumon（pending）に倒す（フェーズ2は taiwa）
+- フェーズ1・3「作った お話を 見る」：/api/selection/open（開くたび記録・作問一覧 sakumon 行のみ・判定結果は返さない）／submit（1〜min(3,n)・何度でも・全件記録。
+  分析は最後の submit）。selection_events / teacher_calls（管理画面「声がけした」＝時刻のみ）。フェーズ2には無い。CSV に selected 等を追加。
+  文言は KANJI_RULE（「選ぶ」「決定」）。この画面の「種類」は意図的（基準を指定しない。README「測定指標」）
 - テスト：backend/tests/test_flow.py（LLMモック・決定論。cd backend && ./venv/bin/python tests/test_flow.py。judge_queue.wait_idle() で応答後の判定を待つ）、tests/test_llm_call.py（リトライ・セマフォ）、
   tests/judge_cases.py（実API・判定精度）、tests/dialogue_probe.py（実API・talk の出力）
 - 運用手順：授業当日の運用手順_0918.md

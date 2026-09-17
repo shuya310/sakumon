@@ -399,6 +399,8 @@ function updatePanels() {
   // 進捗（信号機）と一覧はフェーズ2のあいだ常時表示。マークは到達数だけ（どの構造かは示さない）
   document.getElementById("lights-card").hidden = !show;
   document.getElementById("problems-card").hidden = !show;
+  // 「作った お話を 見る」はフェーズ1・3だけ（フェーズ2には置かない）
+  document.getElementById("review-bar").hidden = show;
   const n = Math.min(3, state.history.length);
   for (let i = 0; i < 3; i++) {
     const el = document.getElementById(`light-${i}`);
@@ -480,6 +482,122 @@ async function sendMessage() {
 }
 
 document.getElementById("btn-send").addEventListener("click", sendMessage);
+
+// ===== 作った お話を 見る（フェーズ1・3の選択。3つえらぶ） =====
+// 児童はいつでも開ける（開くたびにサーバが記録）。そのフェーズで送った作問を送信順に並べ、最大 min(3, 作問数) を選んで送る。
+// 判定結果・構造名は出さない。何度でも選び直せる（送るたびに記録。分析では最後の選択）。もどれば作問を続けられる。
+const sel = { problems: [], max: 0, checked: new Set() };
+
+async function openSelection() {
+  if (state.showSupport || state.switching || !state.sessionId) return;
+  const btn = document.getElementById("btn-review");
+  btn.disabled = true;
+  try {
+    const { ok, status, data } = await postJson("/api/selection/open", { session_id: state.sessionId, user_id: state.userId });
+    if (!ok) {
+      addNotice(status === 403 || status === 404 ? "もう一度 ログインしてね" : "エラーが起きました。もう一度 おしてみてね。");
+      return;
+    }
+    renderSelection(data);
+    showScreen("screen-select");
+  } catch (e) {
+    addNotice("エラーが起きました。もう一度 おしてみてね。");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderSelection(data) {
+  sel.problems = data.problems || [];
+  sel.max = data.max_select || 0;
+  // 直前の選択があればチェック済みで開く（選び直しの起点）。無ければ空
+  sel.checked = new Set((data.last_log_ids || []).filter(id => sel.problems.some(p => p.log_id === id)));
+  const list = document.getElementById("select-list");
+  list.innerHTML = "";
+  const empty = sel.problems.length === 0;
+  document.getElementById("select-empty").hidden = !empty;
+  document.getElementById("select-title").hidden = empty;
+  document.getElementById("btn-select-submit").hidden = empty;
+  document.getElementById("select-error").textContent = "";
+  document.getElementById("select-confirm").hidden = true;
+  sel.problems.forEach(p => {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = String(p.log_id);
+    cb.checked = sel.checked.has(p.log_id);
+    cb.addEventListener("change", () => {
+      if (cb.checked) sel.checked.add(p.log_id); else sel.checked.delete(p.log_id);
+      document.getElementById("select-confirm").hidden = true;
+      updateSelectionCount();
+    });
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = `${p.no}.`;
+    const text = document.createElement("span");
+    text.textContent = p.text;
+    label.appendChild(cb);
+    label.appendChild(num);
+    label.appendChild(text);
+    li.appendChild(label);
+    list.appendChild(li);
+  });
+  updateSelectionCount();
+}
+
+function updateSelectionCount() {
+  const n = sel.checked.size;
+  const full = n >= sel.max;
+  document.querySelectorAll("#select-list li").forEach(li => {
+    const cb = li.querySelector("input");
+    cb.disabled = full && !cb.checked;      // 上限に達したら、まだ選んでいないものは押せない
+    li.classList.toggle("disabled", cb.disabled);
+  });
+  const el = document.getElementById("select-count");
+  el.textContent = sel.problems.length === 0 ? "" : `${sel.max}つまで 選べるよ（いま ${n}つ）`;
+  document.getElementById("btn-select-submit").disabled = n === 0;
+}
+
+document.getElementById("btn-review").addEventListener("click", openSelection);
+
+// 「これで 決定」→ 確認を1回はさむ → 「はい」で送信
+document.getElementById("btn-select-submit").addEventListener("click", () => {
+  if (sel.checked.size === 0) return;
+  document.getElementById("select-error").textContent = "";
+  document.getElementById("select-confirm").hidden = false;
+});
+document.getElementById("btn-select-no").addEventListener("click", () => {
+  document.getElementById("select-confirm").hidden = true;
+});
+document.getElementById("btn-select-yes").addEventListener("click", async () => {
+  const yes = document.getElementById("btn-select-yes");
+  yes.disabled = true;
+  // 送信順（一覧の並び）で送る
+  const log_ids = sel.problems.filter(p => sel.checked.has(p.log_id)).map(p => p.log_id);
+  try {
+    const { ok, data } = await postJson("/api/selection/submit", { session_id: state.sessionId, user_id: state.userId, log_ids });
+    if (!ok) {
+      document.getElementById("select-confirm").hidden = true;
+      document.getElementById("select-error").textContent = (data && data.detail) || "エラーが起きました。もう一度 おしてみてね。";
+      return;
+    }
+    closeSelection();
+    addNotice("選んだ お話を おくったよ。つづけて お話を 作っても いいよ。");
+  } catch (e) {
+    document.getElementById("select-confirm").hidden = true;
+    document.getElementById("select-error").textContent = "エラーが起きました。もう一度 おしてみてね。";
+  } finally {
+    yes.disabled = false;
+  }
+});
+document.getElementById("btn-select-back").addEventListener("click", closeSelection);
+
+function closeSelection() {
+  document.getElementById("select-confirm").hidden = true;
+  showScreen("screen-game");
+  document.getElementById("chat-input").focus();
+}
 
 let isComposing = false;
 let compositionJustEnded = false;

@@ -317,3 +317,9 @@ tr.clickable:hover td { background: #F0FDF8; }
 .msg-ai strong { font-weight: 800; }
 .met-ok { color: #0F6E56; font-weight: 700; }
 .met-ng { color: #B42318; font-weight: 700; }
+
+/* フェーズ1・3の選択（児童詳細） */
+.selection-block { padding: 10px 14px; margin: 8px 0 4px; background: #F6FAF8; border: 1px solid #D5E7E0; border-radius: 8px; }
+.selection-list { list-style: none; margin: 6px 0 8px; padding: 0; }
+.selection-list li { padding: 3px 0; font-size: .88rem; line-height: 1.5; }
+.selection-list .num { color: #0F6E56; font-weight: 700; margin-right: 4px; }

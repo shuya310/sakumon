@@ -172,7 +172,7 @@ def no_banned(text):
 with client:
     # ===== スキーマ =====
     tables = {r[0] for r in raw("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"sessions", "chat_logs", "app_config", "phase_changes"} <= tables
+    assert {"sessions", "chat_logs", "app_config", "phase_changes", "selection_events", "teacher_calls"} <= tables
     cols = [r[1] for r in raw("PRAGMA table_info(chat_logs)")]
     assert cols == [
         "log_id", "session_id", "user_id", "phase", "expression", "created_at",
@@ -375,6 +375,84 @@ with client:
     for uid, sid in sids.items():
         client.delete(f"/admin/api/sessions/{sid}", headers=AUTH)
     print("OK 応答後の判定: 応答時は pending、完了で done（is_new は送信順）、失敗は failed→再判定、32人同時でも全件 done")
+
+    # ===== 「作った お話を 見る」（フェーズ1・3の選択） =====
+    def sel_open(sid, uid):
+        return post("/api/selection/open", session_id=sid, user_id=uid)
+    def sel_submit(sid, uid, ids):
+        return post("/api/selection/submit", session_id=sid, user_id=uid, log_ids=ids)
+    # 0問：一覧なし・max 0。開いた記録は残る
+    s0 = post("/api/login", user_id="60").json()["session_id"]
+    r = sel_open(s0, "60"); assert r.status_code == 200, r.text
+    assert r.json() == {"problems": [], "max_select": 0, "last_log_ids": None, "last_at": None}
+    assert sel_submit(s0, "60", []).status_code == 400
+    assert raw("SELECT kind FROM selection_events WHERE session_id=?", s0) == [("open",)]
+    # 2問（うち1問は不成立・1問は未判定でも並ぶ）：max 2。対話・再送は並ばない。判定結果は返さない
+    s2 = post("/api/login", user_id="61").json()["session_id"]
+    judge(s2, "61", "T: a"); judge(s2, "61", "X: b")
+    assert judge(s2, "61", "X: b")["input_type"] == "resend"
+    judge(s2, "61", "わからない")
+    r = sel_open(s2, "61").json()
+    assert [p["no"] for p in r["problems"]] == [1, 2] and [p["text"] for p in r["problems"]] == ["T: a", "X: b"]
+    assert r["max_select"] == 2 and set(r["problems"][0].keys()) == {"no", "log_id", "text"}, "判定結果・構造は返さない"
+    ids2 = [p["log_id"] for p in r["problems"]]
+    assert sel_submit(s2, "61", ids2 + [ids2[0]]).status_code == 400, "重複"
+    assert sel_submit(s2, "61", [ids2[0], 999999]).status_code == 400, "他人・存在しない行"
+    assert sel_submit(s2, "61", [ids2[0]]).status_code == 200, "1つでも送れる"
+    assert judge_queue.wait_idle(10)
+    # 5問：max 3。4つは 400。3つは 200。選び直し → 作問を追加 → 追加分が一覧に載り、選び直せる。記録はすべて残る
+    s5 = post("/api/login", user_id="62").json()["session_id"]
+    for m in ("T: 1", "T: 2", "H: 3", "B: 4", "N: 5"):
+        judge(s5, "62", m)
+    r = sel_open(s5, "62").json()
+    ids5 = [p["log_id"] for p in r["problems"]]
+    assert len(ids5) == 5 and r["max_select"] == 3 and r["last_log_ids"] is None
+    assert sel_submit(s5, "62", ids5[:4]).status_code == 400
+    assert sel_submit(s5, "62", [ids5[0], ids5[2], ids5[3]]).status_code == 200
+    judge(s5, "62", "B: 6")
+    r = sel_open(s5, "62").json()
+    assert len(r["problems"]) == 6 and r["problems"][5]["no"] == 6 and r["problems"][5]["text"] == "B: 6"
+    assert r["last_log_ids"] == [ids5[0], ids5[2], ids5[3]], "直前の選択を返す（画面でチェック済みにする）"
+    id6 = r["problems"][5]["log_id"]
+    assert sel_submit(s5, "62", [ids5[0], ids5[2], id6]).status_code == 200
+    ev = raw("SELECT kind, log_ids FROM selection_events WHERE session_id=? ORDER BY id", s5)
+    assert [e[0] for e in ev] == ["open", "submit", "open", "submit"]
+    assert ev[3][1] == f"[{ids5[0]}, {ids5[2]}, {id6}]"
+    assert raw("SELECT COUNT(*) FROM selection_events WHERE session_id=? AND created_at LIKE ?", s5, f"{now_jst.year}-%")[0][0] == 4
+    assert judge_queue.wait_idle(10)
+    # 管理画面：送信済み人数・声がけ・児童詳細・セッションの選択情報
+    live = client.get("/admin/api/live", headers=AUTH).json()
+    assert live["selection"]["1"]["submitted"] == 2 and live["selection"]["1"]["teacher_call"] is None
+    assert admin_post("/admin/api/teacher_call", phase=1)["phase"] == 1
+    admin_post("/admin/api/teacher_call", phase=1)
+    assert client.post("/admin/api/teacher_call", json={"phase": 2}, headers=AUTH).status_code == 400
+    tc = client.get("/admin/api/live", headers=AUTH).json()["selection"]["1"]["teacher_call"]
+    assert tc["count"] == 2 and tc["first_at"] <= tc["last_at"]
+    det = client.get("/admin/api/students/62", headers=AUTH).json()["sessions"][0]
+    assert det["selection"]["last_log_ids"] == [ids5[0], ids5[2], id6] and det["selection"]["submit_count"] == 2
+    assert det["selection"]["first_open_at"] is not None
+    si = client.get(f"/admin/api/sessions/{s5}/selection", headers=AUTH).json()
+    assert [p["no"] for p in si["last_problems"]] == [1, 3, 6] and len(si["events"]) == 4
+    # フェーズ2では使えない（ボタンも画面も無い）
+    admin_post("/admin/api/phase", phase=2)
+    sP2 = post("/api/login", user_id="62").json()["session_id"]
+    assert sel_open(sP2, "62").status_code == 400 and sel_submit(sP2, "62", [ids5[0]]).status_code == 400
+    admin_post("/admin/api/phase", phase=1)
+    # CSV：selected（最終選択の行=1、作問行のみ）・初回 open・最終選択・声がけ
+    rows = list(csv.DictReader(io.StringIO(client.get("/admin/api/export/csv", headers=AUTH).content.decode("utf-8-sig"))))
+    r62 = [x for x in rows if x["user_id"] == "62" and x["phase"] == "1"]
+    assert [x["selected"] for x in r62] == ["1", "0", "1", "0", "0", "1"]
+    assert all(x["selection_last_log_ids"] == f"[{ids5[0]}, {ids5[2]}, {id6}]" and x["selection_last_at"] and x["selection_first_open_at"]
+               and x["teacher_call_first_at"] == tc["first_at"] for x in r62)
+    r61 = [x for x in rows if x["user_id"] == "61"]
+    assert [x["selected"] for x in r61] == ["1", "0", "", ""], "再送・対話の行は空"
+    r60 = [x for x in rows if x["user_id"] == "60"]
+    assert r60 == [], "0問の児童はログ行が無い（選択イベントは DB に残る）"
+    assert all(x["selected"] == "" and x["selection_first_open_at"] == "" for x in rows if x["user_id"] == "01" and x["phase"] == "1")
+    for sid_ in (s0, s2, s5):
+        client.delete(f"/admin/api/sessions/{sid_}", headers=AUTH)
+    assert raw("SELECT COUNT(*) FROM selection_events")[0][0] == 0, "セッション削除で選択イベントも消える"
+    print("OK 3つえらぶ: 0問／2問／5問の一覧と上限、選び直し（追加した作問を含む・記録は全件）、声がけ、児童詳細、CSV、フェーズ2は不可")
 
     # ===== フェーズ2へ切替（別セッション：フェーズ1は引き継がない） =====
     admin_post("/admin/api/phase", phase=2)

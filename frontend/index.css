@@ -704,8 +704,8 @@ body {
 .btn-review {
   background: none;
   border: none;
-  color: #6b7a75;
-  font-size: .82rem;
+  color: #000000;
+  font-size: .90rem;
   text-decoration: underline;
   cursor: pointer;
   font-family: inherit;

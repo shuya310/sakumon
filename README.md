@@ -12,12 +12,21 @@
 
 | フェーズ | 内容 | 式 | 児童に見えるもの |
 |---|---|---|---|
-| 1 | 事前測定：自由に作問 | 式A | 入力欄・送信ボタン・自分の吹き出し・「おくったよ」 |
-| 2 | 支援：フィードバックを受けながら作問（新セッション。フェーズ1は引き継がない） | 式A | ＋ AIの声かけ、「作ったお話」（常設）、信号機（ラベルなしの3灯。フェーズ2のあいだ常時）、目標の固定表示（予告があるあいだ） |
-| 3 | 事後測定：別の式で自由に作問（新セッション） | 式B | フェーズ1と同じ |
+| 1 | 事前測定：自由に作問 → 「作った お話を 見る」で3つ選ぶ | 21÷3 / 30÷5 | 入力欄・送信ボタン・自分の吹き出し・「おくったよ」・「作った お話を 見る」（選択画面） |
+| 2 | 支援：フィードバックを受けながら作問（新セッション。フェーズ1は引き継がない） | 24÷4 | ＋ AIの声かけ、「作ったお話」（常設）、信号機（ラベルなしの3灯。フェーズ2のあいだ常時）、目標の固定表示（予告があるあいだ）。選択画面は無い |
+| 3 | 事後測定：別の式で自由に作問（新セッション） → 3つ選ぶ | 30÷5 / 21÷3 | フェーズ1と同じ |
 
-フェーズ・式は `app_config` テーブルにあり、管理画面（`/admin`）から切り替える。
+フェーズは `app_config` テーブルにあり、管理画面（`/admin`）から切り替える。式は `config.EXPRESSION_ASSIGNMENT`（奇偶×フェーズ）で決まり、セッション開始時に `sessions.expression` に固定する。
 児童の画面は5秒ごとに `/api/config` を確認し、変わったら自動で切り替わる。
+
+### 「作った お話を 見る」（フェーズ1・3の選択）
+
+- 入力欄の下に控えめなボタン「作った お話を 見る」を置く（フェーズ2には置かない）。児童はいつでも開ける。
+- 選択画面：「作った お話の 中から、ちがう 種類の お話を 3つ 選びましょう。」＋ そのフェーズで送った作問（`input_type=sakumon`。不成立・未判定も含む。対話・再送は含めない）を送信順の番号付きで一覧。判定結果・構造名は出さない。
+  チェックボックスで最大 min(3, 作問数)。「これで 決定」→ 確認を1回 → 送信。「もどる」で作問に戻れる（作問を続けられる）。0問なら「お話が ないので、選ぶ ものは ありません。」
+- 選び直しは何度でも可。開くたび（`kind=open`）・送るたび（`kind=submit`、`log_ids`）に `selection_events` に JST の時刻付きで記録する。分析では最後の submit を採用。再度開いたときは直前の選択をチェック済みで表示する。
+- 教師の「声がけした」（管理画面）は `teacher_calls` にフェーズと時刻だけを記録する（児童画面には何も反映しない。何度でも押せる）。
+- 児童向け文言は `KANJI_RULE`（4年生までの漢字は漢字）に従う。この画面の「種類」は、選択の基準を指定しないための意図的な語（「測定指標」の節）。
 
 ## 支援（フェーズ2）— `docs/sakumon_spec_v3.md`
 
@@ -83,6 +92,8 @@ POST /api/judge {session_id, user_id, message, declaring}
   │        declaration → 予告（classify_declaration → declared）              input_type=declaration
   └ それ以外 → talk（LLM に強度・目標・到達構造・成立作問・直前のやりとりを渡す。is_help_request なら help+=1 → 強度更新。
                      0→1 なら ROLE_ASK を連結して役割待ち。talk が役割を問うたら awaiting=role）
+  POST /api/selection/open   → selection_events(open) を記録し、作問一覧（no, log_id, text）・max_select・直前の選択を返す（フェーズ2は 400）
+  POST /api/selection/submit → 自分の作問行だけ・重複なし・1〜min(3, 作問数) を検証し selection_events(submit) を記録
   → chat_logs に全ターン記録（phase, expression, input_type, valid, structure, unknown, issue, is_new, item, unit,
      response_type, prompt_strength, declared_*, role_answer, role_corrected, is_help_request,
      produced_structures, stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms,
@@ -113,7 +124,7 @@ unit:      被除数に付く助数詞（{unit}。読み取れなければ null�
 backend/
   main.py          FastAPI・フェーズ管理・応答の種類の決定・管理者認証
   config.py        環境変数・式のパース・ENABLE_FIGURES
-  database.py      SQLite（sessions / chat_logs / app_config / phase_changes）・旧スキーマの退避・CSV
+  database.py      SQLite（sessions / chat_logs / app_config / phase_changes / selection_events / teacher_calls）・旧スキーマの退避・CSV
   ai_judge.py      3層判定（成立性→構造→求める量）
   ai_dialogue.py   応答の種類ごとの声かけ（定型＋LLM＋ガード）
   ai_classify.py   作問／対話の分類・予告の分類・除数の役割の答えの分類
@@ -151,9 +162,10 @@ cd backend && uvicorn main:app --reload --port 8000
 
 HTTP Basic 認証（ユーザー名は任意、パスワード＝`ADMIN_PASSWORD`）。
 
-- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式の割り当て表（奇偶×フェーズ）、判定の状態（未判定／失敗／完了）と「未判定・失敗を再判定」
+- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式の割り当て表（奇偶×フェーズ）、判定の状態（未判定／失敗／完了）と「未判定・失敗を再判定」、フェーズ1・3の選択送信済み人数と「声がけした」（時刻の記録のみ）
 - 児童の状態（5秒更新）：接続・提出数・成立数・到達数・予告（誰が・何を）・反復／不一致／支援要求・強度・直近の応答。提出0問の児童を赤で強調
-- 児童詳細：セッションごとの式の上書き、予告と産出の一致／不一致、役割の答えと訂正、支援要求、強度・trigger・目標
+- 児童詳細：セッションごとの式の上書き、予告と産出の一致／不一致、役割の答えと訂正、支援要求、強度・trigger・目標。フェーズ1・3は選択画面を初めて開いた時刻・最終選択（本文）・open/submit の全履歴、最終選択の行に「選択」バッジ
+- CSV：ログ1行ごとに、`judge_status` / `judged_at` と、フェーズ1・3の `selected`（最終選択に含まれる作問行＝1）・`selection_first_open_at`・`selection_last_at`・`selection_last_log_ids`・`teacher_call_first_at`（セッション／フェーズ単位の値を各行に繰り返す）
 - 1児童1フェーズ1セッション（`UNIQUE(user_id, phase)`）。リハーサルのデータは本番前に「児童一覧・ログ」から削除する
 - 児童一覧・ログ・CSV
 

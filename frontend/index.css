@@ -694,3 +694,36 @@ body {
 /* 進捗マーク（無地） */
 .lights .light { font-size: 1.6rem; color: #C9D3CE; margin: 0 4px; }
 .lights .light.on { color: var(--green); }
+
+/* ===== 作った お話を 見る（フェーズ1・3の選択） ===== */
+.review-bar {
+  padding: 4px 16px 10px;
+  background: #fff;
+  text-align: right;
+}
+.btn-review {
+  background: none;
+  border: none;
+  color: #6b7a75;
+  font-size: .82rem;
+  text-decoration: underline;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 4px 6px;
+}
+.btn-review:hover { color: var(--green); }
+
+.select-card { max-width: 640px; text-align: left; padding: 32px 36px; }
+.select-title { font-size: 1.05rem; font-weight: 700; color: #064E3B; line-height: 1.7; margin-bottom: 18px; }
+.select-empty { font-size: 1rem; color: #555; line-height: 1.7; margin-bottom: 18px; }
+.select-list { list-style: none; max-height: 48vh; overflow-y: auto; margin-bottom: 12px; }
+.select-list li { display: flex; gap: 10px; align-items: flex-start; padding: 10px 8px; border-top: 1px solid var(--gray-border); }
+.select-list li:last-child { border-bottom: 1px solid var(--gray-border); }
+.select-list input[type="checkbox"] { width: 22px; height: 22px; margin-top: 2px; flex: none; accent-color: var(--green); cursor: pointer; }
+.select-list label { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; flex: 1; line-height: 1.6; font-size: .98rem; }
+.select-list .num { color: var(--green); font-weight: 800; flex: none; min-width: 2em; }
+.select-list li.disabled label { color: #999; cursor: default; }
+.select-count { font-size: .88rem; color: #556; margin-bottom: 8px; }
+.select-card .confirm-actions { justify-content: flex-start; }
+.select-confirm { margin-top: 18px; padding: 16px; border-radius: 12px; background: #F3FAF7; border: 1.5px solid var(--green); }
+.select-confirm .confirm-text { margin-bottom: 10px; }

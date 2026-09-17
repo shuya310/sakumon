@@ -542,7 +542,7 @@ const FIGURE_TITLE = {
 
 function figureSvg(structure) {
   if (!ENABLE_FIGURES) return "";
-  // 旧実装は 18÷3 固定の SVG だった。式が可変になったため、有効化する場合は
+  // 旧実装は式固定の SVG だった。式が可変になったため、有効化する場合は
   // tapeDiagramSvg() 系（数値を受け取る）に寄せること。
   return "";
 }

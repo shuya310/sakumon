@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ai_dialogue as d
 
-EXPR = "24 ÷ 8"
+EXPR = "24 ÷ 4"
 P1 = "おりがみが24まいあります。8人で分けると1人分は何まいですか"
 P2 = "あめが24こあります。8人に同じ数ずつ配ります。1人何こですか"
 recent = [{"child": P2, "ai": d.PRAISE_REPEAT}]

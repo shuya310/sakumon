@@ -217,17 +217,17 @@ with client:
     assert cfg["phase"] == 1 and cfg["expression"] is None, "式は児童ごとなのでログイン前は返さない"
     assert cfg["expression_assignment"] == {g: {str(ph): main.config.normalize_expression(e) for ph, e in dd.items()}
                                             for g, dd in main.EXPRESSION_ASSIGNMENT.items()}
-    assert cfg["expression_assignment"] == {"odd": {"1": "18 ÷ 3", "2": "24 ÷ 4", "3": "30 ÷ 5"},
-                                            "even": {"1": "30 ÷ 5", "2": "24 ÷ 4", "3": "18 ÷ 3"}}
-    assert cfg["expression_choices"] == ["18 ÷ 3", "24 ÷ 4", "30 ÷ 5"], "「式を変更」の選択肢は設定表に現れる式の集合"
+    assert cfg["expression_assignment"] == {"odd": {"1": "21 ÷ 3", "2": "24 ÷ 4", "3": "30 ÷ 5"},
+                                            "even": {"1": "30 ÷ 5", "2": "24 ÷ 4", "3": "21 ÷ 3"}}
+    assert cfg["expression_choices"] == ["21 ÷ 3", "24 ÷ 4", "30 ÷ 5"], "「式を変更」の選択肢は設定表に現れる式の集合"
     a = post("/api/login", user_id="01").json()
     b = post("/api/login", user_id="02").json()
-    assert a["expression"] == "18 ÷ 3" and b["expression"] == "30 ÷ 5"
-    assert raw("SELECT expression FROM sessions WHERE session_id=?", a["session_id"])[0][0] == "18 ÷ 3"
+    assert a["expression"] == "21 ÷ 3" and b["expression"] == "30 ÷ 5"
+    assert raw("SELECT expression FROM sessions WHERE session_id=?", a["session_id"])[0][0] == "21 ÷ 3"
     q = client.get(f"/api/config?user_id=01&session_id={a['session_id']}").json()
-    assert q["expression"] == "18 ÷ 3"
+    assert q["expression"] == "21 ÷ 3"
     assert client.get(f"/api/config?user_id=02&session_id={a['session_id']}").json()["expression"] is None, "他人のセッションの式は返さない"
-    print("OK 式: 01→18÷3 / 02→30÷5（フェーズ1）。/api/config は本人のセッションの式だけ返す")
+    print("OK 式: 01→21÷3 / 02→30÷5（フェーズ1）。/api/config は本人のセッションの式だけ返す")
 
     # ===== フェーズ1：ログイン＝探して無ければ作る（1児童1フェーズ1セッション） =====
     a2 = post("/api/login", user_id="01").json()
@@ -237,7 +237,7 @@ with client:
     assert len({a["session_id"], b["session_id"], c["session_id"]}) == 3
     sidA, sidB, sidC = a["session_id"], b["session_id"], c["session_id"]
     try:
-        raw("INSERT INTO sessions (user_id, phase, expression, parity_group, session_start) VALUES ('01', 1, '18 ÷ 3', 'odd', '2026-09-18 10:00:00')")
+        raw("INSERT INTO sessions (user_id, phase, expression, parity_group, session_start) VALUES ('01', 1, '21 ÷ 3', 'odd', '2026-09-18 10:00:00')")
         raise AssertionError("UNIQUE が効いていない")
     except sqlite3.IntegrityError:
         pass
@@ -256,10 +256,10 @@ with client:
     print("OK 所有権: 他人の session_id への judge/resume は403")
 
     # フェーズ1の提出：判定は動くが表示は「おくったよ」。response_type / ai_message は記録しない
-    r1 = judge(sidA, "01", "T: おりがみ18まいを3人で")
+    r1 = judge(sidA, "01", "T: おりがみ21まいを3人で")
     assert r1["message"] == "おくったよ" and r1["response_type"] is None and r1["dialog"] is None
     assert r1["valid"] is None and r1["structure"] is None and r1["history"] == [] and r1["accepted"] is False
-    judge(sidA, "01", "T: クッキー18こを3人で")
+    judge(sidA, "01", "T: クッキー21こを3人で")
     judge(sidA, "01", "X: 場面矛盾")
     rt = judge(sidA, "01", "わからない")
     assert rt["message"] == "おくったよ"
@@ -273,7 +273,7 @@ with client:
     assert [l["stuck_count"] for l in logs] == [0] * 4 and [l["miss_count"] for l in logs] == [0] * 4
     assert all(l["strength"] is None and l["strength_trigger"] is None and l["help_count"] is None and l["target_structure"] is None
                for l in logs), "フェーズ1では支援に関わる列は空"
-    assert all(l["expression"] == "18 ÷ 3" for l in logs)
+    assert all(l["expression"] == "21 ÷ 3" for l in logs)
     assert all(l["latency_ms"] is not None for l in logs)
     print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空")
 
@@ -596,7 +596,7 @@ with client:
     assert d._sentence_with_number("みかんが24こあります。8人で同じ数ずつ分けます。1人分は何こですか。", 8) == "8人で同じ数ずつ分けます"
     assert d._sentence_with_number("みかんが24こあって8人で同じ数ずつ分けると1人分は何こになるでしょうかというもんだいです。", 8) is None, "40字超は引用しない"
     assert d._sentence_with_number("18こを3人で", 8) is None, "18 の 8 は除数ではない"
-    assert d.role_correction_message(None, "24 ÷ 8") == "本当に そうかな？ お話を もう一度 読んで みよう。\n8は 何の 数に なって いるかな？"
+    assert d.role_correction_message(None, "21 ÷ 3") == "本当に そうかな？ お話を もう一度 読んで みよう。\n3は 何の 数に なって いるかな？"
     assert d.expected_divisor_role("tobun", "one_unit") == "people" and d.expected_divisor_role("hougan", "num_units") == "per_one"
     assert d.expected_divisor_role("bai", "ratio") == "base" and d.expected_divisor_role("bai", "base") is None, "倍率が除数のときは訂正しない"
     assert d.expected_divisor_role("invalid", None) is None
@@ -803,39 +803,39 @@ with client:
           "talk の役割の問いへの答えは role_answer に保存し、ターン2へ進む")
 
     # 中・強の3構造の文言（要件定義 4-5 を一字一句。{item}{unit}{dividend}{divisor} の埋め込み）
-    assert d.mid_message("tobun", "24 ÷ 8", 2, "あめ", "こ") == "あめの お話は そのままで いいよ。8を「何人で 分けるか」の 数に して みよう。"
-    assert d.mid_message("bai", "24 ÷ 8", 2, "えんぴつ", "本") == ("えんぴつは そのままで いいよ。8を、もう 1人が もっている えんぴつの 数に して みよう。"
-                                                                  "24本と くらべると、どんな ことが 求められるかな？")
-    assert d.mid_message("tobun", "24 ÷ 8", 4, None, None) == "4ばんの お話は そのままで いいよ。8を「何人で 分けるか」の 数に して みよう。"
-    assert d.strong_message("tobun", "24 ÷ 8", 2, "あめ", "こ") == "「あめが 24こ あります。8人で 同じ 数ずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
-    assert d.strong_message("bai", "24 ÷ 8", 2, "えんぴつ", "本", session_id=10) == (
-        "「たろうさんは えんぴつを 24本、お友だちは 8本 もって います。」 この あとに、「何倍」を つかって 求める 文を 書いて みよう。")
-    assert d.strong_message("bai", "24 ÷ 8", 2, "えんぴつ", "本", session_id=11).startswith("「はなこさんは"), "人物名はセッションごとに周期的"
-    assert d.strong_message("hougan", "24 ÷ 6", 2, None, None) == "「ものが 24こ あります。1人に 6こずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
+    assert d.mid_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "あめの お話は そのままで いいよ。3を「何人で 分けるか」の 数に して みよう。"
+    assert d.mid_message("bai", "21 ÷ 3", 2, "えんぴつ", "本") == ("えんぴつは そのままで いいよ。3を、もう 1人が もっている えんぴつの 数に して みよう。"
+                                                                  "21本と くらべると、どんな ことが 求められるかな？")
+    assert d.mid_message("tobun", "21 ÷ 3", 4, None, None) == "4ばんの お話は そのままで いいよ。3を「何人で 分けるか」の 数に して みよう。"
+    assert d.strong_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "「あめが 21こ あります。3人で 同じ 数ずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
+    assert d.strong_message("bai", "21 ÷ 3", 2, "えんぴつ", "本", session_id=10) == (
+        "「たろうさんは えんぴつを 21本、お友だちは 3本 もって います。」 この あとに、「何倍」を つかって 求める 文を 書いて みよう。")
+    assert d.strong_message("bai", "21 ÷ 3", 2, "えんぴつ", "本", session_id=11).startswith("「はなこさんは"), "人物名はセッションごとに周期的"
+    assert d.strong_message("hougan", "30 ÷ 5", 2, None, None) == "「ものが 30こ あります。1人に 5こずつ 分けます。」 この あとに、求める 文を 書いて みよう。"
     for text in [d.PRAISE_NEW, d.PRAISE_REPEAT, d.ROLE_ASK, d.ROLE_CORRECTION, d.ROLE_CORRECTION_FALLBACK,
                  d.ROLE_NEXT, d.DONE_MESSAGE,
                  d.TALK_FALLBACK, d.TALK_FALLBACK_REWRITE, *d.FORM_MESSAGES.values(), *d.MID_MESSAGES.values(),
                  *d.MID_MESSAGES_NOITEM.values(), *d.STRONG_MESSAGES.values(), *d.STRUCTURE_LABEL.values()]:
         no_banned(text)
-    assert d.violates_boundary("この種類のお話はいいね", "talk", "24 ÷ 8") == "banned_vocab:種類"
-    assert d.violates_boundary("何をたずねているかな", "talk", "24 ÷ 8") == "banned_vocab:たずね"
+    assert d.violates_boundary("この種類のお話はいいね", "talk", "21 ÷ 3") == "banned_vocab:種類"
+    assert d.violates_boundary("何をたずねているかな", "talk", "21 ÷ 3") == "banned_vocab:たずね"
     # 境界は強度依存：求める量の語・両方の数は強度0・1でだけ禁止。構造名・答え・語彙・休けいは全強度で禁止
-    m = "8を「1人分の 数」に して みよう。えんぴつの お話は そのままで いいよ。"
-    assert d.violates_boundary(m, "talk", "24 ÷ 8", strength=1) == "banned_unknown:1人分"
-    assert d.violates_boundary(m, "talk", "24 ÷ 8", strength=2) is None
-    assert d.violates_boundary("24こを 8こずつ 分けたら？", "talk", "24 ÷ 8", strength=0) == "both_numbers"
-    assert d.violates_boundary("24こを 8こずつ 分けたら？", "talk", "24 ÷ 8", strength=3) is None
+    m = "3を「1人分の 数」に して みよう。えんぴつの お話は そのままで いいよ。"
+    assert d.violates_boundary(m, "talk", "21 ÷ 3", strength=1) == "banned_unknown:1人分"
+    assert d.violates_boundary(m, "talk", "21 ÷ 3", strength=2) is None
+    assert d.violates_boundary("21こを 3こずつ 分けたら？", "talk", "21 ÷ 3", strength=0) == "both_numbers"
+    assert d.violates_boundary("21こを 3こずつ 分けたら？", "talk", "21 ÷ 3", strength=3) is None
     for st in (0, 2, 3):
-        assert d.violates_boundary("これは等分除だね", "talk", "24 ÷ 8", strength=st) == "banned:等分除"
-        assert d.violates_boundary("答えは 3こ だよ", "talk", "24 ÷ 8", strength=st) == "quotient"
-        assert d.violates_boundary("3になるね", "talk", "24 ÷ 8", strength=st) == "quotient"
-        assert d.violates_boundary("休けいしよう", "talk", "24 ÷ 8", strength=st) == "banned_talk:休"
-    assert d.violates_boundary("3ばんの お話の 8は 何かな？", "talk", "24 ÷ 8", strength=0) is None, "番号の 3 は答えではない"
-    assert d.violates_boundary("3つ とも 作れそうだね", "talk", "24 ÷ 8", strength=0) is None
-    scene = "「えんぴつが 24本 あります。1人に 8本ずつ 分けます。」 この あとに、求める 文を 書いて みよう。何倍 も いいね。えんぴつは そのままで いいよ。"
-    assert d.violates_boundary(scene, "talk", "24 ÷ 8", strength=3) is None, "強度3は場面文の長さを許容"
-    assert d.violates_boundary(scene * 3, "talk", "24 ÷ 8", strength=3) == "too_long"
-    assert d.violates_boundary(scene * 2, "talk", "24 ÷ 8", strength=2) == "too_long", "強度2は140字まで"
+        assert d.violates_boundary("これは等分除だね", "talk", "21 ÷ 3", strength=st) == "banned:等分除"
+        assert d.violates_boundary("答えは 7こ だよ", "talk", "21 ÷ 3", strength=st) == "quotient"
+        assert d.violates_boundary("7になるね", "talk", "21 ÷ 3", strength=st) == "quotient"
+        assert d.violates_boundary("休けいしよう", "talk", "21 ÷ 3", strength=st) == "banned_talk:休"
+    assert d.violates_boundary("7ばんの お話の 3は 何かな？", "talk", "21 ÷ 3", strength=0) is None, "番号の 7 は答えではない"
+    assert d.violates_boundary("7つ とも 作れそうだね", "talk", "21 ÷ 3", strength=0) is None
+    scene = "「えんぴつが 21本 あります。1人に 3本ずつ 分けます。」 この あとに、求める 文を 書いて みよう。何倍 も いいね。えんぴつは そのままで いいよ。"
+    assert d.violates_boundary(scene, "talk", "21 ÷ 3", strength=3) is None, "強度3は場面文の長さを許容"
+    assert d.violates_boundary(scene * 3, "talk", "21 ÷ 3", strength=3) == "too_long"
+    assert d.violates_boundary(scene * 2, "talk", "21 ÷ 3", strength=2) == "too_long", "強度2は140字まで"
     assert d.divisor_role_label("bai", "base", 8) == "倍率（8倍）" and d.divisor_role_label("invalid", None, 8) is None
     for label in d.STRUCTURE_LABEL.values():
         for text in (d.ROLE_ASK, d.ROLE_CORRECTION, d.ROLE_CORRECTION_FALLBACK, d.ROLE_NEXT):
@@ -852,7 +852,7 @@ with client:
         "valid=true なのに structure=invalid でも not_problem に落とさない"
     assert nz({"valid": False, "structure": "invalid", "unknown": None, "issue": "reversed"}, "x") == "reversed"
     assert nz({"valid": False, "structure": "invalid", "unknown": None, "issue": "bogus"}, "24人を3人ずつ") == "no_question"
-    assert d.form_message("reversed", "24 ÷ 8") == "24を 8で わる お話に しよう。いまの お話だと、わる 数と わられる 数が ぎゃくに なって いるよ。"
+    assert d.form_message("reversed", "21 ÷ 3") == "21を 3で わる お話に しよう。いまの お話だと、わる 数と わられる 数が ぎゃくに なって いるよ。"
     assert "reversed" in ai_judge.ISSUES
     print("OK バグ修正(F): 理由なしの不成立は本文から no_question / wrong_number に寄せる。逆向きの倍は issue=reversed（専用文言）")
 
@@ -915,7 +915,7 @@ with client:
         admin_post("/admin/api/phase", phase=ph)
         pl = post("/api/login", user_id="13").json()
         sidP = pl["session_id"]
-        assert pl["expression"] == {1: "18 ÷ 3", 3: "30 ÷ 5"}[ph] and pl["dialog"] is None and pl["declared"] is None
+        assert pl["expression"] == {1: "21 ÷ 3", 3: "30 ÷ 5"}[ph] and pl["dialog"] is None and pl["declared"] is None
         for msg in ("T: a", "T: b", "T: c", "T: d", "T: e"):
             r = judge(sidP, "13", msg)
             assert r["response_type"] is None and r["prompt_strength"] is None and r["message"] == "おくったよ"
@@ -935,7 +935,7 @@ with client:
     assert client.get("/api/config").json()["phase"] == 3
     a4 = post("/api/session/new", user_id="01").json()
     assert a4["session_id"] != sidA and a4["phase"] == 3 and a4["expression"] == "30 ÷ 5"
-    assert post("/api/session/new", user_id="02").json()["expression"] == "18 ÷ 3"
+    assert post("/api/session/new", user_id="02").json()["expression"] == "21 ÷ 3"
     r = judge(a4["session_id"], "01", "T: 30このあめを5人で")
     assert r["message"] == "おくったよ" and r["history"] == []
     assert logs_of(a4["session_id"])[0]["phase"] == 3 and logs_of(a4["session_id"])[0]["expression"] == "30 ÷ 5"
@@ -945,7 +945,7 @@ with client:
     r = judge(sid2A, "01", "T: おそく届いた")
     assert r["phase"] == 2 and r["show_support"] is True
     assert raw("SELECT COUNT(*) FROM chat_logs cl JOIN sessions s ON s.session_id=cl.session_id WHERE cl.phase != s.phase")[0][0] == 0
-    print("OK フェーズ3: 01→30÷5 / 02→18÷3。chat_logs.phase は常に sessions.phase と一致")
+    print("OK フェーズ3: 01→30÷5 / 02→21÷3。chat_logs.phase は常に sessions.phase と一致")
 
     # ===== CSV =====
     r = client.get("/admin/api/export/csv", headers=AUTH)
@@ -979,7 +979,7 @@ with client:
             message TEXT NOT NULL, response_json TEXT NOT NULL, structure TEXT, is_new INTEGER NOT NULL DEFAULT 0,
             input_type TEXT, stumble TEXT, created_at TIMESTAMP, support_level TEXT, learner_state TEXT);
         CREATE TABLE app_config (id INTEGER PRIMARY KEY CHECK (id = 1), current_phase INTEGER NOT NULL DEFAULT 1,
-            expression_a TEXT NOT NULL DEFAULT '24 ÷ 4', expression_b TEXT NOT NULL DEFAULT '18 ÷ 3',
+            expression_a TEXT NOT NULL DEFAULT '24 ÷ 4', expression_b TEXT NOT NULL DEFAULT '30 ÷ 5',
             run_id INTEGER NOT NULL DEFAULT 1, updated_at TIMESTAMP);
         CREATE TABLE phase_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, phase INTEGER NOT NULL,
             expression_a TEXT, expression_b TEXT, note TEXT, changed_at TIMESTAMP);

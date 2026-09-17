@@ -295,7 +295,11 @@ with client:
                for l in logs), "フェーズ1では支援に関わる列は空"
     assert all(l["expression"] == "21 ÷ 3" for l in logs)
     assert all(l["latency_ms"] is not None for l in logs)
-    print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空")
+    resumed = post("/api/session/resume", session_id=sidA, user_id="01").json()
+    assert [p["text"] for p in resumed["problems"]] == ["T: おりがみ21まいを3人で", "T: クッキー21こを3人で", "X: 場面矛盾"], \
+        "フェーズ1・3の右パネルは送った作問の全部（不成立も。対話は除く）"
+    assert all(p["structure"] is None for p in resumed["problems"]) and resumed["history"] == []
+    print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空。右パネルに作問の一覧")
 
     # ===== 応答後の判定（フェーズ1・3）：pending → done、送信順の is_new、失敗 → failed → 再判定 =====
     pl = post("/api/login", user_id="05").json()
@@ -1202,6 +1206,25 @@ with client:
         "作問行はフェーズを問わず judge_status=done（同期判定も保存時に done）"
     assert all(x["judge_status"] == "" for x in rows if x["input_type"] in ("taiwa", "resend", "role", "declaration"))
     print("OK CSV: 新列がすべて出る（declaration / role 行・latency_ms・judge_status）・JST")
+
+    # ===== データの片づけ：退避して全部消す =====
+    assert client.post("/admin/api/reset", json={"note": "x", "confirm": "けす"}, headers=AUTH).status_code == 400, "確認語が要る"
+    assert client.post("/admin/api/reset", json={"note": "x", "confirm": "消す"}).status_code == 401
+    before = {t: raw(f"SELECT COUNT(*) FROM {t}")[0][0] for t in ("sessions", "chat_logs", "phase_changes")}
+    assert before["sessions"] > 0 and before["chat_logs"] > 0
+    cfg_before = raw("SELECT current_phase FROM app_config")[0][0]
+    r = admin_post("/admin/api/reset", note="pre 0918!", confirm="消す")
+    assert r["deleted"]["sessions"] == before["sessions"] and r["deleted"]["chat_logs"] == before["chat_logs"]
+    assert r["backup"].endswith("_pre_0918") and Path(r["backup"]).exists() and Path(r["backup"]).parent == Path(os.environ["DATABASE_PATH"]).parent
+    bcon = sqlite3.connect(r["backup"])
+    assert bcon.execute("SELECT COUNT(*) FROM chat_logs").fetchone()[0] == before["chat_logs"], "バックアップに全ログが残る"
+    bcon.close()
+    for t in ("sessions", "chat_logs", "selection_events", "teacher_calls", "phase_changes"):
+        assert raw(f"SELECT COUNT(*) FROM {t}")[0][0] == 0, t
+    assert raw("SELECT current_phase FROM app_config")[0][0] == cfg_before, "app_config は残す"
+    assert client.get("/admin/api/live", headers=AUTH).json()["students"] == []
+    assert post("/api/login", user_id="01").json()["session_id"] is not None, "消した後も新しく始められる"
+    print("OK データの片づけ: 確認語「消す」・DB を data/ に退避（全ログ入り）・5テーブルを空に・app_config は残す")
 
     # ===== 旧スキーマの退避（Render の永続ディスク上の DB を想定） =====
     legacy = Path(_tmp) / "legacy.db"

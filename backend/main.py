@@ -283,8 +283,10 @@ def _enter_payload(session: dict, cfg: dict) -> dict:
         "expression": session["expression"],
         "show_support": show,
         "history": history if show else [],
+        # 右パネル「作った 問題」：フェーズ2は成立した作問（構造付き）、フェーズ1・3は送った作問の全部（判定は見せないので本文だけ。
+        # 番号は「作った お話を 見る」の一覧と同じ＝作問行の送信順）
         "problems": ([{"text": p["text"], "structure": p["structure"]} for p in database.get_valid_problems(session_id)]
-                     if show else []),
+                     if show else [{"text": p["text"], "structure": None} for p in database.get_sakumon_rows(session_id)]),
         "conversation": database.get_conversation(session_id),
         "all_reached": show and set(history) >= STRUCTURES,
         "dialog": _pending_dialog(database.get_last_turn(session_id)) if show else None,
@@ -978,6 +980,22 @@ def admin_teacher_call(req: TeacherCallRequest):
 def admin_rejudge():
     """未判定（pending）・失敗（failed）の作問行を判定キューに入れ直す（サーバ再起動・API エラーの復旧用）。"""
     return {"ok": True, "requeued": judge_queue.requeue_unjudged(), **database.count_judge_status()}
+
+
+class ResetRequest(BaseModel):
+    note: str = ""
+    confirm: str = ""
+
+
+@admin.post("/api/reset")
+def admin_reset(req: ResetRequest):
+    """全ログを退避して消す（リハーサル分の片づけ）。confirm に「消す」が要る。
+    DB ファイルを data/sakumon.db.backup_<時刻>_<note> に複製してから sessions / chat_logs / selection_events /
+    teacher_calls / phase_changes を空にする。app_config は残す。管理画面は先に CSV をダウンロードしてから呼ぶ。"""
+    if req.confirm != "消す":
+        raise HTTPException(status_code=400, detail="confirm に「消す」を入れてください")
+    _last_seen.clear()
+    return {"ok": True, **database.admin_backup_and_reset(req.note)}
 
 
 @admin.get("/api/students")

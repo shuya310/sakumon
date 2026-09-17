@@ -697,21 +697,23 @@ body {
 
 /* ===== 作った お話を 見る（フェーズ1・3の選択） ===== */
 .review-bar {
-  padding: 4px 16px 10px;
+  padding: 4px 16px 12px;
   background: #fff;
   text-align: right;
 }
 .btn-review {
-  background: none;
-  border: none;
-  color: #000000;
-  font-size: .90rem;
-  text-decoration: underline;
+  background: #fff;
+  border: 2px solid var(--green);
+  border-radius: 10px;
+  color: var(--green);
+  font-size: 1rem;
+  font-weight: 700;
   cursor: pointer;
   font-family: inherit;
-  padding: 4px 6px;
+  padding: 10px 20px;
+  transition: background .15s, color .15s;
 }
-.btn-review:hover { color: var(--green); }
+.btn-review:hover { background: var(--green); color: #fff; }
 
 .select-card { max-width: 640px; text-align: left; padding: 32px 36px; }
 .select-title { font-size: 1.05rem; font-weight: 700; color: #064E3B; line-height: 1.7; margin-bottom: 18px; }

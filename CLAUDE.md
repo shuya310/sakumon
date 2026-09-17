@@ -71,6 +71,8 @@ cd backend && uvicorn main:app --reload --port 8000
 - フェーズ1・3の作問は judge_status='pending' で保存して即「おくったよ」→ judge_queue（応答後）が ai_judge を実行して同じ行を埋める
   （児童ごと送信順で直列＝is_new は送信順。並列 JUDGE_BG_WORKERS=8。失敗は JUDGE_BG_RETRY_WAITS=10,30 秒あけて再試行 → failed）。
   フェーズ2は同期のまま（保存時に done/failed）。pending/failed は管理画面「再判定」（/admin/api/rejudge）で再投入。
+  リハーサル分の片づけは管理画面「退避して全部消す」（/admin/api/reset。confirm=「消す」。CSV 保存 → DB を data/ に複製 → 5テーブルを空に。app_config は残す）
+- 右パネル「作った 問題」は全フェーズ（フェーズ1・3は送った作問の全部・判定なし・番号は選択画面と同じ）。信号機はフェーズ2だけ
   フェーズ1・3で classify が失敗した入力は sakumon（pending）に倒す（フェーズ2は taiwa）
 - フェーズ1・3「作った お話を 見る」：/api/selection/open（開くたび記録・作問一覧 sakumon 行のみ・判定結果は返さない）／submit（1〜min(3,n)・何度でも・全件記録。
   分析は最後の submit）。selection_events / teacher_calls（管理画面「声がけした」＝時刻のみ）。フェーズ2には無い。CSV に selected 等を追加。

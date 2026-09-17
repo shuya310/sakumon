@@ -489,16 +489,44 @@ function buildLogRow(log, isSelected = false) {
 }
 
 // ===== CSV エクスポート =====
-document.getElementById("btn-export-csv").addEventListener("click", async () => {
+async function downloadCsv(filename) {
   const res = await fetch("/admin/api/export/csv", { credentials: "same-origin" });
-  if (!res.ok) { alert("エクスポートに失敗しました"); return; }
+  if (!res.ok) throw new Error("エクスポートに失敗しました");
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "sakumon_export.csv";
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+document.getElementById("btn-export-csv").addEventListener("click", async () => {
+  try { await downloadCsv("sakumon_export.csv"); } catch (e) { alert(e.message); }
+});
+
+// ===== データの片づけ：CSV を保存 → サーバで DB を退避 → 全部消す =====
+document.getElementById("btn-reset").addEventListener("click", async () => {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").replace(/^(\d{8})/, "$1_");
+  const note = prompt("バックアップ名のメモ（英数字。例: pre_0918）", "pre_0918");
+  if (note === null) return;
+  try {
+    await downloadCsv(`sakumon_export_${stamp}_${note || "pre_reset"}.csv`);
+  } catch (e) {
+    alert("CSV の保存に失敗したので中止しました: " + e.message);
+    return;
+  }
+  const typed = prompt("CSV を保存しました。サーバの DB をバックアップしてから全データを消します。\n消してよければ「消す」と入力してください。");
+  if (typed !== "消す") { alert("中止しました（何も消していません）"); return; }
+  try {
+    const r = await api("/admin/api/reset", { method: "POST", body: JSON.stringify({ note, confirm: typed }) });
+    const d = r.deleted;
+    alert(`消しました。バックアップ: ${r.backup}\nセッション ${d.sessions} ／ ログ ${d.chat_logs} ／ 選択 ${d.selection_events} ／ 声がけ ${d.teacher_calls} ／ フェーズ変更 ${d.phase_changes}`);
+    refreshLive();
+    if (typeof loadStudents === "function") loadStudents();
+  } catch (e) {
+    alert("失敗しました: " + e.message);
+  }
 });
 
 // ===== パンくず =====

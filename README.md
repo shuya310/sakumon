@@ -222,14 +222,6 @@ data/sakumon.db
 - 起動時にテーブルが無ければ作る。旧スキーマ（9/14 以前）が残っていれば `*_legacy_日付` に改名して退避し（DROP しない）、新スキーマで作り直す。
 - スキーマは `database.SCHEMA`。列追加が必要になったら `SCHEMA` を変更し、`database._MIGRATIONS` に載せて既存 DB には ALTER TABLE を当てる（起動時に自動）。
 
-## 起動
-
-```
-cd backend && uvicorn main:app --reload --port 8000
-```
-
-`.env` に `ANTHROPIC_API_KEY` と `ADMIN_PASSWORD` が必要（`.env.example` 参照）。
-`ADMIN_PASSWORD` が無いと起動しない。Render では Environment に設定する。
 
 ## 管理画面 `/admin`
 

@@ -13,8 +13,8 @@ API 呼び出し（タイムアウト・リトライ・同時実行制御・計�
   {"valid": bool,
    "structure": "tobun" | "hougan" | "bai" | "invalid",
    "unknown": "one_unit" | "num_units" | "ratio" | "base" | "rate" | None,
-   "issue": None | "scene_contradiction" | "wrong_number" | "reversed" | "incomplete_text"
-            | "wrong_operation" | "no_question" | "not_problem",
+   "issue": None | "scene_contradiction" | "wrong_number" | "reversed" | "missing_condition"
+            | "incomplete_text" | "wrong_operation" | "no_question" | "not_problem",
    "item": str | None,    # 被除数が数えている物の名前（中・強の文言の {物}。読み取れなければ None）
    "unit": str | None}    # 被除数に付く助数詞（{unit}。読み取れなければ None）
 """
@@ -28,7 +28,7 @@ import llm_call
 
 ALL_STRUCTURES = ("tobun", "hougan", "bai")
 UNKNOWNS = ("one_unit", "num_units", "ratio", "base", "rate")
-ISSUES = ("scene_contradiction", "wrong_number", "reversed", "incomplete_text",
+ISSUES = ("scene_contradiction", "wrong_number", "reversed", "missing_condition", "incomplete_text",
           "wrong_operation", "no_question", "not_problem")
 
 # structured outputs（output_config.format）のスキーマ。
@@ -86,6 +86,8 @@ JSON以外の文字は一切出力しないでください。
    ★問いの文が書かれていなければ、場面から何を求めるか推測できても valid=false, issue="no_question"。
    例「あめが{dividend}こあります。{divisor}人にわけます。」→ 問いがないので no_question（1人分を問うと補ってはいけない）。
 3. その場面と問いが、式 {expression} で解ける（答えが {quotient} になる）
+   ★問いの文はあっても、除数 {divisor} にあたる条件（何こずつ・何人で・くらべる相手の量）が場面に書かれていなければ
+   valid=false, issue="missing_condition"。例「{dividend}まいのおりがみがあります。何人にくばれますか。」→ 「何まいずつ」が無い。
 1つでも満たさなければ valid=false とし、issue に理由コードを入れる。
 
 ### 第2層：構造（structure）── 判別点は「除数 {divisor} が場面の中で何を指しているか」
@@ -137,6 +139,9 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
 - "reversed"：数値は {dividend} と {divisor} の両方を使っているが、比較の向きが逆で {divisor}÷{dividend} になる
   （「AはBの何倍」で A={divisor}, B={dividend}）。使う数がちがう wrong_number とは区別する
 - "wrong_operation"：わり算では解けない（かけ算・たし算・ひき算の問題になっている）
+- "missing_condition"：問いの文はあるが、除数 {divisor} にあたる条件（何こずつ・何人で・くらべる相手の量）が場面に無く、
+  {expression} を立てるための数が足りない。{divisor} が別の数に置き換わっている場合は wrong_number、
+  文そのものが途切れている場合は incomplete_text であって、missing_condition ではない
 - "incomplete_text"：文が途中で切れていて、求める量を特定できない
 - "no_question"：場面だけで、何を求めるかが書かれていない
 - "not_problem"：場面の記述自体がなく、文章題として成立しない（単語の羅列・意味不明・作問ではない文）。
@@ -163,7 +168,7 @@ structure と unknown が矛盾したら第2層に戻って判定し直す。val
   "valid": true or false,
   "structure": "tobun" or "hougan" or "bai" or "invalid",
   "unknown": "one_unit" or "num_units" or "ratio" or "base" or "rate" or null,
-  "issue": null or "scene_contradiction" or "wrong_number" or "reversed" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem",
+  "issue": null or "scene_contradiction" or "wrong_number" or "reversed" or "missing_condition" or "incomplete_text" or "wrong_operation" or "no_question" or "not_problem",
   "item": "被除数が数えている物の名前（読み取れなければ \"\"）",
   "unit": "被除数に付く助数詞（読み取れなければ \"\"）"
 }"""
@@ -186,7 +191,7 @@ def _text_from(response) -> str:
     raise ValueError("no text block in response")
 
 
-def normalize(result: dict, message: str = "") -> dict:
+def normalize(result: dict, message: str = "", expression: str | None = None) -> dict:
     """LLMの生JSONを仕様の形に正規化する（structure と unknown の整合をコード側で強制）。
 
     valid=false なのに issue が無い／未知（または valid=true なのに structure が invalid）のときは、
@@ -204,7 +209,7 @@ def normalize(result: dict, message: str = "") -> dict:
         return {"valid": True, "structure": structure, "unknown": unknown, "issue": None, **extra}
     issue = _LEGACY_ISSUE.get(issue, issue)
     if issue not in ISSUES:
-        fallback = _fallback_issue(message)
+        fallback = _fallback_issue(message, expression)
         print(f"[ai_judge] issue missing (valid={result.get('valid')!r}, structure={structure!r}, "
               f"issue={issue!r}) → {fallback}: {message[:40]!r}")
         issue = fallback
@@ -215,8 +220,9 @@ _QUESTION_MARK = re.compile(r"(ですか|でしょう|なさい|かな|か[。�
 _SCENE = re.compile(r"(あります|います|もっています|ありました|いました|ずつ|人で|人に|に分け|にくば|わけ)")
 
 
-def _fallback_issue(message: str) -> str:
-    """判定が理由を返さなかったときの保険。本文の形から最も近い理由を選ぶ（not_problem は場面の文が無いときだけ）。"""
+def _fallback_issue(message: str, expression: str | None = None) -> str:
+    """判定が理由を返さなかったときの保険。本文の形から最も近い理由を選ぶ（not_problem は場面の文が無いときだけ）。
+    式が分かれば、問いはあるのに除数が本文に無いものは missing_condition に寄せる。"""
     text = (message or "").strip()
     has_number = re.search(r"[0-9０-９〇一二三四五六七八九十百]", text) is not None
     has_scene = _SCENE.search(text) is not None
@@ -224,7 +230,17 @@ def _fallback_issue(message: str) -> str:
         return "not_problem"
     if not _QUESTION_MARK.search(text):
         return "no_question"
+    if expression:
+        dividend, divisor = parse_expression(expression)
+        if _has_number(text, dividend) and not _has_number(text, divisor):
+            return "missing_condition"
     return "wrong_number"
+
+
+def _has_number(text: str, n: int) -> bool:
+    """本文に数 n が（別の数の一部としてではなく）現れるか。全角数字も見る。"""
+    normalized = text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    return re.search(rf"(?<![0-9]){n}(?![0-9])", normalized) is not None
 
 
 def _short(v, limit: int = 12) -> str | None:
@@ -233,11 +249,11 @@ def _short(v, limit: int = 12) -> str | None:
     return v if v and len(v) <= limit else None
 
 
-def _parse_response(response, message: str = "") -> dict:
+def _parse_response(response, message: str = "", expression: str | None = None) -> dict:
     """応答を検査して正規化済みの判定にする。ValueError は llm_call が再試行する。"""
     if response.stop_reason == "max_tokens":
         raise ValueError("response truncated (max_tokens)")
-    return normalize(extract_json(_text_from(response)), message)
+    return normalize(extract_json(_text_from(response)), message, expression)
 
 
 def judge(message: str, expression: str, user_id: str | None = None) -> dict:
@@ -254,7 +270,7 @@ def judge(message: str, expression: str, user_id: str | None = None) -> dict:
     started = time.perf_counter()
     try:
         result, meta = llm_call.call(
-            user_id, lambda response: _parse_response(response, message),
+            user_id, lambda response: _parse_response(response, message, expression),
             model=MODEL,
             max_tokens=512,
             thinking={"type": "disabled"},  # sonnet-5 は既定でonのため明示off

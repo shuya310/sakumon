@@ -7,8 +7,9 @@
   prompt   予告支援。1=弱（役割の宣言・2ターン：除数が何をあらわすかを言わせ→次の作問で何の数にするかを予告させる。
            判定と食い違えば1回だけ児童の問題文の除数の句を引用して問い返す）2=中（目標の指定）3=強（目標＋場面固定）
   done     3つそろった（定型）                                                    3-7
-  talk     作問以外の入力（LLM＋コード側ガード、失敗時は定型文）。現在の強度・目標・到達構造・直前の成立作問
-           （本文と、わる数が指していたもの）を渡し、「話してよいこと」の境界は強度で切り替える
+  talk     作問以外の入力（LLM＋コード側ガード、失敗時は定型文）。現在の強度・目標・到達構造・成立作問
+           （本文と、わる数が指していたもの）・直前のやりとり（児童の最新入力＋判定理由＋AI の返事）を渡し、
+           「話してよいこと」の境界は強度で切り替える（0：促しのみ。役割を問わない／1：問い返し／2：指定／3：場面文）
   error    judge が API 不通（定型。3-2 の error）
 
 `**…**` は強調（フロントで太字にする）。改行は \\n。
@@ -39,24 +40,29 @@ STRUCTURE_LABEL = {
     "bai": "何倍",
 }
 
-# 3-2 形式の支援（issue に応じて1点だけ）
+# 3-2 形式の支援（issue に応じて1点だけ）。ai_judge.ISSUES の各コードに1つずつ文言を当てる（9/17 模擬実践の修正②）
+#   missing_condition   … 問いはあるが、わる数にあたる条件（何こずつ・何人で）が場面に無い（「途中で切れ」「問いなし」と分ける）
+#   scene_contradiction … 場面と問いがかみ合わない（答えが既出の場合だけでなく、被除数の取り違えも含むので「数が何の数か」を確かめさせる）
+#   incomplete_text     … 文が途中で終わっている
+#   reversed            … 24 と 4 は両方使っているので「24と 4を つかう問題に」とは言わず、向きが逆だと伝える
 FORM_MESSAGES = {
     "no_question": "求める ことを きく 文が ないみたいだよ。さいごに「〜は いくつですか」を 書いて みよう。",
     "wrong_number": "{dividend}と {divisor}を つかう 問題に しよう。いまの お話だと しきが ちがって しまうよ。",
     "not_problem": "まだ お話に なって いないみたいだよ。「〜が あります」から はじめて みよう。",
-    "scene_contradiction": "求める ことの 答えが、お話の 中に もう 書いて あるよ。どこか さがして みよう。",
+    "scene_contradiction": "お話の 中の 数が、何の 数か たしかめて みよう。求める ことと 合って いるかな？",
+    "missing_condition": "何こずつ、何人で、など 分ける もとに なる 数が 書いて あるかな？ もう一度 お話を 読んで みよう。",
+    "incomplete_text": "お話が とちゅうで 終わって いるみたいだよ。さいごまで 書いて みよう。",
+    "reversed": "{dividend}を {divisor}で わる お話に しよう。いまの お話だと、わる 数と わられる 数が ぎゃくに なって いるよ。",
     "error": "うまく よみとれなかったよ。もう一度 おくって みてね。",
 }
 # 表に無い issue は最も近い1点に寄せる（複数あっても1つに絞る）
 _FORM_ALIAS = {
     "wrong_operation": "wrong_number",   # しきが ちがう
-    "incomplete_text": "no_question",    # 求める文まで書けていない
-    "reversed": "wrong_number",          # 比較の向きが逆（ログでは区別。児童向け文言は暫定で wrong_number と同じ）
 }
 
-# 3-3 なし（強度0）
-PRAISE_NEW = "新しい 問題が できたね！\nほかにも、**求めるものが ちがう** 問題は 作れるかな？"
-PRAISE_REPEAT = "いいね、また 一つ できたね。\n今度は **求めるものが ちがう** 問題も 作れそうかな？"
+# 3-3 なし（強度0）。「求めるものが ちがう」ではなく、わる数の役割の軸で言う（9/17 修正⑤）
+PRAISE_NEW = "新しい 問題が できたね！\nほかにも、**{divisor}が ちがう 数を 表す** 問題は 作れるかな？"
+PRAISE_REPEAT = "いいね、また 一つ できたね。\n今度は **{divisor}が ちがう 数を 表す** 問題も 作れそうかな？"
 
 # 弱（強度1）＝役割の宣言（2ターン）。構造のラベル（1つ分の 大きさ／いくつ分／何倍）は弱では出さない。
 #   ターン1：直前の成立作問の除数が何をあらわしているかを児童に言わせる（answer → ai_classify.classify_role）
@@ -117,7 +123,7 @@ DONE_MESSAGE = "3つ とも できたね！\n1つ分の 大きさ、いくつ分
 # talk のフォールバック（LLM 不通・境界違反）。まだ1問も作れていない子には素材想起(a)、
 # 1問以上作れている子には求めているものだけを変える提案(b)。休けい・終了・謝罪は入れない。
 TALK_FALLBACK = "そっか。じゃあ、身近なところで、{dividend}こ あるものは何かな？"
-TALK_FALLBACK_REWRITE = "そっか。じゃあ、いま作った 問題の「求めているもの」だけ、かえてみようか。"
+TALK_FALLBACK_REWRITE = "そっか。じゃあ、いま作った 問題の {divisor}を、ちがう 数に かえて みようか。"
 
 
 def _fill(text: str, expression: str, **extra) -> str:
@@ -350,9 +356,13 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 
 # 言葉づかい（必ず守る）
 - 「種類」「たずねる」「聞いていること」「ちがうことを聞く」は使わない。
-- かわりに「求める」「求めているもの」「求めるものが ちがう」を使う。
+- かわりに「求める」「求めているもの」「求めるものが ちがう」「{divisor}が ちがう 数を 表す」を使う。
 
 # 返し方
+★最優先：子どもの発話が、直前の先生の返事（フィードバック）への疑問や返事（「どういうこと？」「なんで？」「意味がわからない」、
+  返事の中の言葉をそのまま返してくる、指摘された箇所を答えてくる 等）なら、まず「いまの状況」の「直前のやりとり」にある
+  **直前の子どもの問題文に即して**、その返事が何を指しているのかを説明する（どの数がお話の中で何の数として読めるか、
+  どこがかみ合っていないか）。答え（数値）や、直した問題文は言わない。それ以外の一般的な手がかりより、この説明を優先する。
 ★困り・いやがる・ネガティブな表明（「もうやだ」「続けられない」「なんだそれ」等）が来ても、
   「活動をやめたい」のサインだとは解釈しないこと。「いまの足場（手がかり）が足りない」だけだと考える。
 絶対に書かないこと：
@@ -371,7 +381,8 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 「答えを教えて」と言われても答えは渡さない。ただし断るだけで終わらせず、必ず上の(a)(b)いずれかの
   手がかりにつなげること（断って終わりにしない）。
 子どもが「{divisor}は何の数？」のように具体的に聞いてきたら、はぐらかさず、上の「話してよいこと」の範囲で答える
-（強さ 0・1 なら問い返しで、2 以上なら先生から言ってよい）。同じ言い回しをくり返さない。
+（強さ 0 なら子ども自身の問題文の {divisor} のところに目を向けさせるだけ、1 なら問い返しで、2 以上なら先生から言ってよい）。
+同じ言い回しをくり返さない。
 
 # 文字づかい
 {KANJI_RULE}
@@ -393,9 +404,19 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
   "is_help_request": true or false
 }"""
 
-# 強度ごとの「話してよいこと」。強度0・1は問い返しのみ、2は役割の指定＋題材固定、3は場面文まで
+# 強度ごとの「話してよいこと」。強度0は促しのみ（役割を問わない・言わない）、1は問い返し、2は役割の指定＋題材固定、3は場面文まで
 _ALLOWED_BY_STRENGTH = {
-    0: """- わる数 {divisor} が子どもの問題の中で何を表しているかを、子どもに問い返してよい
+    0: """- 促しだけ。直前の返事（フィードバック）の意味を子どもの問題文に即して説明すること、はげますこと、
+  「{divisor}が ちがう 数を 表す 問題も 作れるかな」と次の作問を促すことはよい。
+- ★わる数 {divisor} が何を表しているかを、子どもに問わない（「{divisor}は 何の 数かな？」「{divisor}は 何を あらわして いる？」は書かない）。
+  先生から答え（役割）も言わない。子どもが「{divisor}は何の数？」と聞いてきても、役割を言わず、問い返しもせず、
+  「お話の 中で {divisor}と 書いた ところを もう一度 読んで みよう」のように子ども自身の問題文に目を向けさせるだけにする。
+  次の問題で {divisor} を何にするかも先生から指定しない。
+- 例外：子どもが「2つの問題は同じ／ちがう」と主張したときだけ、判定に基づいて、それぞれの問題で {divisor} が何を表しているかを
+  短く示してよい（次に何にするかは言わない）。
+- 「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない。
+- 数と数の関係（「{dividend}こを{divisor}こずつ」のような言い方）は書かない。""",
+    1: """- わる数 {divisor} が子どもの問題の中で何を表しているかを、子どもに問い返してよい
   （例：「お話の 中で {divisor}と 書いた ところを 見て みよう。{divisor}は 何の 数だった？」）。
 - ★先生から答え（役割）を言わない。子どもが「{divisor}は何の数？」「求めているものって何？」と聞いてきても、
   「{divisor}は 人数だね」「1人に配る数」のように役割を言わず、子ども自身の問題文の {divisor} のところに目を向けさせて問い返す。
@@ -415,7 +436,6 @@ _ALLOWED_BY_STRENGTH = {
 - 場面文を渡してよい（「{item}が {dividend}{unit} あります。…」のような、求める文の手前までの文）。
   ただし求める文（問い）は書かない。子どもに書かせる。""",
 }
-_ALLOWED_BY_STRENGTH[1] = _ALLOWED_BY_STRENGTH[0]
 
 # 「いまの状況」に書く、到達構造の説明（先生向け。子どもに見せる語ではない）
 _PRODUCED_DESC = {
@@ -437,6 +457,40 @@ def divisor_role_label(structure: str | None, unknown: str | None, divisor: int)
     if structure == "bai" and unknown == "base":
         return f"倍率（{divisor}倍）"
     return None
+
+
+# 直前の作問が不成立だったときの判定理由（先生向けの説明。子どもに見せる語ではない）
+_ISSUE_DESC = {
+    "scene_contradiction": "場面と問いがかみ合っていない（問いの答えが場面にすでに書いてある、または {dividend} が何の総数かが場面と食いちがう）",
+    "missing_condition": "問いの文はあるが、わる数 {divisor} にあたる条件（何こずつ・何人で・くらべる相手の量）が場面に無い",
+    "wrong_number": "文章題にはなっているが、式が {expression} にならない（使う数がちがう）",
+    "reversed": "{dividend} と {divisor} は両方使っているが、比べる向きが逆で {divisor}÷{dividend} になっている",
+    "wrong_operation": "わり算ではなく、かけ算・たし算・ひき算の問題になっている",
+    "incomplete_text": "文が途中で切れていて、何を求めるかが分からない",
+    "no_question": "場面だけで、何を求めるかを問う文が無い",
+    "not_problem": "場面の記述が無く、文章題になっていない",
+    "error": "判定できなかった（技術的な失敗）",
+}
+
+
+def _last_turn_lines(last: dict | None, dividend: int, divisor: int) -> list[str]:
+    """「いまの状況」の「直前のやりとり」：子どもの最新の入力（作問なら判定結果と理由）と、それへの先生の返事。"""
+    if not last or not last.get("child"):
+        return ["- 直前のやりとり: まだない"]
+    lines = ["- 直前のやりとり（子どもの最新の入力と、それへの先生の返事。子どもの発話がこの返事への疑問なら、まずこれを説明する）:"]
+    child = last["child"]
+    if last.get("input_type") == "sakumon":
+        if last.get("valid"):
+            lines.append(f"  子ども: 「{child}」（作問として判定 → 成立）")
+        else:
+            desc = _ISSUE_DESC.get(last.get("issue") or "", "不成立")
+            desc = desc.replace("{expression}", f"{dividend} ÷ {divisor}").replace("{dividend}", str(dividend)).replace("{divisor}", str(divisor))
+            lines.append(f"  子ども: 「{child}」（作問として判定 → 不成立。理由: {desc}）")
+    else:
+        lines.append(f"  子ども: 「{child}」")
+    if last.get("ai"):
+        lines.append(f"  先生: 「{last['ai']}」")
+    return lines
 
 
 def _build_situation(history: list[str], ctx: dict, dividend: int, divisor: int) -> str:
@@ -461,6 +515,7 @@ def _build_situation(history: list[str], ctx: dict, dividend: int, divisor: int)
                      + (f"。物: {last['item']}" if last.get("item") else ""))
     else:
         lines.append("- 直前に作れた問題: まだない")
+    lines.extend(_last_turn_lines(ctx.get("last_turn"), dividend, divisor))
     lines.append(f"- 支援の強さ: {ctx.get('strength', 0)}（0=促し／1=弱／2=中／3=強）")
     return "\n".join(lines)
 
@@ -503,6 +558,36 @@ def _text_from(response) -> str:
         if getattr(block, "type", None) == "text":
             return block.text
     raise ValueError("no text block in response")
+
+
+# ---- 児童への問いの検出（awaiting。9/17 修正①） ----
+# talk の出力が児童に答えを求める問い（文末が「〜かな？」「〜？」「〜たい？」「〜だった？」等）なら、次の入力は
+# 原則として対話として受ける（main._awaiting_answer）。定型の praise（「作れるかな？」）は修辞疑問なので対象にしない。
+_ASKS_CHILD = re.compile(r"(？|\?|かな|たい|だろう|でしょう|だった|どうかな|どう)[。．!！]?\s*$")
+
+
+def asks_child(message: str | None) -> bool:
+    """AI の発話が児童への問いで終わっているか（いずれかの文が問いなら True）。"""
+    for sent in re.split(r"(?<=[。？?！!])\s*|\n", message or ""):
+        if sent.strip() and _ASKS_CHILD.search(sent.strip()):
+            return True
+    return False
+
+
+# 役割を問う発話か（9/17 修正③④）：文の中に除数の数字（「4ばん」「4番」の番号は除く）と「何／なに／なん」と
+# 「あらわ／表／数／指／意味」がそろっていれば、わる数の役割を問うている。強度0のガードと、talk の後の役割待ち（awaiting=role）に使う
+_ROLE_WORDS = re.compile(r"(あらわ|表|数|指|意味)")
+_WHAT = re.compile(r"(何|なに|なん)")
+
+
+def asks_role(message: str | None, divisor: int) -> bool:
+    for sent in re.split(r"(?<=[。？?！!])\s*|\n", message or ""):
+        if not sent.strip():
+            continue
+        body = re.sub(rf"(?<![0-9]){divisor}\s*(ばん|番)", "", sent)
+        if (re.search(rf"(?<![0-9]){divisor}(?![0-9])", body) and _WHAT.search(body) and _ROLE_WORDS.search(body)):
+            return True
+    return False
 
 
 # ---- コード側ガード ----
@@ -548,6 +633,8 @@ def violates_boundary(message: str, response_type: str, expression: str, strengt
                 return f"banned_unknown:{w}"
         if response_type == "talk" and _has_both_numbers(message, dividend, divisor):
             return "both_numbers"
+    if strength == 0 and response_type == "talk" and asks_role(message, divisor):
+        return "role_question"   # 強度0は促しのみ。役割を問うのは弱（強度1）から
     if response_type == "talk":
         for w in _BANNED_TALK:
             if w in message:
@@ -557,11 +644,21 @@ def violates_boundary(message: str, response_type: str, expression: str, strengt
     return None
 
 
+# 再生成のときに LLM へ伝える違反の理由（violates_boundary の戻り値の先頭語 → 説明）
+_REASON_DESC = {
+    "role_question": "強さ0では、わる数が何を表しているかを子どもに問わない",
+    "banned": "構造の名前・分類の言い方を出さない",
+    "banned_vocab": "使わない言葉が入っている",
+    "quotient": "答えの数値を言わない",
+    "banned_unknown": "この強さでは求める量の語・役割の語を使わない",
+    "both_numbers": "この強さでは2つの数の関係を書かない",
+    "banned_talk": "休けい・終了・謝罪を書かない",
+    "too_long": "長すぎる。1〜2文にする",
+}
+
+
 def _fallback(expression: str, has_problem: bool) -> str:
-    dividend, _divisor = parse_expression(expression)
-    if has_problem:
-        return TALK_FALLBACK_REWRITE
-    return TALK_FALLBACK.replace("{dividend}", str(dividend))
+    return _fill(TALK_FALLBACK_REWRITE if has_problem else TALK_FALLBACK, expression)
 
 
 def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
@@ -575,6 +672,7 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
       target        … 現在の目標構造（tobun / hougan / bai / None）
       last_problem  … 直前の成立作問 {text, structure, unknown, divisor_role, item, unit}（無ければ None）
       problems      … 成立作問の一覧 [{text, divisor_role}]（問題どうしの違いを役割で説明するため）
+      last_turn     … 直前のやりとり {child, ai, input_type, response_type, issue, valid}（フィードバックへの疑問に答えるため）
     history は到達構造名のリスト（件数だけでなく構造名もプロンプトに書く）。"""
     ctx = context or {}
     strength = int(ctx.get("strength") or 0)
@@ -593,7 +691,12 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
     # API 呼び出し（タイムアウト・リトライ・同時実行制御）は llm_call に委ねる。
     # 境界違反・空メッセージは応答が返ったうえでの内容の問題なので、ここで1回だけ再依頼する。
     retry_total = 0
-    for attempt in range(2):  # 1回リトライ
+    reason = None
+    for attempt in range(2):  # 1回リトライ（境界違反なら、その理由を添えて再生成）
+        content = user_content
+        if reason:
+            content += f"\n\n※前の声かけ「{message}」は「話してよいこと」の範囲を超えていた（{_REASON_DESC.get(reason.split(':')[0], reason)}）。" \
+                       "同じ内容にならないよう、範囲の中で書き直すこと。"
         try:
             result, meta = llm_call.call(
                 user_id, parse,
@@ -602,7 +705,7 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
                 thinking={"type": "disabled"},
                 system=system,
                 output_config={"format": OUTPUT_SCHEMA},
-                messages=[{"role": "user", "content": user_content}],
+                messages=[{"role": "user", "content": content}],
             )
         except llm_call.LLMUnavailable as e:
             retry_total += e.retry_count
@@ -615,7 +718,7 @@ def _llm_message(child_message: str, input_kind: str, judge_result: dict | None,
         reason = violates_boundary(message, response_type, expression, strength)
         if reason:
             print(f"[ai_dialogue] boundary violation ({response_type}, strength={strength}, {reason}): {message}")
-            continue  # リトライ（2回目も違反なら定型文へ）
+            continue  # 理由を添えて再依頼（2回目も違反なら定型文へ）
         return {"message": message, "state": result.get("state") or response_type,
                 "is_help_request": bool(result.get("is_help_request")),
                 "meta": {"retry_count": retry_total, "status": "retried_ok" if retry_total else "ok"}}
@@ -648,8 +751,8 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
         return {"message": FORM_MESSAGES["error"], "state": "judge_error"}
     if response_type == "praise":
         if jr.get("is_new"):
-            return {"message": PRAISE_NEW, "state": "praise_new"}
-        return {"message": PRAISE_REPEAT, "state": "praise_repeat"}
+            return {"message": _fill(PRAISE_NEW, expression), "state": "praise_new"}
+        return {"message": _fill(PRAISE_REPEAT, expression), "state": "praise_repeat"}
     if response_type == "prompt":
         if prompt_strength == 1:
             return {"message": weak_message(ref_no or 1, expression), "state": "prompt_weak"}

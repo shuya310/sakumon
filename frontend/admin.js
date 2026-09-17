@@ -42,6 +42,16 @@ const PHASE_DESC = {
   3: "事後測定：別の式で自由に作問。新しいセッション。支援なし。",
 };
 
+// 「式を変更」の選択肢（サーバの EXPRESSION_ASSIGNMENT に現れる式。/admin/api/config から受け取る）
+let EXPR_CHOICES = [];
+
+function exprSelectHtml(sessionId, current) {
+  const opts = EXPR_CHOICES.includes(current) ? EXPR_CHOICES : [current, ...EXPR_CHOICES];
+  return `<select class="expr-select" data-id="${sessionId}" title="式を変更">` +
+    opts.map(e => `<option value="${esc(e)}"${e === current ? " selected" : ""}>${esc(e)}</option>`).join("") +
+    `</select>`;
+}
+
 function renderConfig(cfg) {
   document.getElementById("phase-big").textContent = `フェーズ ${cfg.current_phase}`;
   document.getElementById("phase-desc").textContent = PHASE_DESC[cfg.current_phase] || "";
@@ -50,6 +60,7 @@ function renderConfig(cfg) {
     b.classList.toggle("active", Number(b.dataset.phase) === cfg.current_phase);
   });
   const asg = (cfg.public && cfg.public.expression_assignment) || {};
+  EXPR_CHOICES = (cfg.public && cfg.public.expression_choices) || [];
   const tbody = document.getElementById("expr-tbody");
   tbody.innerHTML = "";
   [["odd", "奇数番"], ["even", "偶数番"]].forEach(([g, label]) => {
@@ -233,8 +244,7 @@ function buildSessionBlock(session, userId) {
       <div>
         <div class="s-date">#${session.session_id}　${fmtDate(session.session_start)} 〜 ${session.session_end ? fmtDate(session.session_end) : "（継続中）"}　
           <span class="badge badge-blue">フェーズ${session.phase}</span>
-          <span class="badge badge-gray" id="expr-badge-${session.session_id}">${esc(session.expression)}</span>
-          <button class="btn btn-ghost btn-sm btn-set-expr" data-id="${session.session_id}">式を変更</button>
+          ${exprSelectHtml(session.session_id, session.expression)}
           <span class="badge badge-gray">${session.parity_group === "odd" ? "奇数" : "偶数"}</span>
           ${session.declared ? `<span class="badge badge-orange">予告: ${STRUCT_LABEL[session.declared] || session.declared}（${session.declared_by === "child" ? "児童" : "システム"}）</span>` : ""}
         </div>
@@ -251,15 +261,22 @@ function buildSessionBlock(session, userId) {
   body.className = "session-body";
   body.dataset.loaded = "false";
 
-  head.querySelector(".btn-set-expr").addEventListener("click", async (e) => {
+  const exprSelect = head.querySelector(".expr-select");
+  exprSelect.addEventListener("click", e => e.stopPropagation());
+  exprSelect.addEventListener("change", async (e) => {
     e.stopPropagation();
-    const v = prompt(`セッション #${session.session_id} の式を上書きします（例: 24 ÷ 8）`, session.expression);
-    if (!v) return;
+    const v = exprSelect.value;
+    if (v === session.expression) return;
+    if (!confirm(`セッション #${session.session_id} の式を「${session.expression}」から「${v}」に上書きしますか？\n児童の画面には5秒以内に反映されます。`)) {
+      exprSelect.value = session.expression;
+      return;
+    }
     try {
       const r = await api(`/admin/api/sessions/${session.session_id}/expression`, { method: "POST", body: JSON.stringify({ expression: v }) });
       session.expression = r.expression;
-      head.querySelector(`#expr-badge-${session.session_id}`).textContent = r.expression;
+      exprSelect.value = r.expression;
     } catch (err) {
+      exprSelect.value = session.expression;
       alert("式の変更に失敗しました: " + err.message);
     }
   });

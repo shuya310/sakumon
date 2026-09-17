@@ -45,9 +45,13 @@ _JUDGE = {
 CALLS = {"judge": 0, "classify": 0, "llm": 0, "declare": 0}
 
 
+LAST_JUDGE = {}
+
+
 def fake_judge(message, expression, user_id=None):
     """モック：先頭の記号で判定。本文末尾の「@物/助数詞」で item / unit を返す（無ければ None）。"""
     CALLS["judge"] += 1
+    LAST_JUDGE.update(message=message, expression=expression)
     jr = dict(_JUDGE[message[0]], item=None, unit=None)
     if "@" in message:
         item, _, unit = message.rsplit("@", 1)[1].partition("/")
@@ -206,16 +210,19 @@ with client:
     # ===== 式のカウンターバランス（4章） =====
     cfg = client.get("/api/config").json()
     assert cfg["phase"] == 1 and cfg["expression"] is None, "式は児童ごとなのでログイン前は返さない"
-    assert cfg["expression_assignment"] == {"odd": {"1": "24 ÷ 6", "2": "24 ÷ 8", "3": "24 ÷ 3"},
-                                            "even": {"1": "24 ÷ 3", "2": "24 ÷ 8", "3": "24 ÷ 6"}}
+    assert cfg["expression_assignment"] == {g: {str(ph): main.config.normalize_expression(e) for ph, e in dd.items()}
+                                            for g, dd in main.EXPRESSION_ASSIGNMENT.items()}
+    assert cfg["expression_assignment"] == {"odd": {"1": "18 ÷ 3", "2": "24 ÷ 4", "3": "30 ÷ 5"},
+                                            "even": {"1": "30 ÷ 5", "2": "24 ÷ 4", "3": "18 ÷ 3"}}
+    assert cfg["expression_choices"] == ["18 ÷ 3", "24 ÷ 4", "30 ÷ 5"], "「式を変更」の選択肢は設定表に現れる式の集合"
     a = post("/api/login", user_id="01").json()
     b = post("/api/login", user_id="02").json()
-    assert a["expression"] == "24 ÷ 6" and b["expression"] == "24 ÷ 3"
-    assert raw("SELECT expression FROM sessions WHERE session_id=?", a["session_id"])[0][0] == "24 ÷ 6"
+    assert a["expression"] == "18 ÷ 3" and b["expression"] == "30 ÷ 5"
+    assert raw("SELECT expression FROM sessions WHERE session_id=?", a["session_id"])[0][0] == "18 ÷ 3"
     q = client.get(f"/api/config?user_id=01&session_id={a['session_id']}").json()
-    assert q["expression"] == "24 ÷ 6"
+    assert q["expression"] == "18 ÷ 3"
     assert client.get(f"/api/config?user_id=02&session_id={a['session_id']}").json()["expression"] is None, "他人のセッションの式は返さない"
-    print("OK 式: 01→24÷6 / 02→24÷3（フェーズ1）。/api/config は本人のセッションの式だけ返す")
+    print("OK 式: 01→18÷3 / 02→30÷5（フェーズ1）。/api/config は本人のセッションの式だけ返す")
 
     # ===== フェーズ1：ログイン＝探して無ければ作る（1児童1フェーズ1セッション） =====
     a2 = post("/api/login", user_id="01").json()
@@ -225,7 +232,7 @@ with client:
     assert len({a["session_id"], b["session_id"], c["session_id"]}) == 3
     sidA, sidB, sidC = a["session_id"], b["session_id"], c["session_id"]
     try:
-        raw("INSERT INTO sessions (user_id, phase, expression, parity_group, session_start) VALUES ('01', 1, '24 ÷ 6', 'odd', '2026-09-18 10:00:00')")
+        raw("INSERT INTO sessions (user_id, phase, expression, parity_group, session_start) VALUES ('01', 1, '18 ÷ 3', 'odd', '2026-09-18 10:00:00')")
         raise AssertionError("UNIQUE が効いていない")
     except sqlite3.IntegrityError:
         pass
@@ -244,10 +251,10 @@ with client:
     print("OK 所有権: 他人の session_id への judge/resume は403")
 
     # フェーズ1の提出：判定は動くが表示は「おくったよ」。response_type / ai_message は記録しない
-    r1 = judge(sidA, "01", "T: おりがみ24まいを6人で")
+    r1 = judge(sidA, "01", "T: おりがみ18まいを3人で")
     assert r1["message"] == "おくったよ" and r1["response_type"] is None and r1["dialog"] is None
     assert r1["valid"] is None and r1["structure"] is None and r1["history"] == [] and r1["accepted"] is False
-    judge(sidA, "01", "T: クッキー24こを6人で")
+    judge(sidA, "01", "T: クッキー18こを3人で")
     judge(sidA, "01", "X: 場面矛盾")
     rt = judge(sidA, "01", "わからない")
     assert rt["message"] == "おくったよ"
@@ -261,7 +268,7 @@ with client:
     assert [l["stuck_count"] for l in logs] == [0] * 4 and [l["miss_count"] for l in logs] == [0] * 4
     assert all(l["strength"] is None and l["strength_trigger"] is None and l["help_count"] is None and l["target_structure"] is None
                for l in logs), "フェーズ1では支援に関わる列は空"
-    assert all(l["expression"] == "24 ÷ 6" for l in logs)
+    assert all(l["expression"] == "18 ÷ 3" for l in logs)
     assert all(l["latency_ms"] is not None for l in logs)
     print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空")
 
@@ -270,23 +277,23 @@ with client:
     assert client.get("/api/config").json()["phase"] == 2
     assert raw("SELECT session_end FROM sessions WHERE session_id=?", sidA)[0][0] is not None
     a3 = post("/api/session/new", user_id="01").json()
-    assert a3["session_id"] != sidA and a3["expression"] == "24 ÷ 8"
+    assert a3["session_id"] != sidA and a3["expression"] == "24 ÷ 4"
     assert post("/api/session/new", user_id="01").json()["session_id"] == a3["session_id"]
-    assert post("/api/session/new", user_id="02").json()["expression"] == "24 ÷ 8"
+    assert post("/api/session/new", user_id="02").json()["expression"] == "24 ÷ 4"
     sid2A = a3["session_id"]
     assert a3["show_support"] is True and a3["declared"] is None and a3["dialog"] is None
     assert a3["history"] == [] and a3["problems"] == [] and a3["conversation"] == []
     assert "choices" not in a3, "3択は廃止"
     post("/api/session/new", user_id="03")
-    print("OK フェーズ2: 新セッション（式 24÷8）で開始し、フェーズ1の産出・到達構造・会話を引き継がない")
+    print("OK フェーズ2: 新セッション（式 24÷4）で開始し、フェーズ1の産出・到達構造・会話を引き継がない")
 
     # ===== 3章の文言（praise / form / done / talk） =====
-    r = judge(sid2A, "01", "T: おりがみ24まいを8人で")
+    r = judge(sid2A, "01", "T: おりがみ24まいを4人で")
     assert r["response_type"] == "praise" and r["is_new"] is True and r["prompt_strength"] == 0
     assert r["message"] == "新しい 問題が できたね！\nほかにも、**求めるものが ちがう** 問題は 作れるかな？"
     assert r["accepted"] is True and r["history"] == ["tobun"]
     llm_before = CALLS["llm"]
-    r = judge(sid2A, "01", "T: ジュース24Lを8人で")
+    r = judge(sid2A, "01", "T: ジュース24Lを4人で")
     assert r["response_type"] == "praise" and r["is_new"] is False and r["prompt_strength"] == 0
     assert r["message"] == "いいね、また 一つ できたね。\n今度は **求めるものが ちがう** 問題も 作れそうかな？"
     assert CALLS["llm"] == llm_before, "praise は定型（LLM を呼ばない）"
@@ -297,17 +304,17 @@ with client:
     r = judge(sid2A, "01", "N: 問いなし")
     assert r["message"] == "求める ことを きく 文が ないみたいだよ。さいごに「〜は いくつですか」を 書いて みよう。"
     r = judge(sid2A, "01", "W: 数ちがい")
-    assert r["message"] == "24と 8を つかう 問題に しよう。いまの お話だと しきが ちがって しまうよ。"
+    assert r["message"] == "24と 4を つかう 問題に しよう。いまの お話だと しきが ちがって しまうよ。"
     r = judge(sid2A, "01", "P: 文章題でない")
     assert r["message"] == "まだ お話に なって いないみたいだよ。「〜が あります」から はじめて みよう。"
     r = judge(sid2A, "01", "むずかしい")
     assert r["response_type"] == "talk" and r["message"] == "[talk] llm" and r["stuck_count"] == 1
-    r = judge(sid2A, "01", "H: あめ24こを8こずつ")
+    r = judge(sid2A, "01", "H: あめ24こを4こずつ")
     assert r["response_type"] == "praise" and r["is_new"] is True and sorted(r["history"]) == ["hougan", "tobun"]
-    r = judge(sid2A, "01", "B: 24本は8本の何倍")
+    r = judge(sid2A, "01", "B: 24本は4本の何倍")
     assert r["response_type"] == "done" and r["all_reached"] is True
     assert r["message"] == "3つ とも できたね！\n1つ分の 大きさ、いくつ分、何倍——ぜんぶ ちがう ものを 求める 問題が そろったよ。"
-    r = judge(sid2A, "01", "B: 24人は8人の何倍")
+    r = judge(sid2A, "01", "B: 24人は4人の何倍")
     assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["declared"] is None
     p2 = logs_of(sid2A)
     assert [l["response_type"] for l in p2] == ["praise", "praise", "form", "form", "form", "form", "talk", "praise", "done", "done"]
@@ -356,11 +363,11 @@ with client:
     assert client.get("/api/judge/status?user_id=abc").status_code == 400
 
     # ===== is_new はフェーズスコープ =====
-    database.save_log(session_id=99999, user_id="02", phase=2, expression="24 ÷ 8", input_type="sakumon",
+    database.save_log(session_id=99999, user_id="02", phase=2, expression="24 ÷ 4", input_type="sakumon",
                       message="別セッションの倍", ai_message=None, valid=True, structure="bai", unknown="ratio",
                       is_new=True, produced_structures=["tobun", "bai"], stuck_count=0, miss_count=0)
     assert database.get_produced("02", 2) == ["tobun", "bai"]
-    r = judge(sidB2, "02", "B: 24本は8本の何倍")
+    r = judge(sidB2, "02", "B: 24本は4本の何倍")
     assert r["is_new"] is False, "別セッションで既出の構造は is_new=0"
     assert database.get_produced("02", 1) == []
     raw("DELETE FROM chat_logs WHERE session_id=99999")
@@ -377,30 +384,30 @@ with client:
     print("OK 状態機械(1): 不成立3連続で stuck_count は 0 のまま")
 
     # (2) 等分除→等分除→等分除 → stuck 0→1→2、3問目で弱
-    r = judge(sidS, "11", "T: おりがみ24まいを8人で")
+    r = judge(sidS, "11", "T: おりがみ24まいを4人で")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 0 and r["is_new"] is True
-    r = judge(sidS, "11", "T: あめ24こを8人で")
+    r = judge(sidS, "11", "T: あめ24こを4人で")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["stuck_count"] == 1
     assert r["strength"] == 0 and r["strength_trigger"] == "none", "同構造1回目では強度は 0 のまま"
-    r = judge(sidS, "11", "T: みかんが24こあります。【8人で 分けます】。1人分は何こになりますか。")
+    r = judge(sidS, "11", "T: みかんが24こあります。【4人で 分けます】。1人分は何こになりますか。")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 1 and r["stuck_count"] == 2, r
     assert r["strength"] == 1 and r["strength_trigger"] == "stuck" and r["help_count"] == 0
     assert database.get_session(sidS)["strength"] == 1, "強度は sessions に状態として保持"
-    assert r["message"] == "3ばんの お話で、8は 何を あらわして いるかな？", r["message"]
+    assert r["message"] == "3ばんの お話で、4は 何を あらわして いるかな？", r["message"]
     for label in d.STRUCTURE_LABEL.values():
         assert label not in r["message"], ("弱で構造のラベルを出さない", label)
     assert r["dialog"] == "role" and r["declared"] is None, "弱：ターン1（役割）の答え待ち。まだ予告は立たない"
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
     assert resumed["dialog"] == "role", "再入場でもターン1を復元"
-    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（ターン1『3ばんの お話で、8は 何を あらわして いるかな？』）")
+    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（ターン1『3ばんの お話で、4は 何を あらわして いるかな？』）")
 
-    # (3a) ターン1：判定（tobun＝8は人数）と食い違う答え「1人分の数」→ 1回だけ訂正（児童の文を引用・役割名は言わない）
+    # (3a) ターン1：判定（tobun＝4は人数）と食い違う答え「1人分の数」→ 1回だけ訂正（児童の文を引用・役割名は言わない）
     rb, pb = CALLS.get("role", 0), CALLS.get("phrase", 0)
     r = post("/api/judge", session_id=sidS, user_id="11", message="1人分の数", declaring=True).json()
     assert r["input_type"] == "role" and r["role_answer"] == "per_one" and r["role_corrected"] is True, r
     assert CALLS["role"] == rb + 1 and CALLS["phrase"] == pb + 1
-    assert r["message"] == ("本当に そうかな？ お話では『8人で 分けます』と 書いて あるよ。\n"
-                            "8は 何の 数に なって いるかな？"), r["message"]
+    assert r["message"] == ("本当に そうかな？ お話では『4人で 分けます』と 書いて あるよ。\n"
+                            "4は 何の 数に なって いるかな？"), r["message"]
     for w in ("人数", "1つ分", "いくつ分", "何倍"):
         assert w not in r["message"], ("訂正で役割名・構造ラベルを言わない", w)
     assert r["dialog"] == "role" and r["declared"] is None and r["prompt_strength"] == 1
@@ -412,12 +419,12 @@ with client:
     # 2回目の答え：また食い違っても問い返さず（ループさせない）ターン2へ
     r = post("/api/judge", session_id=sidS, user_id="11", message="やっぱり1人分の数", declaring=True).json()
     assert r["input_type"] == "role" and r["role_answer"] == "per_one" and r["role_corrected"] is False, r
-    assert r["message"] == "じゃあ 次は、8を 何の 数に して みたい？" and r["dialog"] == "declaration"
+    assert r["message"] == "じゃあ 次は、4を 何の 数に して みたい？" and r["dialog"] == "declaration"
     assert logs_of(sidS)[-1]["role_corrected"] is False
     st = database.get_session(sidS)
     assert st["stuck_count"] == 2 and st["miss_count"] == 0 and st["strength"] == 1, "役割の答えではカウンタ・強度を動かさない"
     assert post("/api/session/resume", session_id=sidS, user_id="11").json()["dialog"] == "declaration", "ターン2を復元"
-    print("OK 役割の宣言(ターン1): 判定と食い違う答えは1回だけ訂正（児童の文『8人で 分けます』を引用）。2回目は正誤にかかわらずターン2へ")
+    print("OK 役割の宣言(ターン1): 判定と食い違う答えは1回だけ訂正（児童の文『4人で 分けます』を引用）。2回目は正誤にかかわらずターン2へ")
 
     # (3) ターン2で「いくつ分をきく」と入力 → declared=hougan, declared_by=child、目標が固定表示される
     r = post("/api/judge", session_id=sidS, user_id="11", message="いくつ分をきく", declaring=True).json()
@@ -449,11 +456,11 @@ with client:
     print("OK 状態機械(3): ターン2で「いくつ分をきく」→ declared=hougan / child。作問なら通常処理、unknown は立てない")
 
     # (4) その次に等分除 → declaration_met=0, miss=1 → 中（目標の指定。3択は無い）
-    r = judge(sidS, "11", "T: えんぴつが24本あります。8人で分けます。1人分は何本ですか。@えんぴつ/本")
+    r = judge(sidS, "11", "T: えんぴつが24本あります。4人で分けます。1人分は何本ですか。@えんぴつ/本")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 2, r
     assert r["declaration_met"] is False and r["miss_count"] == 1 and r["stuck_count"] == 3
     assert r["strength"] == 2 and r["strength_trigger"] == "miss", "stuck と miss が同時に増えても +1 は1回。trigger は miss"
-    assert r["message"] == "えんぴつの お話は そのままで いいよ。8を「1人分の 数」に して みよう。", r["message"]
+    assert r["message"] == "えんぴつの お話は そのままで いいよ。4を「1人分の 数」に して みよう。", r["message"]
     row = logs_of(sidS)[-1]
     assert row["item"] == "えんぴつ" and row["unit"] == "本", "判定が読み取った物・助数詞をログに残す"
     assert row["strength"] == 2 and row["strength_trigger"] == "miss" and row["target_structure"] == "hougan" and row["help_count"] == 0
@@ -473,19 +480,19 @@ with client:
     c = LAST_TALK["context"]
     assert LAST_TALK["history"] == ["tobun"], "到達構造は構造名で渡す"
     assert c["strength"] == 2 and c["target"] == "hougan", c
-    assert c["last_problem"]["text"] == "T: えんぴつが24本あります。8人で分けます。1人分は何本ですか。@えんぴつ/本"
+    assert c["last_problem"]["text"] == "T: えんぴつが24本あります。4人で分けます。1人分は何本ですか。@えんぴつ/本"
     assert c["last_problem"]["structure"] == "tobun" and c["last_problem"]["divisor_role"] == "分ける相手の数（人数など）"
     assert c["last_problem"]["item"] == "えんぴつ" and c["last_problem"]["unit"] == "本"
     assert len(c["problems"]) == 4 and all(p["divisor_role"] == "分ける相手の数（人数など）" for p in c["problems"])
     assert logs_of(sidS)[-1]["prompt_strength"] == 2 and logs_of(sidS)[-1]["input_type"] == "taiwa"
     assert database.get_session(sidS)["stuck_count"] == 3 and database.get_session(sidS)["miss_count"] == 1, "taiwa でカウンタ不動"
     # システムプロンプト：強度2では役割の指示・3語・題材固定が許可、場面文は不可。強度0・1では3語を出さない
-    sys2 = d._build_system("24 ÷ 8", ["tobun"], c)
+    sys2 = d._build_system("24 ÷ 4", ["tobun"], c)
     assert "支援の強さ: 2" in sys2 and "『1人分の 数』に して みよう" in sys2 and "場面文（お話の文そのもの）は渡さない" in sys2
-    assert "えんぴつの お話は そのままで いいよ" in sys2 and "8 が表しているもの: 分ける相手の数" in sys2 and "答え（数値 3）" in sys2
-    sys0 = d._build_system("24 ÷ 8", [], {"strength": 0})
+    assert "えんぴつの お話は そのままで いいよ" in sys2 and "4 が表しているもの: 分ける相手の数" in sys2 and "答え（数値 6）" in sys2
+    sys0 = d._build_system("24 ÷ 4", [], {"strength": 0})
     assert "先生から答え（役割）を言わない" in sys0 and "「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない" in sys0
-    sys3 = d._build_system("24 ÷ 8", ["tobun"], {**c, "strength": 3})
+    sys3 = d._build_system("24 ÷ 4", ["tobun"], {**c, "strength": 3})
     assert "場面文を渡してよい" in sys3 and "えんぴつが 24本 あります" in sys3
     for text in (sys0, sys2, sys3):
         assert "数量関係（だれが何をどう分けるか" not in text, "旧の全面禁止は撤廃"
@@ -494,11 +501,11 @@ with client:
     print("OK taiwa の状況: 強度・目標・到達構造名・成立作問（本文＋役割＋物）を渡し、話してよいことは強度で切り替わる")
 
     # (5) 中の直後にまた予告と違う構造 → miss=2 → 強（場面固定の文言・ref_no は最新の表示番号）
-    r = judge(sidS, "11", "T: ジュース24Lを8人で@ジュース/L")
+    r = judge(sidS, "11", "T: ジュース24Lを4人で@ジュース/L")
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 3, r
     assert r["declaration_met"] is False and r["miss_count"] == 2 and r["stuck_count"] == 4
     assert r["strength"] == 3 and r["strength_trigger"] == "miss"
-    assert r["message"] == "「ジュースが 24L あります。1人に 8Lずつ 分けます。」 この あとに、求める 文を 書いて みよう。", r["message"]
+    assert r["message"] == "「ジュースが 24L あります。1人に 4Lずつ 分けます。」 この あとに、求める 文を 書いて みよう。", r["message"]
     assert r["dialog"] is None and r["declared"] == "hougan" and r["declared_by"] == "system"
     row = logs_of(sidS)[-1]
     assert row["declared_by"] == "system" and row["declaration_met"] is False
@@ -514,7 +521,7 @@ with client:
     print("OK 対話を無視した作問: ブロックしない・予告は立ったまま")
 
     # (6) 包含除に到達 → stuck / miss が両方 0 に戻り、強度0の称賛
-    r = judge(sidS, "11", "H: あめ24こを8こずつ")
+    r = judge(sidS, "11", "H: あめ24こを4こずつ")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["is_new"] is True, r
     assert r["message"] == d.PRAISE_NEW
     assert r["stuck_count"] == 0 and r["miss_count"] == 0 and r["declaration_met"] is True and r["declared"] is None
@@ -528,7 +535,7 @@ with client:
     print("OK 状態機械(6): 新構造到達で stuck / miss が両方 0、強度0の称賛、予告は消費")
 
     # (7) 3構造そろう → done。以降支援なし
-    r = judge(sidS, "11", "B: 24本は8本の何倍")
+    r = judge(sidS, "11", "B: 24本は4本の何倍")
     assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["all_reached"] is True
     assert r["message"] == d.DONE_MESSAGE
     for i in range(4):
@@ -540,29 +547,29 @@ with client:
     # ---- 役割の宣言：一致／わからない／判別不能 は訂正せずターン2へ。訂正の引用は LLM → 除数を含む文 → 引用なし ----
     sidQ = post("/api/login", user_id="14").json()["session_id"]
     judge(sidQ, "14", "T: a"); judge(sidQ, "14", "T: b")
-    r = judge(sidQ, "14", "H: あめが24こあります。8こずつふくろに入れます。ふくろは何まいいりますか。")
+    r = judge(sidQ, "14", "H: あめが24こあります。4こずつふくろに入れます。ふくろは何まいいりますか。")
     assert r["prompt_strength"] == 0 and r["is_new"] is True and r["dialog"] is None
     judge(sidQ, "14", "H: b2")
-    r = judge(sidQ, "14", "H: クッキーが24まいあります。1人に8まいずつ配ります。何人に配れますか。")
-    assert r["prompt_strength"] == 1 and r["dialog"] == "role" and r["message"] == "5ばんの お話で、8は 何を あらわして いるかな？"
+    r = judge(sidQ, "14", "H: クッキーが24まいあります。1人に4まいずつ配ります。何人に配れますか。")
+    assert r["prompt_strength"] == 1 and r["dialog"] == "role" and r["message"] == "5ばんの お話で、4は 何を あらわして いるかな？"
     # 一致（hougan＝1人分の数）→ 訂正なしでターン2
     pb = CALLS.get("phrase", 0)
     r = post("/api/judge", session_id=sidQ, user_id="14", message="1人分の数だよ", declaring=True).json()
     assert r["role_answer"] == "per_one" and r["role_corrected"] is False and r["dialog"] == "declaration"
-    assert r["message"] == "じゃあ 次は、8を 何の 数に して みたい？" and CALLS.get("phrase", 0) == pb, "一致なら句の抽出は呼ばない"
+    assert r["message"] == "じゃあ 次は、4を 何の 数に して みたい？" and CALLS.get("phrase", 0) == pb, "一致なら句の抽出は呼ばない"
     # ターン2で unknown → declared は立てず、再質問もしない。作問入力に戻る
     r = post("/api/judge", session_id=sidQ, user_id="14", message="りんごの問題", declaring=True).json()
     assert r["input_type"] == "declaration" and r["classified"] == "unknown" and r["declared"] is None and r["dialog"] is None
     assert logs_of(sidQ)[-1]["declared_structure"] is None
-    r = judge(sidQ, "14", "H: ドーナツが24こあります。8こずつ箱に入れます。箱は何箱いりますか。")
+    r = judge(sidQ, "14", "H: ドーナツが24こあります。4こずつ箱に入れます。箱は何箱いりますか。")
     assert r["prompt_strength"] == 2 and r["strength"] == 2 and r["strength_trigger"] == "stuck"
     assert r["declared"] == "bai" and r["declared_by"] == "system", "未到達は bai"
-    assert r["message"] == ("6ばんの お話は そのままで いいよ。8を、もう 1人が もっている ものの 数に して みよう。"
+    assert r["message"] == ("6ばんの お話は そのままで いいよ。4を、もう 1人が もっている ものの 数に して みよう。"
                             "24こと くらべると、どんな ことが 求められるかな？"), ("item が取れないときの中", r["message"])
     # 「わからない」→ 訂正せずターン2へ
     sidR = post("/api/login", user_id="16").json()["session_id"]
     judge(sidR, "16", "T: a"); judge(sidR, "16", "T: b")
-    r = judge(sidR, "16", "T: りんごが24こあります。8人で同じ数ずつ分けます。1人分は何こですか。")
+    r = judge(sidR, "16", "T: りんごが24こあります。4人で同じ数ずつ分けます。1人分は何こですか。")
     assert r["dialog"] == "role"
     r = post("/api/judge", session_id=sidR, user_id="16", message="わからない", declaring=True).json()
     assert r["role_answer"] == "dont_know" and r["role_corrected"] is False and r["dialog"] == "declaration"
@@ -573,7 +580,7 @@ with client:
     # 判別不能（unknown）→ 訂正せずターン2。LLM の句抽出に失敗 → 除数を含む文を引用。それも無理なら引用なしの定型文
     sidU = post("/api/login", user_id="18").json()["session_id"]
     judge(sidU, "18", "T: a"); judge(sidU, "18", "T: b")
-    judge(sidU, "18", "T: 24このあめを8人に同じ数ずつ配ります。1人何こですか。")
+    judge(sidU, "18", "T: 24このあめを4人に同じ数ずつ配ります。1人何こですか。")
     r = post("/api/judge", session_id=sidU, user_id="18", message="えーと", declaring=True).json()
     assert r["role_answer"] == "unknown" and r["role_corrected"] is False and r["dialog"] == "declaration"
     assert d._sentence_with_number("みかんが24こあります。8人で同じ数ずつ分けます。1人分は何こですか。", 8) == "8人で同じ数ずつ分けます"
@@ -700,14 +707,18 @@ with client:
     print("OK 教師画面: 提出数・成立数・到達・予告・反復/不一致・直近の応答・接続状態")
 
     # ===== 管理画面からの式の上書き =====
-    r = client.post(f"/admin/api/sessions/{sid2A}/expression", json={"expression": "24÷4"}, headers=AUTH)
-    assert r.status_code == 200 and r.json()["expression"] == "24 ÷ 4"
-    assert client.get(f"/api/config?user_id=01&session_id={sid2A}").json()["expression"] == "24 ÷ 4"
-    assert post("/api/session/resume", session_id=sid2A, user_id="01").json()["expression"] == "24 ÷ 4"
+    assert database.get_session(sid2A)["expression"] == "24 ÷ 4", "上書き前はフェーズ2の既定"
+    r = client.post(f"/admin/api/sessions/{sid2A}/expression", json={"expression": "30÷5"}, headers=AUTH)
+    assert r.status_code == 200 and r.json()["expression"] == "30 ÷ 5"
+    assert client.get(f"/api/config?user_id=01&session_id={sid2A}").json()["expression"] == "30 ÷ 5"
+    assert post("/api/session/resume", session_id=sid2A, user_id="01").json()["expression"] == "30 ÷ 5"
     assert client.post(f"/admin/api/sessions/{sid2A}/expression", json={"expression": "25÷4"}, headers=AUTH).status_code == 400
     assert client.post("/admin/api/sessions/99999/expression", json={"expression": "24÷4"}, headers=AUTH).status_code == 404
     r = judge(sid2A, "01", "W: 上書き後")
-    assert r["message"].startswith("24と 4を つかう") and logs_of(sid2A)[-1]["expression"] == "24 ÷ 4"
+    assert r["message"].startswith("30と 5を つかう") and logs_of(sid2A)[-1]["expression"] == "30 ÷ 5"
+    assert LAST_JUDGE["expression"] == "30 ÷ 5", "ai_judge に渡る式も上書き後"
+    r = post("/api/judge", session_id=sid2A, user_id="01", message="ヒント").json()
+    assert LAST_TALK["expression"] == "30 ÷ 5" and r["message"] == "[talk] llm", "ai_dialogue に渡る式も上書き後"
     print("OK 式の上書き: 管理画面から個別に変更でき、児童の画面・判定・ログに反映")
 
     # ===== ログアウト → 終了時刻、再入場で消える =====
@@ -723,7 +734,7 @@ with client:
         admin_post("/admin/api/phase", phase=ph)
         pl = post("/api/login", user_id="13").json()
         sidP = pl["session_id"]
-        assert pl["expression"] == {1: "24 ÷ 6", 3: "24 ÷ 3"}[ph] and pl["dialog"] is None and pl["declared"] is None
+        assert pl["expression"] == {1: "18 ÷ 3", 3: "30 ÷ 5"}[ph] and pl["dialog"] is None and pl["declared"] is None
         for msg in ("T: a", "T: b", "T: c", "T: d", "T: e"):
             r = judge(sidP, "13", msg)
             assert r["response_type"] is None and r["prompt_strength"] is None and r["message"] == "おくったよ"
@@ -742,18 +753,18 @@ with client:
     # ===== フェーズ3：別式・新セッション =====
     assert client.get("/api/config").json()["phase"] == 3
     a4 = post("/api/session/new", user_id="01").json()
-    assert a4["session_id"] != sidA and a4["phase"] == 3 and a4["expression"] == "24 ÷ 3"
-    assert post("/api/session/new", user_id="02").json()["expression"] == "24 ÷ 6"
-    r = judge(a4["session_id"], "01", "T: 24このあめを3人で")
+    assert a4["session_id"] != sidA and a4["phase"] == 3 and a4["expression"] == "30 ÷ 5"
+    assert post("/api/session/new", user_id="02").json()["expression"] == "18 ÷ 3"
+    r = judge(a4["session_id"], "01", "T: 30このあめを5人で")
     assert r["message"] == "おくったよ" and r["history"] == []
-    assert logs_of(a4["session_id"])[0]["phase"] == 3 and logs_of(a4["session_id"])[0]["expression"] == "24 ÷ 3"
+    assert logs_of(a4["session_id"])[0]["phase"] == 3 and logs_of(a4["session_id"])[0]["expression"] == "30 ÷ 5"
     admin_post("/admin/api/phase", phase=2)
     assert post("/api/session/new", user_id="01").json()["session_id"] == sid2A
     admin_post("/admin/api/phase", phase=3)
     r = judge(sid2A, "01", "T: おそく届いた")
     assert r["phase"] == 2 and r["show_support"] is True
     assert raw("SELECT COUNT(*) FROM chat_logs cl JOIN sessions s ON s.session_id=cl.session_id WHERE cl.phase != s.phase")[0][0] == 0
-    print("OK フェーズ3: 01→24÷3 / 02→24÷6。chat_logs.phase は常に sessions.phase と一致")
+    print("OK フェーズ3: 01→30÷5 / 02→18÷3。chat_logs.phase は常に sessions.phase と一致")
 
     # ===== CSV =====
     r = client.get("/admin/api/export/csv", headers=AUTH)

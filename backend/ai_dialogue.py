@@ -60,23 +60,49 @@ _FORM_ALIAS = {
     "wrong_operation": "wrong_number",   # しきが ちがう
 }
 
-# 3-3 なし（強度0）。「求めるものが ちがう」ではなく、わる数の役割の軸で言う（9/17 修正⑤）
-PRAISE_NEW = "新しい 問題が できたね！\nほかにも、**{divisor}が ちがう 数を 表す** 問題は 作れるかな？"
-PRAISE_REPEAT = "いいね、また 一つ できたね。\n今度は **{divisor}が ちがう 数を 表す** 問題も 作れそうかな？"
+# 3-3 強度0の称賛（v3.1）。児童自身の問題文の除数の句（chat_logs.divisor_phrase）を引用して、
+# 「ちがう」が何に対してかを具体化する。句が取れなければ引用の文を落とす（*_NOPHRASE）。行き先は示さない
+PRAISE_NEW = ("新しい 問題が できたね！ この お話では、{divisor}は『{phrase}』の {divisor}だったね。\n"
+              "今度は、**{divisor}が ちがう ものの 数に なる** お話は 作れるかな？")
+PRAISE_NEW_NOPHRASE = "新しい 問題が できたね！\n今度は、**{divisor}が ちがう ものの 数に なる** お話は 作れるかな？"
+PRAISE_REPEAT = ("いいね、また 一つ できたね。この お話でも、{divisor}は『{phrase}』の {divisor}だね。\n"
+                 "今度は、**{divisor}が ちがう ものの 数に なる** お話も 作れそうかな？")
+PRAISE_REPEAT_NOPHRASE = "いいね、また 一つ できたね。\n今度は、**{divisor}が ちがう ものの 数に なる** お話も 作れそうかな？"
 
-# 弱（強度1）＝役割の宣言（2ターン）。構造のラベル（1つ分の 大きさ／いくつ分／何倍）は弱では出さない。
-#   ターン1：直前の成立作問の除数が何をあらわしているかを児童に言わせる（answer → ai_classify.classify_role）
-#   訂正   ：答えが判定の役割と食い違うとき1回だけ、児童自身の問題文の除数の句を引用して問い返す（正解の役割名は言わない）
-#   ターン2：次の作問で除数を何の数にするか（予告。→ classify_declaration）
-ROLE_ASK = "{ref_no}ばんの お話で、{divisor}は 何を あらわして いるかな？"
-ROLE_CORRECTION = ("本当に そうかな？ お話では『{phrase}』と 書いて あるよ。\n"
-                   "{divisor}は 何の 数に なって いるかな？")
-ROLE_CORRECTION_FALLBACK = ("本当に そうかな？ お話を もう一度 読んで みよう。\n"
-                            "{divisor}は 何の 数に なって いるかな？")
-ROLE_NEXT = "じゃあ 次は、{divisor}を 何の 数に して みたい？"
+# 弱（強度1）＝現在地の対比＋宣言（1ターン。v3.1）。
+# 「これまでの問題は同じだった」を児童自身の句で示し（現在地）、次に除数をどう使うかを児童に決めさせる（宣言）。
+# 行き先（次に除数を何にするか）は言わない。構造のラベル（1つ分の 大きさ／いくつ分／何倍）も出さない。
+# 変形は到達構造の集合で決まる（weak_variant）：
+#   same    … 分ける系の中でのくり返し（同じ構造の直近2問の除数の句を並べる）。倍だけ2問以上のときも同じ形
+#   wakeru  … 分ける系（等分除・包含除）を両方到達（残りは倍）：「どれも 分ける お話」
+#   kuraberu… 倍だけを到達し2問以上：「どれも くらべる お話」
+#   one     … 成立作問が1問だけ（help / talk で上がったとき）
+WEAK_ASK = "じゃあ 次は、{divisor}を どんな ふうに 使った お話に する？"
+WEAK_SAME = "{no1}ばんの『{phrase1}』も {no2}ばんの『{phrase2}』も、{divisor}は 同じ ことを 表して いるね。\n" + WEAK_ASK
+WEAK_SAME_NOPHRASE = "{no1}ばんの お話も {no2}ばんの お話も、{divisor}は 同じ ことを 表して いるね。\n" + WEAK_ASK
+WEAK_ONE = "{divisor}が『{phrase}』の {divisor}じゃ ない お話に するなら、{divisor}を どんな ふうに 使った お話に する？"
+WEAK_ONE_NOPHRASE = "{no}ばんの お話とは {divisor}の 使い方が ちがう お話に するなら、{divisor}を どんな ふうに 使った お話に する？"
+WEAK_WAKERU = ("これまでの お話は、どれも {dividend}{unit}を 分ける お話だね。\n"
+               "じゃあ 次は、{dividend}{unit}を 分けない お話に するなら、{divisor}を どんな ふうに 使った お話に する？")
+WEAK_KURABERU = ("これまでの お話は、どれも {dividend}{unit}と {divisor}{unit}を くらべる お話だね。\n"
+                 "じゃあ 次は、くらべない お話に するなら、{divisor}を どんな ふうに 使った お話に する？")
 
-# 判定結果（structure / unknown）から見た、除数の実際の役割（classify_role の分類と同じ語彙）。
-# 倍で基準量を求める問題（unknown="base"）では除数は倍率なので、この3分類では役割を確定できない → None（訂正しない）
+# 弱の答え（予告）への返事。1回で閉じる（答えの中身を追う対話には入らない。宙に上げる）
+DECLARED_MESSAGE = "じゃあ、その お話を 作って みよう。"
+DECLARATION_UNKNOWN_MESSAGE = "わからなくても だいじょうぶ。じゃあ、{divisor}を ちがう 使い方に した お話を 作って みよう。"
+
+# 画面上部「つぎは「…」」（システム指定のとき。児童が宣言したときは児童の言葉をそのまま出す）。構造のラベルは出さない
+TARGET_LABEL = {
+    "tobun": "{divisor}を 分ける 人の 数に した お話",
+    "hougan": "{divisor}を 1人が もらう 数に した お話",
+    "bai": "{dividend}{unit}と {divisor}{unit}を くらべる お話",
+}
+
+# 成立作問と同一本文の再送（直前でなくても）。判定も一覧への追加もしない
+DUPLICATE_MESSAGE = "その お話は もう {ref_no}ばんに あるよ。ちがう お話を 作って みよう。"
+
+# 判定結果（structure / unknown）から見た、除数の実際の役割（talk の状況説明に使う）。
+# 倍で基準量を求める問題（unknown="base"）では除数は倍率なので、この3分類では役割を確定できない → None
 def expected_divisor_role(structure: str | None, unknown: str | None) -> str | None:
     if structure == "tobun":
         return "people"
@@ -87,30 +113,28 @@ def expected_divisor_role(structure: str | None, unknown: str | None) -> str | N
     return None
 
 
-# 中（強度2）— 役割指定＋題材固定（要件定義 4-5 の「強度2」を一字一句）。
+# 中（強度2）— 行き先の指定＋題材固定（v3.1。遷移の行き先＝目標構造で文言が決まる）。
 # {item} は直前の成立作問の物の名前、{unit} はその助数詞（ai_judge の item / unit）。
-# {item} が取れないときは文頭の「{item}の お話は／{item}は」を「{ref_no}ばんの お話は」に置き換える（MID_MESSAGES_NOITEM）。
+# {item} が取れないときは「{item}の お話は」を「{ref_no}ばんの お話は」に置き換える（MID_MESSAGES_NOITEM）。
 MID_MESSAGES = {
-    "tobun": "{item}の お話は そのままで いいよ。{divisor}を「何人で 分けるか」の 数に して みよう。",
-    "hougan": "{item}の お話は そのままで いいよ。{divisor}を「1人分の 数」に して みよう。",
-    "bai": "{item}は そのままで いいよ。{divisor}を、もう 1人が もっている {item}の 数に して みよう。"
-           "{dividend}{unit}と くらべると、どんな ことが 求められるかな？",
+    "tobun": "{divisor}を、分ける 人の 数に して みよう。{item}の お話は そのままで いいよ。",
+    "hougan": "{divisor}を、1人が もらう 数に して みよう。{item}の お話は そのままで いいよ。",
+    "bai": "{dividend}{unit}と {divisor}{unit}を くらべて、何倍かを 求める お話に して みよう。{item}の お話は そのままで いいよ。",
 }
 MID_MESSAGES_NOITEM = {
-    "tobun": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を「何人で 分けるか」の 数に して みよう。",
-    "hougan": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を「1人分の 数」に して みよう。",
-    "bai": "{ref_no}ばんの お話は そのままで いいよ。{divisor}を、もう 1人が もっている {item}の 数に して みよう。"
-           "{dividend}{unit}と くらべると、どんな ことが 求められるかな？",
+    "tobun": "{divisor}を、分ける 人の 数に して みよう。{ref_no}ばんの お話は そのままで いいよ。",
+    "hougan": "{divisor}を、1人が もらう 数に して みよう。{ref_no}ばんの お話は そのままで いいよ。",
+    "bai": "{dividend}{unit}と {divisor}{unit}を くらべて、何倍かを 求める お話に して みよう。{ref_no}ばんの お話は そのままで いいよ。",
 }
 
-# 強（強度3）— 場面文提示（要件定義 4-5 の「強度3」を一字一句）。
+# 強（強度3）— 場面文提示（v3.1）。求める文（問い）は児童が書く。
 # 倍の人物名は学級の実在児童との重複を避けるため固定名にしない：{friend_name} は FRIEND_NAMES から
 # セッションごとに周期的に選び、{friend_name_alt} は「お友だち」で統一する。
 STRONG_MESSAGES = {
-    "tobun": "「{item}が {dividend}{unit} あります。{divisor}人で 同じ 数ずつ 分けます。」 この あとに、求める 文を 書いて みよう。",
-    "hougan": "「{item}が {dividend}{unit} あります。1人に {divisor}{unit}ずつ 分けます。」 この あとに、求める 文を 書いて みよう。",
-    "bai": "「{friend_name}さんは {item}を {dividend}{unit}、{friend_name_alt}は {divisor}{unit} もって います。」"
-           " この あとに、「何倍」を つかって 求める 文を 書いて みよう。",
+    "tobun": "「{item}が {dividend}{unit} あります。{divisor}人で 同じ 数ずつ 分けます。」\nつづきの 問いを 書いて みよう。",
+    "hougan": "「{item}が {dividend}{unit} あります。1人に {divisor}{unit}ずつ 分けます。」\nつづきの 問いを 書いて みよう。",
+    "bai": "「{friend_name}さんは {item}を {dividend}{unit}、{friend_name_alt}は {divisor}{unit} もって います。」\n"
+           "つづきの 問いを、「何倍」を 使って 書いて みよう。",
 }
 FRIEND_NAMES = ("たろう", "はなこ")
 FRIEND_NAME_ALT = "お友だち"
@@ -121,9 +145,9 @@ UNIT_FALLBACK = "こ"        # {unit} が取れないとき
 DONE_MESSAGE = "3つ とも できたね！\n1つ分の 大きさ、いくつ分、何倍——ぜんぶ ちがう ものを 求める 問題が そろったよ。"
 
 # talk のフォールバック（LLM 不通・境界違反）。まだ1問も作れていない子には素材想起(a)、
-# 1問以上作れている子には求めているものだけを変える提案(b)。休けい・終了・謝罪は入れない。
+# 1問以上作れている子には除数の使い方だけを変える提案(b)。休けい・終了・謝罪は入れない。
 TALK_FALLBACK = "そっか。じゃあ、身近なところで、{dividend}こ あるものは何かな？"
-TALK_FALLBACK_REWRITE = "そっか。じゃあ、いま作った 問題の {divisor}を、ちがう 数に かえて みようか。"
+TALK_FALLBACK_REWRITE = "そっか。じゃあ、いま作った 問題の {divisor}を、ちがう 使い方に して みようか。"
 
 
 def _fill(text: str, expression: str, **extra) -> str:
@@ -140,25 +164,83 @@ def form_message(issue: str | None, expression: str) -> str:
     return _fill(FORM_MESSAGES.get(key, FORM_MESSAGES["not_problem"]), expression)
 
 
-def weak_message(ref_no: int, expression: str) -> str:
-    """弱・ターン1：除数が何をあらわしているかを聞く。"""
-    return _fill(ROLE_ASK, expression, ref_no=ref_no)
+def _quote(phrase: str | None) -> str | None:
+    """引用に使える句か（30字以内・空でない）。"""
+    q = format_quote(phrase)
+    return q if q and len(q) <= 30 else None
 
 
-def role_correction_message(phrase: str | None, expression: str) -> str:
-    """弱・訂正（1回だけ）：児童の問題文の除数の句を引用して問い返す。句が取れなければ引用なしの定型文。"""
-    if phrase:
-        return _fill(ROLE_CORRECTION, expression, phrase=phrase)
-    return _fill(ROLE_CORRECTION_FALLBACK, expression)
+def praise_message(is_new: bool, expression: str, phrase: str | None) -> str:
+    """強度0の称賛。除数の句が取れていれば引用する。"""
+    q = _quote(phrase)
+    if is_new:
+        return _fill(PRAISE_NEW if q else PRAISE_NEW_NOPHRASE, expression, phrase=q)
+    return _fill(PRAISE_REPEAT if q else PRAISE_REPEAT_NOPHRASE, expression, phrase=q)
 
 
-def role_next_message(expression: str) -> str:
-    """弱・ターン2：次の作問で除数を何の数にするか（予告）。"""
-    return _fill(ROLE_NEXT, expression)
+def weak_variant(problems: list[dict]) -> tuple[str, list[dict]]:
+    """弱の変形と、引用する問題（表示番号は problems の 1 始まりの位置）。
+
+    problems は成立作問の時系列（database.get_valid_problems）。戻り値の 2 つ目は引用する問題に "no" を付けたもの。"""
+    if not problems:
+        return "one", []
+    numbered = [{**p, "no": i} for i, p in enumerate(problems, 1)]
+    latest = numbered[-1]
+    if len(numbered) == 1:
+        return "one", [latest]
+    structures = {p["structure"] for p in numbered}
+    if structures == {"tobun", "hougan"}:
+        return "wakeru", [latest]
+    if structures == {"bai"}:
+        return "kuraberu", [latest]
+    same = [p for p in numbered[:-1] if p["structure"] == latest["structure"]]
+    if same:
+        return "same", [same[-1], latest]
+    return "one", [latest]
+
+
+def weak_message(problems: list[dict], expression: str) -> str:
+    """弱：現在地の対比＋「{divisor}を どんな ふうに 使った お話に する？」（1ターン）。"""
+    variant, quoted = weak_variant(problems)
+    latest = quoted[-1] if quoted else {}
+    unit = latest.get("unit") or UNIT_FALLBACK
+    if variant == "wakeru":
+        return _fill(WEAK_WAKERU, expression, unit=unit)
+    if variant == "kuraberu":
+        return _fill(WEAK_KURABERU, expression, unit=unit)
+    if variant == "same":
+        a, b = quoted
+        qa, qb = _quote(a.get("divisor_phrase")), _quote(b.get("divisor_phrase"))
+        if qa and qb:
+            return _fill(WEAK_SAME, expression, no1=a["no"], no2=b["no"], phrase1=qa, phrase2=qb)
+        return _fill(WEAK_SAME_NOPHRASE, expression, no1=a["no"], no2=b["no"])
+    q = _quote(latest.get("divisor_phrase"))
+    if q:
+        return _fill(WEAK_ONE, expression, phrase=q)
+    return _fill(WEAK_ONE_NOPHRASE, expression, no=latest.get("no", 1))
+
+
+def declaration_message(declared: str | None, expression: str) -> str:
+    """弱の答えへの返事（1回で閉じる）。構造に分類できたら「その お話を 作って みよう」、できなければ定型で作問に戻す。"""
+    return _fill(DECLARED_MESSAGE if declared else DECLARATION_UNKNOWN_MESSAGE, expression)
+
+
+def target_label(declared: str | None, declared_by: str | None, declared_text: str | None,
+                 expression: str, unit: str | None = None) -> str | None:
+    """画面上部の「つぎは「…」」。児童の宣言はその言葉、システム指定は行き先の言葉（構造のラベルは出さない）。"""
+    if not declared:
+        return None
+    if declared_by == "child" and declared_text:
+        return declared_text
+    return _fill(TARGET_LABEL[declared], expression, unit=unit or UNIT_FALLBACK)
+
+
+def duplicate_message(ref_no: int, expression: str) -> str:
+    return _fill(DUPLICATE_MESSAGE, expression, ref_no=ref_no)
 
 
 def mid_message(target: str, expression: str, ref_no: int, item: str | None, unit: str | None) -> str:
-    """中：役割指定＋題材固定。item が取れなければ文頭を「{ref_no}ばんの お話は」にする。"""
+    """中：行き先の指定＋題材固定。item が取れなければ「{ref_no}ばんの お話は」にする。"""
     table = MID_MESSAGES if item else MID_MESSAGES_NOITEM
     return _fill(table[target], expression, ref_no=ref_no, item=item or ITEM_FALLBACK, unit=unit or UNIT_FALLBACK)
 
@@ -350,13 +432,14 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
 - 禁止：答え（数値 {quotient}）を言う。構造の名前（等分除・包含除・倍）を出す。問題を分類して名前で伝える。
   問いの文まで含む完成した問題文を渡す。「だれが・なにを・なんこ・どうする」のような穴うめの型を与える。
 - 子どもの「同じ」「ちがう」という主張が判定と食い違っていたら、共感のために肯定しない。
-  上の「いまの状況」の判定に基づいて、わる数の役割でどこが同じ／ちがうかを短く示す。
+  上の「いまの状況」の判定に基づいて、わる数の役割でどこが同じ／ちがうかを短く示す
+  （強さ1以上なら、子ども自身の問題文の {divisor} の句を2つ並べて「どちらも {divisor}は 同じ ことを 表して いるね」と言い切る）。
 - 内容を確かめずに褒めない。「いいね」「すごい」だけの返事にしない。
 - 1〜2文で短く。やさしく、はげます口調。
 
 # 言葉づかい（必ず守る）
 - 「種類」「たずねる」「聞いていること」「ちがうことを聞く」は使わない。
-- かわりに「求める」「求めているもの」「求めるものが ちがう」「{divisor}が ちがう 数を 表す」を使う。
+- かわりに「求める」「求めているもの」「求めるものが ちがう」「{divisor}が ちがう ものの 数に なる」「{divisor}の 使い方」を使う。
 
 # 返し方
 ★最優先：子どもの発話が、直前の先生の返事（フィードバック）への疑問や返事（「どういうこと？」「なんで？」「意味がわからない」、
@@ -404,33 +487,39 @@ _RAW_PROMPT = """あなたは小学4年生が「わり算のお話づくり（�
   "is_help_request": true or false
 }"""
 
-# 強度ごとの「話してよいこと」。強度0は促しのみ（役割を問わない・言わない）、1は問い返し、2は役割の指定＋題材固定、3は場面文まで
+# 強度ごとの「話してよいこと」（v3.1）。0＝促しのみ（現在地も行き先も示さない）、1＝現在地（作った問題が同じであること）を
+# 示して問い返す（行き先は言わない）、2＝行き先（除数をどう使うか）の指定＋題材固定、3＝場面文まで
 _ALLOWED_BY_STRENGTH = {
     0: """- 促しだけ。直前の返事（フィードバック）の意味を子どもの問題文に即して説明すること、はげますこと、
-  「{divisor}が ちがう 数を 表す 問題も 作れるかな」と次の作問を促すことはよい。
+  「{divisor}が ちがう ものの 数に なる お話も 作れるかな」と次の作問を促すことはよい。
 - ★わる数 {divisor} が何を表しているかを、子どもに問わない（「{divisor}は 何の 数かな？」「{divisor}は 何を あらわして いる？」は書かない）。
   先生から答え（役割）も言わない。子どもが「{divisor}は何の数？」と聞いてきても、役割を言わず、問い返しもせず、
   「お話の 中で {divisor}と 書いた ところを もう一度 読んで みよう」のように子ども自身の問題文に目を向けさせるだけにする。
   次の問題で {divisor} を何にするかも先生から指定しない。
 - 例外：子どもが「2つの問題は同じ／ちがう」と主張したときだけ、判定に基づいて、それぞれの問題で {divisor} が何を表しているかを
   短く示してよい（次に何にするかは言わない）。
+- 子どもの問題を「分ける お話」「くらべる お話」のように分類して言わない。
 - 「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない。
 - 数と数の関係（「{dividend}こを{divisor}こずつ」のような言い方）は書かない。""",
-    1: """- わる数 {divisor} が子どもの問題の中で何を表しているかを、子どもに問い返してよい
+    1: """- ★現在地を示してよい：子どもがこれまでに作った問題どうしが同じであることを、子ども自身の問題文の {divisor} の句を
+  引用して短く示す（例：「1ばんの『{divisor}人で 分けます』も 2ばんの『{divisor}人の チーム』も、{divisor}は 同じ ことを 表して いるね」
+  「これまでの お話は、どれも {dividend}を 分ける お話だね」「どれも {dividend}と {divisor}を くらべる お話だね」）。
+- わる数 {divisor} が子どもの問題の中で何を表しているかを、子どもに問い返してよい
   （例：「お話の 中で {divisor}と 書いた ところを 見て みよう。{divisor}は 何の 数だった？」）。
-- ★先生から答え（役割）を言わない。子どもが「{divisor}は何の数？」「求めているものって何？」と聞いてきても、
+  次の作問を「{divisor}を どんな ふうに 使った お話に する？」と聞いてよい。
+- ★行き先は言わない。先生から役割の答えを言わない。子どもが「{divisor}は何の数？」「求めているものって何？」と聞いてきても、
   「{divisor}は 人数だね」「1人に配る数」のように役割を言わず、子ども自身の問題文の {divisor} のところに目を向けさせて問い返す。
-  次の問題で {divisor} を何にするかも先生から指定しない（「{divisor}人で分ける」「{divisor}こずつ」「1人に配る数にして」は言わない）。
-- 例外：子どもが「2つの問題は同じ／ちがう」と主張したときだけ、判定に基づいて、それぞれの問題で {divisor} が何を表しているかを
-  短く示してよい（次に何にするかは言わない）。
+  次の問題で {divisor} を何にするかも先生から指定しない（「{divisor}人で分ける」「{divisor}こずつ」「1人に配る数にして」
+  「くらべる お話に して」は言わない）。
 - 「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない。
 - 数と数の関係（「{dividend}こを{divisor}こずつ」のような言い方）は書かない。""",
-    2: """- わる数 {divisor} を何の数にしてほしいかを、先生から直接言ってよい（目標があればそれに合わせる。
-  例：「{divisor}を『1人分の 数』に して みよう」「{divisor}を『何人で 分けるか』の 数に して みよう」）。
-- 「1つ分の 大きさ」「いくつ分」「何倍」という言葉を使ってよい。
+    2: """- ★行き先を言ってよい：わる数 {divisor} をどう使ってほしいかを、先生から直接言う（目標に合わせる。
+  例：「{divisor}を、分ける 人の 数に して みよう」「{divisor}を、1人が もらう 数に して みよう」
+  「{dividend}と {divisor}を くらべて、何倍かを 求める お話に して みよう」）。
+- 「1つ分の 大きさ」「いくつ分」「何倍」「1人分」「分ける お話」「くらべる お話」という言葉を使ってよい。
 - 題材は変えなくてよいと伝えてよい（「{item}の お話は そのままで いいよ」）。
 - 場面文（お話の文そのもの）は渡さない。""",
-    3: """- わる数 {divisor} を何の数にしてほしいかを、先生から直接言ってよい（目標があればそれに合わせる）。
+    3: """- ★行き先を言ってよい：わる数 {divisor} をどう使ってほしいかを、先生から直接言う（目標に合わせる）。
 - 「1つ分の 大きさ」「いくつ分」「何倍」という言葉を使ってよい。
 - 題材は変えなくてよいと伝えてよい（「{item}の お話は そのままで いいよ」）。
 - 場面文を渡してよい（「{item}が {dividend}{unit} あります。…」のような、求める文の手前までの文）。
@@ -592,11 +681,17 @@ def asks_role(message: str | None, divisor: int) -> bool:
 
 # ---- コード側ガード ----
 # 全強度で禁止：構造名・分類の言い方
-_BANNED_ALWAYS = ("等分除", "包含除", "倍の話", "倍のお話", "くらべる話", "分ける話", "構造")
+_BANNED_ALWAYS = ("等分除", "包含除", "倍の話", "倍のお話", "構造")
+# 強度0でだけ禁止：子どもの問題を「分ける／くらべる お話」と分類する言い方（1以上は現在地の説明として許可。v3.1）
+_BANNED_STRENGTH0 = ("くらべる話", "分ける話", "くらべる お話", "分ける お話", "くらべるお話", "分けるお話")
 # 強度0・1でだけ禁止：求める量の語・役割の語（2以上は先生から言ってよい）
 _BANNED_UNKNOWN_WORDS = ("1つ分", "１つ分", "一つ分", "1人分", "１人分", "一人分", "いくつ分",
                          "何倍", "なんばい", "もとの大きさ", "もとにする", "1つあたり", "１つあたり",
                          "何人分", "何こ分", "さがしているもの", "さがすもの")
+# 強度0・1でだけ禁止：行き先（除数をどう使うか）の指定（v3.1。9/17 の模擬実践で強度0の talk が
+# 「何人かで分けるお話に書きかえて、何人に分けるかを考えてみよう」と行き先を出していた）
+_ROLE_SPEC = re.compile(r"(何人(で|に|かで)\s*(分|わ)け|人数に\s*(し|かえ)|ずつに\s*(し|かえ)|1人に\s*(配|くば)る\s*数|"
+                        r"くらべる\s*相手|もう\s*1人|分ける\s*人の\s*数|もらう\s*数に|くらべる\s*お話に\s*し|くらべて)")
 # 6章 語彙の統一：児童向け文言に出してはいけない言葉
 _BANNED_VOCAB = ("種類", "たずね", "聞いていること", "ちがうことを聞く")
 # talk では困り・ネガティブな表明を「やめたい」と誤読して活動の終了に誘導してしまう表現を禁止する
@@ -633,8 +728,14 @@ def violates_boundary(message: str, response_type: str, expression: str, strengt
                 return f"banned_unknown:{w}"
         if response_type == "talk" and _has_both_numbers(message, dividend, divisor):
             return "both_numbers"
-    if strength == 0 and response_type == "talk" and asks_role(message, divisor):
-        return "role_question"   # 強度0は促しのみ。役割を問うのは弱（強度1）から
+        if response_type == "talk" and _ROLE_SPEC.search(message):
+            return "role_spec"       # 行き先（除数をどう使うか）を指定するのは中（強度2）から
+    if strength == 0:
+        for w in _BANNED_STRENGTH0:
+            if w in message:
+                return f"banned_classify:{w}"
+        if response_type == "talk" and asks_role(message, divisor):
+            return "role_question"   # 強度0は促しのみ。役割を問うのは弱（強度1）から
     if response_type == "talk":
         for w in _BANNED_TALK:
             if w in message:
@@ -647,7 +748,9 @@ def violates_boundary(message: str, response_type: str, expression: str, strengt
 # 再生成のときに LLM へ伝える違反の理由（violates_boundary の戻り値の先頭語 → 説明）
 _REASON_DESC = {
     "role_question": "強さ0では、わる数が何を表しているかを子どもに問わない",
+    "role_spec": "この強さでは、次の問題でわる数をどう使うか（行き先）を先生から指定しない",
     "banned": "構造の名前・分類の言い方を出さない",
+    "banned_classify": "強さ0では、子どもの問題を「分ける／くらべる お話」と分類して言わない",
     "banned_vocab": "使わない言葉が入っている",
     "quotient": "答えの数値を言わない",
     "banned_unknown": "この強さでは求める量の語・役割の語を使わない",
@@ -737,9 +840,11 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
              prompt_strength: int | None = None, target: str | None = None,
              ref_no: int | None = None, item: str | None = None, unit: str | None = None,
              session_id: int | None = None, user_id: str | None = None,
-             context: dict | None = None) -> dict:
+             context: dict | None = None, phrase: str | None = None,
+             problems: list[dict] | None = None) -> dict:
     """児童向けの文言を組み立てる。
 
+    phrase   … 直前の成立作問の除数の句（praise の引用）。problems … 成立作問の時系列（弱の対比。divisor_phrase 付き）
     戻り値: {"message", "state"}（LLM を呼んだ talk では "is_help_request" と "meta"（retry_count / status）も付く）
     """
     jr = judge_result or {}
@@ -750,12 +855,13 @@ def dialogue(child_message: str, input_kind: str, judge_result: dict | None,
     if response_type == "error":
         return {"message": FORM_MESSAGES["error"], "state": "judge_error"}
     if response_type == "praise":
-        if jr.get("is_new"):
-            return {"message": _fill(PRAISE_NEW, expression), "state": "praise_new"}
-        return {"message": _fill(PRAISE_REPEAT, expression), "state": "praise_repeat"}
+        is_new = bool(jr.get("is_new"))
+        return {"message": praise_message(is_new, expression, phrase),
+                "state": ("praise_new" if is_new else "praise_repeat") + ("" if _quote(phrase) else "_nophrase")}
     if response_type == "prompt":
         if prompt_strength == 1:
-            return {"message": weak_message(ref_no or 1, expression), "state": "prompt_weak"}
+            variant, _q = weak_variant(problems or [])
+            return {"message": weak_message(problems or [], expression), "state": f"prompt_weak_{variant}"}
         if prompt_strength == 2 and target:
             return {"message": mid_message(target, expression, ref_no or 1, item, unit),
                     "state": f"prompt_mid_{target}" + ("" if item else "_noitem")}

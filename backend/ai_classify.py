@@ -123,17 +123,21 @@ def classify(message: str, recent_turns: list[dict] | None = None, expression: s
 
 
 # ===== 予告（自由記述）の分類 =====
-# 仕様 v2 3-4：児童が「つぎは何を求める問題にするか」を書いた文を tobun / hougan / bai / unknown に分ける。
-# 判断基準は「何を求めると書いているか」だけ。題材のみ（「りんごの問題」）・無関係・判断不能は unknown。
+# 仕様 v3.1 3-4：弱の問い「じゃあ 次は、{divisor}を どんな ふうに 使った お話に する？」への児童の答えを
+# tobun / hougan / bai / unknown に分ける。判断基準は「わる数をどう使う（何を求める）と書いているか」だけ。
+# 題材のみ（「りんごの問題」）・「わからない」・質問で返した・無関係・判断不能は unknown。
 
 DECLARATION_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの仕分け係です。
-児童が「つぎは何を求める問題にするか」を書いた文を、次の4つに分類します。
-分類結果のJSONだけを返してください。JSON以外の文字は一切出力しないでください。
+児童は、式 {dividend} ÷ {divisor} になる文章題を作っています。
+「じゃあ 次は、{divisor}を どんな ふうに 使った お話に する？」と聞かれ、それに答えました。
+その答えを次の4つに分類します。分類結果のJSONだけを返してください。JSON以外の文字は一切出力しないでください。
 
-- "tobun"：1つ分の大きさ・1人分・1皿分などを求めると書いている
-- "hougan"：いくつ分・何人に配れるか・まとまりの数を求めると書いている
-- "bai"：何倍か・もとにする量との比較を求めると書いている
-- "unknown"：題材のみ（「りんごの問題」）・無関係・判断できない
+- "tobun"：{divisor} を「分ける相手の数」（{divisor}人で分ける・{divisor}つの班・{divisor}チーム・{divisor}ふくろに分ける）として使う、
+  または 1人分・1つ分の大きさを求めると書いている
+- "hougan"：{divisor} を「1人分・1つ分の数」（{divisor}こずつ・1人に{divisor}こ・{divisor}まいずつ配る）として使う、
+  または 何人に配れるか・いくつ分・まとまりの数を求めると書いている
+- "bai"：{divisor} を「くらべる相手の量」（{divisor}こと くらべる・{divisor}この何倍）として使う、または 何倍かを求めると書いている
+- "unknown"：題材だけ（「りんごの問題」「クラスの話」）・「わからない」・質問で返している（「どういうこと？」）・無関係・判断できない
 
 ## 返すJSON（この形式のみ）
 { "structure": "tobun" or "hougan" or "bai" or "unknown" }"""
@@ -141,8 +145,9 @@ DECLARATION_PROMPT = """あなたは、小学4年生が「わり算のお話づ�
 DECLARATION_TYPES = ("tobun", "hougan", "bai", "unknown")
 
 
-def classify_declaration(text: str, user_id: str | None = None) -> str:
+def classify_declaration(text: str, user_id: str | None = None, expression: str = "24 ÷ 4") -> str:
     """予告の文を tobun / hougan / bai / unknown に分類する。失敗時は 'unknown'。"""
+    dividend, divisor = parse_expression(expression)
     def parse(response) -> str:
         t = _parse(_text_from(response)).get("structure")
         if t not in DECLARATION_TYPES:
@@ -155,53 +160,10 @@ def classify_declaration(text: str, user_id: str | None = None) -> str:
             model=CLASSIFY_MODEL,
             max_tokens=64,
             thinking={"type": "disabled"},
-            system=DECLARATION_PROMPT,
-            messages=[{"role": "user", "content": f"児童の予告: {text}"}],
+            system=DECLARATION_PROMPT.replace("{dividend}", str(dividend)).replace("{divisor}", str(divisor)),
+            messages=[{"role": "user", "content": f"児童の答え: {text}"}],
         )
         return kind
     except llm_call.LLMUnavailable as e:
         print(f"[ai_classify] classify_declaration failed after {e.retry_count} retries: {e}")
         return "unknown"  # 分類できなければ予告なし扱い（再質問もしない：仕様 3-4）
-
-
-# ===== 役割の宣言・ターン1（除数が何をあらわしているか）の分類 =====
-# 弱（強度1）のターン1で「{n}ばんの お話で、{divisor}は 何を あらわして いるかな？」に児童が自由記述で答えた文を
-# 4つに分ける。判断基準は「除数の役割として何を書いているか」だけ。判別不能・LLM 失敗は unknown。
-
-ROLE_PROMPT = """あなたは、小学4年生が「わり算のお話づくり（作問）」をするアプリの仕分け係です。
-児童は自分の作った文章題について「{divisor}は 何を あらわして いるかな？」と聞かれ、それに答えました。
-その答えを次の5つに分類します。分類結果のJSONだけを返してください。JSON以外の文字は一切出力しないでください。
-
-- "people"：分ける相手の数（人数・班の数・いくつに分けるか）だと答えている（例「人数」「{divisor}人」「分ける人の数」「{divisor}つの班」）
-- "per_one"：1つ分の数・1人分の数・1まとまりの大きさだと答えている（例「1人分」「1人にあげる数」「1ふくろの数」「{divisor}こずつ」）
-- "base"：比べる相手の量・もとにする量だと答えている（例「くらべる方」「もとの数」「白いリボンの長さ」）
-- "dont_know"：「わからない」「知らない」と答えている
-- "unknown"：上のどれとも判断できない（題材だけ・無関係・意味が取れない）
-
-## 返すJSON（この形式のみ）
-{ "role": "people" or "per_one" or "base" or "dont_know" or "unknown" }"""
-
-ROLE_TYPES = ("people", "per_one", "base", "dont_know", "unknown")
-
-
-def classify_role(text: str, divisor: int, user_id: str | None = None) -> str:
-    """除数の役割についての児童の答えを people / per_one / base / dont_know / unknown に分類する。失敗時は 'unknown'。"""
-    def parse(response) -> str:
-        t = _parse(_text_from(response)).get("role")
-        if t not in ROLE_TYPES:
-            raise ValueError(f"unexpected role: {t!r}")
-        return t
-
-    try:
-        kind, _meta = llm_call.call(
-            user_id, parse,
-            model=CLASSIFY_MODEL,
-            max_tokens=64,
-            thinking={"type": "disabled"},
-            system=ROLE_PROMPT.replace("{divisor}", str(divisor)),
-            messages=[{"role": "user", "content": f"児童の答え: {text}"}],
-        )
-        return kind
-    except llm_call.LLMUnavailable as e:
-        print(f"[ai_classify] classify_role failed after {e.retry_count} retries: {e}")
-        return "unknown"

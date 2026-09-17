@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- 支援の状態機械（フェーズスコープ＝セッションごと）
     declared       TEXT,
     declared_by    TEXT,
+    declared_text  TEXT,                        -- 児童が宣言したときの言葉（画面上部にそのまま出す。システム指定なら NULL）
     stuck_count    INTEGER NOT NULL DEFAULT 0,
     miss_count     INTEGER NOT NULL DEFAULT 0,
     help_count     INTEGER NOT NULL DEFAULT 0,   -- taiwa が支援要求に分類された回数
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     is_new              INTEGER,
     item                TEXT,       -- 判定が読み取った物の名前（中・強の文言の {物}）
     unit                TEXT,       -- 判定が読み取った助数詞（{unit}）
+    divisor_phrase      TEXT,       -- 成立作問の除数を含む句（フェーズ2。称賛・弱の対比で引用する。extract_divisor_phrase）
 
     response_type       TEXT,
     prompt_strength     INTEGER,
@@ -92,7 +94,7 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     self_label_text     TEXT,
     self_label_match    INTEGER,
 
-    -- 弱・ターン1（役割の宣言）：児童の答えの分類（訂正前の生の値）と、訂正を出したか
+    -- 旧 v3 の弱ターン1（役割の宣言）。v3.1 で廃止。列は残すが書き込まない
     role_answer         TEXT,
     role_corrected      INTEGER,
     -- taiwa が支援要求（ヒント・わからない等）に分類されたか（LLM。未判定は NULL）
@@ -102,12 +104,12 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     stuck_count         INTEGER,
     miss_count          INTEGER,
     help_count          INTEGER,
-    -- このターン後の強度（0〜3）と、このターンで強度を上げた原因（stuck / miss / help / none）
+    -- このターン後の強度（0〜3）と、このターンで強度を上げた原因（stuck / miss / help / talk / none）
     strength            INTEGER,
     strength_trigger    TEXT,
     -- このターンの AI の発話が指した目標構造（無ければ NULL）
     target_structure    TEXT,
-    -- このターンの AI の発話のあと、サーバが児童の何を待つか（role / declaration / answer。待たないなら NULL）
+    -- このターンの AI の発話のあと、サーバが児童の何を待つか（declaration / answer。待たないなら NULL。旧 v3 の role は残存）
     awaiting            TEXT,
 
     latency_ms          INTEGER,
@@ -190,11 +192,12 @@ def _archive_legacy_tables(con):
 _MIGRATIONS = {
     "sessions": (("declared", "TEXT"), ("declared_by", "TEXT"),
                  ("stuck_count", "INTEGER NOT NULL DEFAULT 0"), ("miss_count", "INTEGER NOT NULL DEFAULT 0"),
-                 ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
+                 ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0"),
+                 ("declared_text", "TEXT")),
     "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
                   ("is_help_request", "INTEGER"), ("help_count", "INTEGER"), ("strength", "INTEGER"),
                   ("strength_trigger", "TEXT"), ("target_structure", "TEXT"), ("awaiting", "TEXT"),
-                  ("judge_status", "TEXT"), ("judged_at", "TEXT")),
+                  ("judge_status", "TEXT"), ("judged_at", "TEXT"), ("divisor_phrase", "TEXT")),
 }
 
 JUDGE_STATUSES = ("pending", "done", "failed")
@@ -300,7 +303,7 @@ def get_session(session_id: int) -> dict | None:
     with _conn() as con:
         r = con.execute(
             """SELECT session_id, user_id, phase, expression, parity_group, session_start, session_end,
-                      declared, declared_by, stuck_count, miss_count, help_count, strength
+                      declared, declared_by, stuck_count, miss_count, help_count, strength, declared_text
                FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -309,18 +312,20 @@ def get_session(session_id: int) -> dict | None:
     return {"session_id": r[0], "user_id": r[1], "phase": r[2], "expression": r[3],
             "parity_group": r[4], "session_start": r[5], "session_end": r[6],
             "declared": r[7], "declared_by": r[8], "stuck_count": r[9] or 0, "miss_count": r[10] or 0,
-            "help_count": r[11] or 0, "strength": r[12] or 0}
+            "help_count": r[11] or 0, "strength": r[12] or 0, "declared_text": r[13]}
 
 
 def set_state(session_id: int, *, declared: str | None, declared_by: str | None,
-              stuck_count: int, miss_count: int, help_count: int, strength: int):
-    """状態機械の変数を保存する（3カウンタ＋強度＋予告）。"""
+              stuck_count: int, miss_count: int, help_count: int, strength: int,
+              declared_text: str | None = None):
+    """状態機械の変数を保存する（3カウンタ＋強度＋予告）。declared_text は児童の宣言の言葉（システム指定・目標なしなら NULL）。"""
     with _conn() as con:
         con.execute(
-            """UPDATE sessions SET declared = ?, declared_by = ?, stuck_count = ?, miss_count = ?,
+            """UPDATE sessions SET declared = ?, declared_by = ?, declared_text = ?, stuck_count = ?, miss_count = ?,
                                    help_count = ?, strength = ?
                WHERE session_id = ?""",
-            (declared, declared_by, stuck_count, miss_count, help_count, strength, session_id),
+            (declared, declared_by, declared_text if declared_by == "child" else None,
+             stuck_count, miss_count, help_count, strength, session_id),
         )
 
 
@@ -330,7 +335,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              input_type: str, message: str | None, ai_message: str | None,
              valid: bool | None = None, structure: str | None = None, unknown: str | None = None,
              issue: str | None = None, is_new: bool | None = None,
-             item: str | None = None, unit: str | None = None,
+             item: str | None = None, unit: str | None = None, divisor_phrase: str | None = None,
              response_type: str | None = None, prompt_strength: int | None = None,
              declared_structure: str | None = None, declared_by: str | None = None,
              declaration_met: bool | None = None,
@@ -350,17 +355,17 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
             """INSERT INTO chat_logs
                (session_id, user_id, phase, expression, created_at,
                 input_type, message, ai_message,
-                valid, structure, unknown, issue, is_new, item, unit,
+                valid, structure, unknown, issue, is_new, item, unit, divisor_phrase,
                 response_type, prompt_strength,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected, is_help_request,
                 produced_structures, stuck_count, miss_count, help_count,
                 strength, strength_trigger, target_structure, awaiting, latency_ms, judge_status, judged_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
-             b(valid), structure, unknown, issue, b(is_new), item, unit,
+             b(valid), structure, unknown, issue, b(is_new), item, unit, divisor_phrase,
              response_type, prompt_strength,
              declared_structure, declared_by, b(declaration_met),
              self_label, self_label_text, b(self_label_match),
@@ -505,13 +510,29 @@ def get_valid_problems(session_id: int) -> list[dict]:
     """成立した作問を時系列で返す（児童の「つくった お話」一覧用。表示番号＝この並びの 1 始まり）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT log_id, message, structure, unknown, is_new, phase, item, unit FROM chat_logs
+            """SELECT log_id, message, structure, unknown, is_new, phase, item, unit, divisor_phrase FROM chat_logs
                WHERE session_id = ? AND valid = 1
                ORDER BY log_id""",
             (session_id,),
         ).fetchall()
     return [{"id": r[0], "text": r[1], "structure": r[2], "unknown": r[3],
-             "is_new": bool(r[4]), "phase": r[5], "item": r[6], "unit": r[7]} for r in rows]
+             "is_new": bool(r[4]), "phase": r[5], "item": r[6], "unit": r[7], "divisor_phrase": r[8]} for r in rows]
+
+
+def count_taiwa_since_last_sakumon(session_id: int) -> int:
+    """直前の作問行（input_type='sakumon'）より後の対話（taiwa）行の数。再送・予告は数えない。
+    強度0で対話だけが続いて作問が来ない状態（trigger=talk）の検出に使う。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT input_type FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC", (session_id,)
+        ).fetchall()
+    n = 0
+    for (kind,) in rows:
+        if kind == "sakumon":
+            break
+        if kind == "taiwa":
+            n += 1
+    return n
 
 
 def get_max_prompt_strength(session_id: int) -> int:
@@ -648,7 +669,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
 LOG_COLUMNS = [
     "log_id", "session_id", "user_id", "phase", "expression", "created_at",
     "input_type", "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new", "item", "unit",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
@@ -693,7 +714,7 @@ CSV_FIELDS = [
     "user_id", "session_id", "parity_group", "session_start", "session_end",
     "log_id", "created_at", "phase", "expression", "input_type",
     "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new", "item", "unit",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",

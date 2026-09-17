@@ -21,7 +21,7 @@ cd backend && uvicorn main:app --reload --port 8000
   - sessions は UNIQUE(user_id, phase)。1児童1フェーズ1セッション。「新しい回（run）」は廃止（リハーサル分は管理画面で削除）
   - 旧スキーマが残っていれば起動時に *_legacy_日付 へ改名して退避（DROP しない）。列追加は SCHEMA 変更＋既存 DB へ ALTER TABLE
   - is_new はフェーズスコープ（user_id + phase で到達構造を引く）
-- 支援は docs/sakumon_spec_v3.md（2026-09-17。v2 の 2-4・3-4〜3-6・5-3・7章中段階は v3 で置き換え）。状態は sessions に保持
+- 支援は docs/spec/sakumon_spec_v3.md（2026-09-17。v2 の 2-4・3-4〜3-6・5-3・7章中段階は v3 で置き換え）。状態は sessions に保持
   （declared / declared_by / stuck_count / miss_count / help_count / strength）
   - 4段階：0=促し／1=弱（役割の宣言・2ターン）／2=中（役割指定＋題材固定）／3=強（場面文提示）
   - stuck = 新構造に到達しなかった成立作問の**連続**回数、miss = 予告不一致の累積、help = taiwa が支援要求に分類された回数。

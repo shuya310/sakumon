@@ -84,8 +84,11 @@ def _system(expression: str) -> str:
 
 
 def classify(message: str, recent_turns: list[dict] | None = None, expression: str = "24 ÷ 4",
-             user_id: str | None = None) -> str:
-    """作問(sakumon) か 対話(taiwa) かを返す。失敗時は 'taiwa'。"""
+             user_id: str | None = None, fallback: str = "taiwa") -> str:
+    """作問(sakumon) か 対話(taiwa) かを返す。失敗時は fallback（既定 'taiwa'）。
+
+    フェーズ1・3は fallback='sakumon' で呼ぶ：判定は応答後（judge_queue）なので、分類できなくても作問として
+    pending で残しておけば、API 復旧後に管理画面の「再判定」で判定できる（taiwa に倒すと判定されないまま失われる）。"""
     context = ""
     if recent_turns:
         lines = []
@@ -115,8 +118,8 @@ def classify(message: str, recent_turns: list[dict] | None = None, expression: s
         )
         return kind
     except llm_call.LLMUnavailable as e:
-        print(f"[ai_classify] classify failed after {e.retry_count} retries: {e}")
-        return "taiwa"  # 分類失敗時は安全側（対話）に倒す（judge に対話文が流れ込むのを防ぐ）
+        print(f"[ai_classify] classify failed after {e.retry_count} retries: {e} → {fallback}")
+        return fallback  # フェーズ2は安全側（対話）に倒す（judge に対話文が流れ込むのを防ぐ）
 
 
 # ===== 予告（自由記述）の分類 =====

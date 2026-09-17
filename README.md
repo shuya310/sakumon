@@ -69,9 +69,14 @@ POST /api/judge {session_id, user_id, message, declaring}
   │        → LLM 分類を使わず、数量2つ以上＋問いの文で終わる完全な問題文だけ作問。それ以外は対話
   │    直前が form（不成立の指摘）で、入力が短い断片（12字以下・問いで終わらない・場面の動詞なし）→ 対話
   │    それ以外 → ai_classify（Haiku）
-  ├ 作問 → ai_judge：{valid, structure, unknown, issue, item, unit}
+  ├ 作問（フェーズ2）→ ai_judge：{valid, structure, unknown, issue, item, unit}
   │        → main.py：状態機械で response_type / strength / declared を決める
-  │        → ai_dialogue：文言（フェーズ1・3は「おくったよ」のみ）
+  │        → ai_dialogue：文言
+  ├ 作問（フェーズ1・3）→ 本文を judge_status=pending で保存して即「おくったよ」
+  │        → judge_queue が応答後に ai_judge を実行し同じ行を埋める（児童ごとに送信順で直列・児童をまたいで並列 8。
+  │          llm_call の内部リトライのあと 10 秒・30 秒あけて再試行 → なお失敗なら judge_status=failed・issue=error）
+  │        → 管理画面「未判定・失敗を再判定」で pending / failed を再投入（サーバ再起動・API エラーの復旧）
+  │        → 分類（ai_classify）に失敗した入力は、フェーズ1・3では作問（pending）に倒す（フェーズ2は対話）
   ├ 対話モード（declaring=true）で作問以外 → 直前のログ行から待っているターンを決める
   │        role        → 役割の答え（classify_role → 訂正 or ターン2の問い）  input_type=role
   │                      （弱のターン1の直後、訂正の直後、talk が役割を問うた直後（awaiting=role）のどれでも同じ）
@@ -80,7 +85,8 @@ POST /api/judge {session_id, user_id, message, declaring}
                      0→1 なら ROLE_ASK を連結して役割待ち。talk が役割を問うたら awaiting=role）
   → chat_logs に全ターン記録（phase, expression, input_type, valid, structure, unknown, issue, is_new, item, unit,
      response_type, prompt_strength, declared_*, role_answer, role_corrected, is_help_request,
-     produced_structures, stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms）
+     produced_structures, stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms,
+     judge_status（pending / done / failed。作問行のみ）, judged_at）
 ```
 
 ### ai_judge の出力
@@ -111,8 +117,10 @@ backend/
   ai_judge.py      3層判定（成立性→構造→求める量）
   ai_dialogue.py   応答の種類ごとの声かけ（定型＋LLM＋ガード）
   ai_classify.py   作問／対話の分類・予告の分類・除数の役割の答えの分類
+  judge_queue.py   フェーズ1・3の応答後の判定キュー（同時実行の上限・児童ごとの直列・失敗の再試行・再投入）
   kanji_rule.py    文字づかいルール
-  tests/test_flow.py       遷移・認証・ログ・CSV の決定論テスト（LLMモック）
+  tests/test_flow.py       遷移・認証・ログ・CSV・応答後の判定の決定論テスト（LLMモック）
+  tests/test_llm_call.py   llm_call のリトライ・セマフォ
   tests/judge_cases.py     判定精度テスト（実API・35件）
   tests/dialogue_probe.py  talk の実出力の確認（実API・強度0〜3）
 docs/
@@ -143,7 +151,7 @@ cd backend && uvicorn main:app --reload --port 8000
 
 HTTP Basic 認証（ユーザー名は任意、パスワード＝`ADMIN_PASSWORD`）。
 
-- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式の割り当て表（奇偶×フェーズ）
+- フェーズ管理：現在のフェーズ、フェーズ1／2／3の切替、式の割り当て表（奇偶×フェーズ）、判定の状態（未判定／失敗／完了）と「未判定・失敗を再判定」
 - 児童の状態（5秒更新）：接続・提出数・成立数・到達数・予告（誰が・何を）・反復／不一致／支援要求・強度・直近の応答。提出0問の児童を赤で強調
 - 児童詳細：セッションごとの式の上書き、予告と産出の一致／不一致、役割の答えと訂正、支援要求、強度・trigger・目標
 - 1児童1フェーズ1セッション（`UNIQUE(user_id, phase)`）。リハーサルのデータは本番前に「児童一覧・ログ」から削除する

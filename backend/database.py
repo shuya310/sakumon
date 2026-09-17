@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     awaiting            TEXT,
 
     latency_ms          INTEGER,
+    -- 判定の状態（作問行のみ。pending=未判定／done=完了／failed=規定回数リトライしても失敗）。
+    -- フェーズ1・3は応答後に判定するので pending で保存してから埋める。フェーズ2は同期判定なので保存時に done/failed
+    judge_status        TEXT,
+    judged_at           TEXT,       -- 判定が終わった時刻（JST）
 
     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
 );
@@ -168,8 +172,11 @@ _MIGRATIONS = {
                  ("help_count", "INTEGER NOT NULL DEFAULT 0"), ("strength", "INTEGER NOT NULL DEFAULT 0")),
     "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
                   ("is_help_request", "INTEGER"), ("help_count", "INTEGER"), ("strength", "INTEGER"),
-                  ("strength_trigger", "TEXT"), ("target_structure", "TEXT"), ("awaiting", "TEXT")),
+                  ("strength_trigger", "TEXT"), ("target_structure", "TEXT"), ("awaiting", "TEXT"),
+                  ("judge_status", "TEXT"), ("judged_at", "TEXT")),
 }
+
+JUDGE_STATUSES = ("pending", "done", "failed")
 
 
 def _migrate(con):
@@ -314,7 +321,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              stuck_count: int | None = None, miss_count: int | None = None, help_count: int | None = None,
              strength: int | None = None, strength_trigger: str | None = None,
              target_structure: str | None = None, awaiting: str | None = None,
-             latency_ms: int | None = None) -> int:
+             latency_ms: int | None = None, judge_status: str | None = None) -> int:
     def b(v):
         return None if v is None else int(bool(v))
     with _conn() as con:
@@ -328,8 +335,8 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected, is_help_request,
                 produced_structures, stuck_count, miss_count, help_count,
-                strength, strength_trigger, target_structure, awaiting, latency_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                strength, strength_trigger, target_structure, awaiting, latency_ms, judge_status, judged_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
              b(valid), structure, unknown, issue, b(is_new), item, unit,
@@ -338,9 +345,77 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              self_label, self_label_text, b(self_label_match),
              role_answer, b(role_corrected), b(is_help_request),
              format_structures(produced_structures) if produced_structures is not None else None,
-             stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms),
+             stuck_count, miss_count, help_count, strength, strength_trigger, target_structure, awaiting, latency_ms,
+             judge_status, _now() if judge_status in ("done", "failed") else None),
         )
         return cur.lastrowid
+
+
+# ===== 応答後の判定（フェーズ1・3。judge_queue から呼ばれる） =====
+
+def get_log_for_judge(log_id: int) -> dict | None:
+    """判定キューが使う最小限の行情報。"""
+    with _conn() as con:
+        r = con.execute(
+            "SELECT log_id, session_id, user_id, phase, expression, message, judge_status FROM chat_logs WHERE log_id = ?",
+            (log_id,),
+        ).fetchone()
+    if not r:
+        return None
+    return {"log_id": r[0], "session_id": r[1], "user_id": r[2], "phase": r[3], "expression": r[4],
+            "message": r[5], "judge_status": r[6]}
+
+
+def get_produced_before(user_id: str, phase: int, log_id: int) -> list[str]:
+    """その行より前に送られた（log_id が小さい）判定済み行から見た到達構造。
+    応答後の判定で is_new を「送信順」で決めるために使う（判定の完了順ではなく）。"""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT DISTINCT structure FROM chat_logs
+               WHERE user_id = ? AND phase = ? AND valid = 1 AND structure IS NOT NULL AND log_id < ?""",
+            (user_id, phase, log_id),
+        ).fetchall()
+    found = {r[0] for r in rows}
+    return [s for s in STRUCTURES if s in found]
+
+
+def set_judge_result(log_id: int, *, valid: bool | None, structure: str | None, unknown: str | None,
+                     issue: str | None, is_new: bool | None, item: str | None, unit: str | None,
+                     produced_structures: list[str] | None, judge_status: str):
+    """応答後の判定の結果を書き込む（保存形式は同期判定と同じ列・同じ値）。"""
+    def b(v):
+        return None if v is None else int(bool(v))
+    with _conn() as con:
+        con.execute(
+            """UPDATE chat_logs SET valid = ?, structure = ?, unknown = ?, issue = ?, is_new = ?, item = ?, unit = ?,
+                                    produced_structures = ?, judge_status = ?, judged_at = ?
+               WHERE log_id = ?""",
+            (b(valid), structure, unknown, issue, b(is_new), item, unit,
+             format_structures(produced_structures) if produced_structures is not None else None,
+             judge_status, _now(), log_id),
+        )
+
+
+def get_unjudged_log_ids(statuses: tuple[str, ...] = ("pending", "failed")) -> list[dict]:
+    """未判定・失敗の作問行（管理画面の再判定用）。送信順。"""
+    marks = ",".join("?" * len(statuses))
+    with _conn() as con:
+        rows = con.execute(
+            f"SELECT log_id, user_id FROM chat_logs WHERE judge_status IN ({marks}) ORDER BY log_id", statuses
+        ).fetchall()
+    return [{"log_id": r[0], "user_id": r[1]} for r in rows]
+
+
+def count_judge_status() -> dict:
+    """判定状態ごとの件数（管理画面の表示用）。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT judge_status, COUNT(*) FROM chat_logs WHERE judge_status IS NOT NULL GROUP BY judge_status"
+        ).fetchall()
+    out = {k: 0 for k in JUDGE_STATUSES}
+    for k, n in rows:
+        out[k] = n
+    return out
 
 
 def format_structures(structures) -> str:
@@ -484,6 +559,7 @@ LOG_COLUMNS = [
     "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "help_count",
     "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
+    "judge_status", "judged_at",
 ]
 _BOOL_COLUMNS = ("valid", "is_new", "declaration_met", "self_label_match", "role_corrected", "is_help_request")
 
@@ -527,6 +603,7 @@ CSV_FIELDS = [
     "role_answer", "role_corrected", "is_help_request",
     "produced_structures", "stuck_count", "miss_count", "help_count",
     "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
+    "judge_status", "judged_at",
 ]
 
 

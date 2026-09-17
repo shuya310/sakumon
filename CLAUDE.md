@@ -55,6 +55,10 @@ cd backend && uvicorn main:app --reload --port 8000
   理由なしの不成立は _fallback_issue で本文から寄せる（問いあり・被除数あり・除数なし → missing_condition。not_problem は場面も数も無いときだけ）
 - 称賛は「{divisor}が ちがう 数を 表す 問題」（除数の役割の軸。9/17）
 - judge が全リトライ失敗 → issue='error'・response_type='error'「もう一度 おくって みてね」（一覧に載せない。送り直しは判定し直す）。判定済み本文の連続再送だけ input_type='resend'（API を呼ばない・カウンタ不動）
-- テスト：backend/tests/test_flow.py（LLMモック・決定論。cd backend && ./venv/bin/python tests/test_flow.py）、tests/test_llm_call.py（リトライ・セマフォ）、
+- フェーズ1・3の作問は judge_status='pending' で保存して即「おくったよ」→ judge_queue（応答後）が ai_judge を実行して同じ行を埋める
+  （児童ごと送信順で直列＝is_new は送信順。並列 JUDGE_BG_WORKERS=8。失敗は JUDGE_BG_RETRY_WAITS=10,30 秒あけて再試行 → failed）。
+  フェーズ2は同期のまま（保存時に done/failed）。pending/failed は管理画面「再判定」（/admin/api/rejudge）で再投入。
+  フェーズ1・3で classify が失敗した入力は sakumon（pending）に倒す（フェーズ2は taiwa）
+- テスト：backend/tests/test_flow.py（LLMモック・決定論。cd backend && ./venv/bin/python tests/test_flow.py。judge_queue.wait_idle() で応答後の判定を待つ）、tests/test_llm_call.py（リトライ・セマフォ）、
   tests/judge_cases.py（実API・判定精度）、tests/dialogue_probe.py（実API・talk の出力）
 - 運用手順：授業当日の運用手順_0918.md

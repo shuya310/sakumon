@@ -23,7 +23,11 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "dummy")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import config  # noqa: E402
+config.JUDGE_BG_RETRY_WAITS = ()      # 応答後の判定の外側リトライは待たない（テストを速く・決定論に）
+
 import main  # noqa: E402
+import judge_queue  # noqa: E402
 import database  # noqa: E402
 import ai_judge  # noqa: E402
 import ai_classify  # noqa: E402
@@ -59,8 +63,14 @@ def fake_judge(message, expression, user_id=None):
     return jr
 
 
-def fake_classify(message, recent=None, expression=None, user_id=None):
+LAST_CLASSIFY = {}
+
+
+def fake_classify(message, recent=None, expression=None, user_id=None, fallback="taiwa"):
     CALLS["classify"] += 1
+    LAST_CLASSIFY.update(fallback=fallback)
+    if message.startswith("?:"):
+        return fallback      # 分類失敗（LLM 不通）を模す
     return "sakumon" if len(message) > 1 and message[1] == ":" and message[0] in _JUDGE else "taiwa"
 
 
@@ -114,6 +124,7 @@ main.ai_classify.classify_role = fake_role
 d.extract_divisor_phrase = fake_extract_divisor_phrase
 ai_judge.judge = fake_judge
 main.ai_judge.judge = fake_judge
+judge_queue.ai_judge.judge = fake_judge
 ai_classify.classify = fake_classify
 main.ai_classify.classify = fake_classify
 REAL_LLM_MESSAGE = d._llm_message
@@ -173,13 +184,14 @@ with client:
         "role_answer", "role_corrected", "is_help_request",
         "produced_structures", "stuck_count", "miss_count", "help_count",
         "strength", "strength_trigger", "target_structure", "awaiting", "latency_ms",
+        "judge_status", "judged_at",
     ], cols
     scols = [r[1] for r in raw("PRAGMA table_info(sessions)")]
     assert scols == ["session_id", "user_id", "phase", "expression", "parity_group", "session_start", "session_end",
                      "declared", "declared_by", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 36列（awaiting 追加）・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 38列（judge_status / judged_at 追加）・sessions 13列（状態機械6列）・UNIQUE(user_id, phase)")
 
     # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
     ds = main.decide_strength
@@ -255,7 +267,9 @@ with client:
     assert post("/api/session/resume", session_id=sidA, user_id="01").status_code == 200
     print("OK 所有権: 他人の session_id への judge/resume は403")
 
-    # フェーズ1の提出：判定は動くが表示は「おくったよ」。response_type / ai_message は記録しない
+    # フェーズ1の提出：作問は判定を待たずに「おくったよ」（judge_status=pending）。判定は応答後（judge_queue）。
+    # response_type / ai_message は記録しない
+    j_before = CALLS["judge"]
     r1 = judge(sidA, "01", "T: おりがみ21まいを3人で")
     assert r1["message"] == "おくったよ" and r1["response_type"] is None and r1["dialog"] is None
     assert r1["valid"] is None and r1["structure"] is None and r1["history"] == [] and r1["accepted"] is False
@@ -263,7 +277,11 @@ with client:
     judge(sidA, "01", "X: 場面矛盾")
     rt = judge(sidA, "01", "わからない")
     assert rt["message"] == "おくったよ"
+    assert judge_queue.wait_idle(10), "応答後の判定が終わらない"
+    assert CALLS["judge"] == j_before + 3, "作問3件が応答後に判定される（対話は判定しない）"
     logs = logs_of(sidA)
+    assert [l["judge_status"] for l in logs] == ["done", "done", "done", None]
+    assert all(l["judged_at"] for l in logs[:3]) and logs[3]["judged_at"] is None
     assert [l["response_type"] for l in logs] == [None] * 4
     assert [l["ai_message"] for l in logs] == [None] * 4
     assert [l["prompt_strength"] for l in logs] == [None] * 4
@@ -276,6 +294,87 @@ with client:
     assert all(l["expression"] == "21 ÷ 3" for l in logs)
     assert all(l["latency_ms"] is not None for l in logs)
     print("OK フェーズ1: 表示は『おくったよ』のみ。判定・produced は記録、カウンタは動かない、response_type は空")
+
+    # ===== 応答後の判定（フェーズ1・3）：pending → done、送信順の is_new、失敗 → failed → 再判定 =====
+    pl = post("/api/login", user_id="05").json()
+    sidQ = pl["session_id"]
+    # 判定をブロックして「応答時は pending・valid NULL」を確かめる
+    import threading
+    gate = threading.Event()
+    real_fake_judge = judge_queue.ai_judge.judge
+    def blocking_judge(message, expression, user_id=None):
+        gate.wait(10)
+        return real_fake_judge(message, expression, user_id)
+    judge_queue.ai_judge.judge = blocking_judge
+    try:
+        t0 = __import__("time").perf_counter()
+        judge(sidQ, "05", "T: a")
+        judge(sidQ, "05", "T: b")
+        judge(sidQ, "05", "H: c")
+        assert __import__("time").perf_counter() - t0 < 2, "応答が判定を待っている"
+        lq = logs_of(sidQ)
+        assert [l["judge_status"] for l in lq] == ["pending"] * 3
+        assert all(l["valid"] is None and l["structure"] is None and l["is_new"] is None and l["produced_structures"] is None for l in lq)
+        assert all(l["input_type"] == "sakumon" and l["latency_ms"] is not None for l in lq)
+        st = client.get("/admin/api/live", headers=AUTH).json()["judge"]
+        assert st["pending"] == 3 and st["queued"] == 3
+        # pending 中の同じ本文の再送は API を呼ばない（resend）
+        assert judge(sidQ, "05", "H: c")["input_type"] == "resend"
+    finally:
+        gate.set()
+    assert judge_queue.wait_idle(10)
+    judge_queue.ai_judge.judge = real_fake_judge
+    lq = [l for l in logs_of(sidQ) if l["input_type"] == "sakumon"]
+    assert [l["judge_status"] for l in lq] == ["done"] * 3
+    assert [l["valid"] for l in lq] == [True, True, True]
+    assert [l["is_new"] for l in lq] == [True, False, True], "is_new は送信順（同じ児童は直列に判定）"
+    assert [l["produced_structures"] for l in lq] == ["tobun", "tobun", "tobun,hougan"]
+    assert [l["structure"] for l in lq] == ["tobun", "tobun", "hougan"]
+    assert all(l["response_type"] is None and l["ai_message"] is None and l["strength"] is None for l in lq)
+    assert database.get_produced("05", 1) == ["tobun", "hougan"]
+    # 分類の失敗：フェーズ1・3は作問（pending）に倒す（フェーズ2は対話に倒す＝後段で検査）
+    assert judge(sidQ, "05", "?: 分類できない")["input_type"] == "sakumon" and LAST_CLASSIFY["fallback"] == "sakumon"
+    assert judge_queue.wait_idle(10)
+    lc = logs_of(sidQ)[-1]
+    assert lc["judge_status"] == "failed" and lc["issue"] == "error", "モックの judge は '?' を知らないので失敗扱い"
+    client.delete(f"/admin/api/logs/{lc['log_id']}", headers=AUTH)
+    # 失敗 → failed（issue=error）→ 同じ本文の再送は判定し直す → 管理画面の再判定で done
+    judge(sidQ, "05", "E: だめ")
+    assert judge_queue.wait_idle(10)
+    lf = logs_of(sidQ)[-1]
+    assert lf["judge_status"] == "failed" and lf["issue"] == "error" and lf["valid"] is None
+    st = client.get("/admin/api/live", headers=AUTH).json()["judge"]
+    assert st["failed"] == 1 and st["pending"] == 0
+    assert judge(sidQ, "05", "E: だめ")["input_type"] == "sakumon", "直前が判定失敗なら再送ではなく判定し直す"
+    assert judge_queue.wait_idle(10)
+    assert client.get("/admin/api/live", headers=AUTH).json()["judge"]["failed"] == 2
+    # 再判定：モックを成立に差し替えて再投入（実運用では API 復旧後に押す）
+    _JUDGE["E"] = dict(_JUDGE["B"])
+    r = admin_post("/admin/api/rejudge")
+    assert r["requeued"] == 2
+    assert judge_queue.wait_idle(10)
+    _JUDGE["E"] = {"valid": False, "structure": "invalid", "unknown": None, "issue": "error", "error": "boom",
+                   "meta": {"retry_count": 3, "latency_ms": 65000, "status": "failed"}}
+    lq = [l for l in logs_of(sidQ) if l["input_type"] == "sakumon"]
+    assert [l["judge_status"] for l in lq] == ["done"] * 5 and lq[3]["structure"] == "bai" and lq[3]["is_new"] is True
+    assert lq[4]["is_new"] is False, "再判定でも is_new は送信順"
+    assert client.get("/admin/api/live", headers=AUTH).json()["judge"]["failed"] == 0
+    assert admin_post("/admin/api/rejudge")["requeued"] == 0
+    # 32人の同時送信：全員分が判定され、各自の is_new が送信順に正しい
+    admin_post("/admin/api/phase", phase=1)
+    sids = {}
+    for i in range(40, 72):
+        uid = f"{i:02d}"
+        sids[uid] = post("/api/login", user_id=uid).json()["session_id"]
+        for m in ("T: x", "T: y", "B: z"):
+            judge(sids[uid], uid, m)
+    assert judge_queue.wait_idle(30)
+    for uid, sid in sids.items():
+        lq = [l for l in logs_of(sid) if l["input_type"] == "sakumon"]
+        assert [l["judge_status"] for l in lq] == ["done"] * 3 and [l["is_new"] for l in lq] == [True, False, True], uid
+    for uid, sid in sids.items():
+        client.delete(f"/admin/api/sessions/{sid}", headers=AUTH)
+    print("OK 応答後の判定: 応答時は pending、完了で done（is_new は送信順）、失敗は failed→再判定、32人同時でも全件 done")
 
     # ===== フェーズ2へ切替（別セッション：フェーズ1は引き継がない） =====
     admin_post("/admin/api/phase", phase=2)
@@ -298,6 +397,7 @@ with client:
     assert r["message"] == "新しい 問題が できたね！\nほかにも、**4が ちがう 数を 表す** 問題は 作れるかな？"
     assert r["accepted"] is True and r["history"] == ["tobun"]
     llm_before = CALLS["llm"]
+    assert LAST_CLASSIFY["fallback"] == "taiwa", "フェーズ2の分類失敗は対話に倒す"
     r = judge(sid2A, "01", "T: ジュース24Lを4人で")
     assert r["response_type"] == "praise" and r["is_new"] is False and r["prompt_strength"] == 0
     assert r["message"] == "いいね、また 一つ できたね。\n今度は **4が ちがう 数を 表す** 問題も 作れそうかな？"
@@ -924,6 +1024,7 @@ with client:
         assert post("/api/declare", session_id=sidP, user_id="13", text="いくつ分").status_code == 400
         assert post("/api/judge", session_id=sidP, user_id="13", message="いくつ分", declaring=True).json()["input_type"] == "taiwa", \
             "フェーズ1・3では declaring を無視して対話として記録"
+        assert judge_queue.wait_idle(10)
         lp = logs_of(sidP)
         assert all(l["response_type"] is None and l["prompt_strength"] is None and l["ai_message"] is None for l in lp)
         assert [l["stuck_count"] for l in lp] == [0] * 6 and [l["is_new"] for l in lp[:5]] == [True, False, False, False, False]
@@ -967,7 +1068,11 @@ with client:
     assert any(x["strength_trigger"] == "help" for x in rows) and any(x["strength_trigger"] == "miss" for x in rows)
     assert any(x["target_structure"] == "hougan" and x["strength"] == "3" for x in rows)
     assert all(x["created_at"][:4] == str(now_jst.year) for x in rows)
-    print("OK CSV: 新列がすべて出る（declaration / role 行・latency_ms）・JST")
+    assert "judge_status" in rows[0] and "judged_at" in rows[0]
+    assert all(x["judge_status"] == "done" and x["judged_at"] != "" for x in rows if x["input_type"] == "sakumon" and x["issue"] != "error"), \
+        "作問行はフェーズを問わず judge_status=done（同期判定も保存時に done）"
+    assert all(x["judge_status"] == "" for x in rows if x["input_type"] in ("taiwa", "resend", "role", "declaration"))
+    print("OK CSV: 新列がすべて出る（declaration / role 行・latency_ms・judge_status）・JST")
 
     # ===== 旧スキーマの退避（Render の永続ディスク上の DB を想定） =====
     legacy = Path(_tmp) / "legacy.db"

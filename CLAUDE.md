@@ -16,7 +16,7 @@ cd backend && uvicorn main:app --reload --port 8000
 
 ## 注意
 - APIキー・ADMIN_PASSWORD は .env から読む（ADMIN_PASSWORD 未設定だと起動しない）
-- フェーズは app_config テーブル（管理画面 /admin で変更）。式は main.EXPRESSION_ASSIGNMENT（設定テーブル。児童ごとに sessions.expression に固定）
+- フェーズは app_config テーブル（管理画面 /admin で変更）。式は config.EXPRESSION_ASSIGNMENT（設定テーブル。児童ごとに sessions.expression に固定）
 - DBは data/sakumon.db。スキーマは database.SCHEMA（列追加は _MIGRATIONS で既存 DB へ ALTER）。時刻は JST
   - sessions は UNIQUE(user_id, phase)。1児童1フェーズ1セッション。「新しい回（run）」は廃止（リハーサル分は管理画面で削除）
   - 旧スキーマが残っていれば起動時に *_legacy_日付 へ改名して退避（DROP しない）。列追加は SCHEMA 変更＋既存 DB へ ALTER TABLE
@@ -47,8 +47,8 @@ cd backend && uvicorn main:app --reload --port 8000
     答え・構造名は常に禁止）。violates_boundary(…, strength)。違反は理由を添えて1回再生成 → なお違反なら定型文。
     出力の is_help_request が true なら help+=1 → 強度更新（文言は更新前の強度。2以上で目標が無ければ立てる）。talk が役割を問うたら awaiting=role
   - 弱に構造ラベル（1つ分の 大きさ／いくつ分／何倍）を出すのは禁止。自己ラベルの訂正禁止は3択廃止で失効
-  - 式は main.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。奇数 18÷3/24÷4/30÷5、偶数 30÷5/24÷4/18÷3。フェーズ2 は 9/1 の紙の調査と同じ 24÷4。
-    設定はここ1箇所。管理画面の表・「式を変更」の選択肢 EXPRESSION_CHOICES・テストの期待値もここから引く）。セッション開始時に sessions.expression に固定。
+  - 式は config.EXPRESSION_ASSIGNMENT（奇偶×フェーズ。奇数 21÷3/24÷4/30÷5、偶数 30÷5/24÷4/21÷3。フェーズ2 は 9/1 の紙の調査と同じ 24÷4。
+    設定はここ1箇所。管理画面の表・「式を変更」の選択肢 EXPRESSION_CHOICES・DEFAULT_EXPRESSION_A/B・テストの期待値もここから引く。main.EXPRESSION_ASSIGNMENT は別名）。セッション開始時に sessions.expression に固定。
     管理画面からセッション単位で上書き可（/admin/api/sessions/{id}/expression。UI はプルダウン3択）。app_config.expression_a/b は未使用
   - 語彙：児童向けに「種類」「たずねる」「聞いていること」「ちがうことを聞く」を出さない（LLM 出力もガード）
 - ai_judge の issue に reversed（比較の向きが逆）・missing_condition（問いはあるが除数の条件が無い。9/17）。FORM_MESSAGES は全 issue 1対1（alias は wrong_operation のみ）。

@@ -61,6 +61,7 @@ function renderConfig(cfg) {
   });
   const asg = (cfg.public && cfg.public.expression_assignment) || {};
   EXPR_CHOICES = (cfg.public && cfg.public.expression_choices) || [];
+  document.getElementById("expr-choices-text").textContent = EXPR_CHOICES.join("／") || "—";
   const tbody = document.getElementById("expr-tbody");
   tbody.innerHTML = "";
   [["odd", "奇数番"], ["even", "偶数番"]].forEach(([g, label]) => {

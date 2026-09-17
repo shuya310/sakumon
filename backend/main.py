@@ -56,16 +56,9 @@ STRUCTURES = {"tobun", "hougan", "bai"}
 USER_ID_PATTERN = re.compile(r"^[0-9]{2}$")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
-# 式のカウンターバランス（仕様 v2 4章）。出席番号の奇偶 × フェーズ。式の設定はここ1箇所だけ
-# （管理画面の表・「式を変更」の選択肢・テストの期待値はすべてここから引く）。
-# フェーズ2（支援あり）は 9/1 の紙の調査と同じ条件に揃えるため 24÷4。事前・事後は 18÷3 と 30÷5 を奇偶で入れ替える（商はすべて 6）。
-EXPRESSION_ASSIGNMENT = {
-    "odd":  {1: "18÷3", 2: "24÷4", 3: "30÷5"},
-    "even": {1: "30÷5", 2: "24÷4", 3: "18÷3"},
-}
-# 管理画面「式を変更」の選択肢（設定表に現れる式の集合。表示順は被除数の昇順）
-EXPRESSION_CHOICES = sorted({config.normalize_expression(e) for d in EXPRESSION_ASSIGNMENT.values() for e in d.values()},
-                            key=config.parse_expression)
+# 式の設定は config.EXPRESSION_ASSIGNMENT（ここ1箇所）。main からは別名で参照する（テスト・旧記述との互換）。
+EXPRESSION_ASSIGNMENT = config.EXPRESSION_ASSIGNMENT
+EXPRESSION_CHOICES = config.EXPRESSION_CHOICES
 
 # 児童側の設定ポーリングを心拍として使う（user_id → 最終受信）。単一プロセス前提のメモリ保持。
 _last_seen: dict[str, dict] = {}
@@ -171,7 +164,7 @@ def _touch(user_id: str, session_id: int | None):
 
 
 def assigned_expression(user_id: str, phase: int) -> str:
-    """出席番号の奇偶とフェーズから式を決める（'18 ÷ 3' の形）。"""
+    """出席番号の奇偶とフェーズから式を決める（'21 ÷ 3' の形）。"""
     group = database.parity_group_of(user_id)
     return config.normalize_expression(EXPRESSION_ASSIGNMENT[group][phase])
 

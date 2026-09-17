@@ -142,7 +142,7 @@ function enter(payload) {
   (payload.problems || []).forEach(p => addProblem(p.text, p.structure));
   renderConversation(payload.conversation || []);
   addNotice(kickoffText(state.phase, state.expression));
-  setTarget(payload.declared, payload.target_label);
+  setTarget(payload.target_label);
   setDialog(state.showSupport ? payload.dialog : null);
   updatePanels();
   showScreen("screen-game");
@@ -151,9 +151,9 @@ function enter(payload) {
 }
 
 function kickoffText(phase, expression) {
-  if (phase === 2) return `ここからは、おくった 問題に 返事が 来るよ。「${expression}」になる 問題を 作ろう。`;
-  if (phase === 3) return `新しい式だよ。「${expression}」になる 問題を 作って おくってね。`;
-  return `「${expression}」になる 問題を 作って おくってね。`;
+  if (phase === 2) return `ここからは、送った問題に 返事が 来るよ。「${expression}」になる 問題を 作ろう。`;
+  if (phase === 3) return `新しい式だよ。「${expression}」になる 問題を 作って 送ってね。`;
+  return `「${expression}」になる 問題を 作って 送ってね。`;
 }
 
 function resetGame() {
@@ -201,7 +201,7 @@ async function pollConfig() {
       // 管理画面からの個別の式の上書き
       state.expression = cfg.expression;
       document.getElementById("game-expression").textContent = cfg.expression;
-      addNotice(`式が「${cfg.expression}」に かわったよ。`);
+      addNotice(`式が「${cfg.expression}」に 変わったよ。`);
     }
   } catch (e) { /* 次の周期で再試行 */ }
 }
@@ -233,7 +233,7 @@ async function handlePhaseChange(cfg) {
 
 function showPhaseBanner(cfg) {
   const sub = document.getElementById("phase-banner-sub");
-  sub.textContent = cfg.phase === 3 ? "つぎは 新しい 式で 作るよ" : "つぎは 新しい 画面で 作るよ";
+  sub.textContent = cfg.phase === 3 ? "次は 新しい 式で 作るよ" : "次は 新しい 画面で 作るよ";
   document.getElementById("phase-banner").hidden = false;
 }
 function hidePhaseBanner() {
@@ -278,7 +278,7 @@ function addAckLine(text) {
   const log = document.getElementById("chat-log");
   const el = document.createElement("div");
   el.className = "ack-line";
-  el.textContent = text || "おくったよ";
+  el.textContent = text || "送ったよ";
   log.appendChild(el);
   scrollLog();
 }
@@ -322,7 +322,7 @@ function addLoadingBubble() {
 }
 
 // サーバ側の同時実行上限で待たされているあいだだけ、点々の横に文言を出す（エラーではない）
-const WAITING_MESSAGE = "じゅんばんに 見ているよ。ちょっとまってね";
+const WAITING_MESSAGE = "じゅんばんに 見ているよ。ちょっと待ってね";
 function setLoaderWaiting(loader, waiting) {
   let label = loader.querySelector(".loading-text");
   if (waiting && !label) {
@@ -357,16 +357,17 @@ function renderConversation(conversation) {
     if (turn.phase === 2 && state.showSupport) {
       if (turn.ai_message) addAiBubble(turn.ai_message, turn.response_type, turn.is_new, turn.prompt_strength);
     } else {
-      addAckLine("おくったよ");
+      addAckLine("送ったよ");
     }
   });
   return true;
 }
 
 // ===== 目標の固定表示・対話の状態 =====
-function setTarget(declared, label) {
+// label はサーバの target_label（児童の宣言の言葉／システム指定の行き先の言葉）。構造が立っていなくても児童の言葉があれば出す
+function setTarget(label) {
   const bar = document.getElementById("target-bar");
-  if (declared && label) {
+  if (label) {
     document.getElementById("target-label").textContent = label;
     bar.hidden = false;
   } else {
@@ -389,7 +390,7 @@ function setDialog(dialog) {
 function applySupport(data) {
   if (data.history) state.history = data.history;
   state.allReached = !!data.all_reached;
-  setTarget(data.declared, data.target_label);
+  setTarget(data.target_label);
   updatePanels();
 }
 
@@ -460,7 +461,7 @@ async function sendMessage() {
 
     // サーバが判断したフェーズに従って描く（切替の瞬間に送った場合でもログと表示がずれない）
     if (!data.show_support) {
-      addAckLine("おくったよ");
+      addAckLine("送ったよ");
       // フェーズ1・3：作問として受けた本文は右の「作った 問題」に載せる（判定結果は見せない。再送・対話は載せない）
       if (data.input_type === "sakumon") addProblem(text, null);
       if (data.phase !== state.phase) pollConfig();
@@ -585,7 +586,7 @@ document.getElementById("btn-select-yes").addEventListener("click", async () => 
       return;
     }
     closeSelection();
-    addNotice("選んだ お話を おくったよ。つづけて お話を 作っても いいよ。");
+    addNotice("選んだ お話を 送ったよ。先生の 指示があれば、続けて お話を 作っても いいよ。");
   } catch (e) {
     document.getElementById("select-confirm").hidden = true;
     document.getElementById("select-error").textContent = "エラーが起きました。もう一度 おしてみてね。";

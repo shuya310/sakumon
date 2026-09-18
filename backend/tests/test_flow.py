@@ -175,7 +175,7 @@ with client:
     assert cols == [
         "log_id", "session_id", "user_id", "phase", "expression", "created_at",
         "input_type", "message", "ai_message",
-        "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase",
+        "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase", "question_phrase",
         "response_type", "prompt_strength",
         "declared_structure", "declared_by", "declaration_met",
         "self_label", "self_label_text", "self_label_match",
@@ -189,7 +189,7 @@ with client:
                      "declared", "declared_by", "declared_text", "stuck_count", "miss_count", "help_count", "strength"], scols
     idx = {r[1]: r[2] for r in raw("PRAGMA index_list(sessions)")}
     assert idx.get("idx_sessions_user_phase") == 1, "UNIQUE(user_id, phase)"
-    print("OK スキーマ: chat_logs 39列（divisor_phrase 追加）・sessions 14列（declared_text 追加）・UNIQUE(user_id, phase)")
+    print("OK スキーマ: chat_logs 40列（question_phrase 追加）・sessions 14列（declared_text 追加）・UNIQUE(user_id, phase)")
 
     # ===== 強度の遷移規則（decide_strength は状態遷移。カウンタから毎回計算し直さない） =====
     ds = main.decide_strength
@@ -479,16 +479,18 @@ with client:
     pb = CALLS.get("phrase", 0)
     r = judge(sid2A, "01", "T: おりがみが24まいあります。【4人で 分けます】。1人何まいですか。")
     assert r["response_type"] == "praise" and r["is_new"] is True and r["prompt_strength"] == 0
-    assert r["message"] == ("新しい 問題が できたね！ この お話では、4は『4人で 分けます』の 4だったね。\n"
-                            "今度は、**4が ちがう ものの 数に なる** お話は 作れるかな？"), r["message"]
+    assert r["message"] == ("新しい 問題が できたね！ この お話は、『1人何まいですか』を 求める お話だね。\n"
+                            "今度は、**求める ものが ちがう** お話は 作れるかな？"), r["message"]
     assert CALLS["phrase"] == pb + 1 and logs_of(sid2A)[-1]["divisor_phrase"] == "4人で 分けます", "除数の句を判定と並行して取り、ログに残す"
+    assert logs_of(sid2A)[-1]["question_phrase"] == "1人何まいですか", "問いの文（正規表現）をログに残す"
     assert r["accepted"] is True and r["history"] == ["tobun"]
     llm_before = CALLS["llm"]
     assert LAST_CLASSIFY["fallback"] == "taiwa", "フェーズ2の分類失敗は対話に倒す"
     r = judge(sid2A, "01", "T: ジュース24Lを4人で")
     assert r["response_type"] == "praise" and r["is_new"] is False and r["prompt_strength"] == 0
-    assert r["message"] == ("いいね、また 一つ できたね。この お話でも、4は『T: ジュース24Lを4人で』の 4だね。\n"
-                            "今度は、**4が ちがう ものの 数に なる** お話も 作れそうかな？"), "句が LLM で取れなければ除数を含む文（40字以内）を引用"
+    assert r["message"] == ("いいね、また 一つ できたね。\n"
+                            "今度は、**求める ものが ちがう** お話も 作れそうかな？"), "問いの文が無ければ引用の文を落とす"
+    assert logs_of(sid2A)[-1]["divisor_phrase"] == "T: ジュース24Lを4人で" and logs_of(sid2A)[-1]["question_phrase"] is None
     assert CALLS["llm"] == llm_before, "praise は定型（LLM を呼ばない）"
     r = judge(sid2A, "01", "X: だめ")
     assert r["response_type"] == "form" and r["valid"] is False
@@ -507,10 +509,14 @@ with client:
     assert r["response_type"] == "praise" and r["is_new"] is True and sorted(r["history"]) == ["hougan", "tobun"]
     r = judge(sid2A, "01", "B: 24本は4本の何倍")
     assert r["response_type"] == "done" and r["all_reached"] is True
-    assert r["message"] == "3つ とも できたね！\n1つ分の 大きさ、いくつ分、何倍——ぜんぶ ちがう ものを 求める 問題が そろったよ。"
+    assert r["message"] == ("3つ とも できたね！ 1ばん・3ばん・4ばんは、同じ 24÷4 なのに 求める ものが ぜんぶ ちがう お話だね。\n"
+                            "時間まで、もっと 作って みよう。求める ものが 同じでも、ちがう お話なら いいよ。"), \
+        "疑問語が3つそろわなければ番号だけ（3ばんに問いが無い）"
     pb = CALLS.get("phrase", 0)
     r = judge(sid2A, "01", "B: 24人は4人の何倍")
     assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["declared"] is None
+    assert r["message"] == "5ばんも できたね。この お話は『B: 24人は4人の何倍』を 求める お話だね。", "完了後は完了文をくり返さない"
+    assert r["accepted"] is True
     assert CALLS["phrase"] == pb, "3つそろった後は句を取らない"
     # 成立作問と同じ本文（直前でなくても）→ 判定せず「もう ◯ばんに あるよ」（v3.1）
     cb = dict(CALLS)
@@ -595,8 +601,8 @@ with client:
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 1 and r["stuck_count"] == 2, r
     assert r["strength"] == 1 and r["strength_trigger"] == "stuck" and r["help_count"] == 0
     assert database.get_session(sidS)["strength"] == 1, "強度は sessions に状態として保持"
-    assert r["message"] == ("2ばんの『4人に 分けます』も 3ばんの『4人で 分けます』も、4は 同じ ことを 表して いるね。\n"
-                            "じゃあ 次は、4を どんな ふうに 使った お話に する？"), r["message"]
+    assert r["message"] == ("2ばんの『4人に 分けます』も 3ばんの『4人で 分けます』も、4の 使い方は 同じで、どちらも **何こか**を 求める お話だね。\n"
+                            "じゃあ 次は、何を 求める お話に する？"), r["message"]
     for label in d.STRUCTURE_LABEL.values():
         assert label not in r["message"], ("弱で構造のラベルを出さない", label)
     for w in ("人数", "1人分", "分ける お話", "くらべる"):
@@ -605,7 +611,7 @@ with client:
     assert logs_of(sidS)[-1]["awaiting"] == "declaration"
     resumed = post("/api/session/resume", session_id=sidS, user_id="11").json()
     assert resumed["dialog"] == "declaration", "再入場でも宣言待ちを復元"
-    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（同じ構造の直近2問の除数の句を引用して対比 → 宣言の問い）")
+    print("OK 状態機械(2): 同構造 0→1→2、3問目で弱（同じ構造の直近2問の除数の句と問いの疑問語を引用して対比 → 宣言の問い）")
 
     # (3) 宣言「4こずつ配る」→ declared=hougan, declared_by=child。返事は1回で閉じ、児童の言葉が目標に固定表示される
     db = CALLS["declare"]
@@ -645,9 +651,11 @@ with client:
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 2, r
     assert r["declaration_met"] is False and r["miss_count"] == 1 and r["stuck_count"] == 3
     assert r["strength"] == 2 and r["strength_trigger"] == "miss", "stuck と miss が同時に増えても +1 は1回。trigger は miss"
-    assert r["message"] == "4を、1人が もらう 数に して みよう。えんぴつの お話は そのままで いいよ。", r["message"]
+    assert r["message"] == ("何人に 分けられるかを 求める お話に して みよう。4を、1人が もらう 数に するよ。"
+                            "えんぴつの お話は そのままで いいよ。"), r["message"]
     row = logs_of(sidS)[-1]
     assert row["item"] == "えんぴつ" and row["unit"] == "本", "判定が読み取った物・助数詞をログに残す"
+    assert row["question_phrase"] == "1人分は何本ですか"
     assert row["strength"] == 2 and row["strength_trigger"] == "miss" and row["target_structure"] == "hougan" and row["help_count"] == 0
     assert r["dialog"] is None and "choices" not in r, "中：3択は出さない。入力欄は作問モードのまま"
     row = logs_of(sidS)[-1]
@@ -655,7 +663,7 @@ with client:
     st = database.get_session(sidS)
     assert st["declared"] == "hougan" and st["declared_by"] == "system" and st["declared_text"] is None, "中：prompt 発行と同時にシステムが目標を立てる"
     assert r["declared"] == "hougan" and r["declared_by"] == "system" and r["declared_text"] is None
-    assert r["target_label"] == "4を 1人が もらう 数に した お話", "システム指定は行き先の言葉（構造のラベルは出さない）"
+    assert r["target_label"] == "何人に 分けられるかを 求める お話", "システム指定は行き先（求めるもの）の言葉（構造のラベル単独は出さない）"
     assert post("/api/session/resume", session_id=sidS, user_id="11").json()["dialog"] is None
     assert client.post("/api/self_label", json={"session_id": sidS, "user_id": "11", "choice": "bai"}).status_code == 404, "/api/self_label は廃止"
     print("OK 状態機械(4): 予告と違う構造 → declaration_met=0, miss=1 → 中（行き先の指定。3択・/api/self_label は廃止）")
@@ -674,14 +682,15 @@ with client:
     assert database.get_session(sidS)["stuck_count"] == 3 and database.get_session(sidS)["miss_count"] == 1, "taiwa でカウンタ不動"
     # システムプロンプト：強度2では役割の指示・3語・題材固定が許可、場面文は不可。強度0・1では3語を出さない
     sys2 = d._build_system("24 ÷ 4", ["tobun"], c)
-    assert "支援の強さ: 2" in sys2 and "1人が もらう 数に して みよう" in sys2 and "場面文（お話の文そのもの）は渡さない" in sys2
+    assert "支援の強さ: 2" in sys2 and "1人が もらう 数に するよ" in sys2 and "場面文（お話の文そのもの）は渡さない" in sys2
     assert "えんぴつの お話は そのままで いいよ" in sys2 and "4 が表しているもの: 分ける相手の数" in sys2 and "答え（数値 6）" in sys2
+    assert "問いの文（求めるもの）: 『1人分は何本ですか』" in sys2, "成立作問の問いの文を渡す"
     sys0 = d._build_system("24 ÷ 4", [], {"strength": 0})
     assert "先生から答え（役割）も言わない" in sys0 and "「1つ分の 大きさ」「いくつ分」「何倍」「1人分」という言葉は使わない" in sys0
     assert "分類して言わない" in sys0 and "現在地を示してよい" not in sys0, "強度0は現在地も示さない"
     sys1 = d._build_system("24 ÷ 4", [], {"strength": 1})
-    assert "先生から役割の答えを言わない" in sys1 and "行き先は言わない" in sys1 and "現在地を示してよい" in sys1
-    assert "4を どんな ふうに 使った お話に する？" in sys1
+    assert "役割を言わず" in sys1 and "行き先は言わない" in sys1 and "現在地を示してよい" in sys1
+    assert "何を 求める お話に する？" in sys1 and "求めるもの」の意味を聞かれたら" in sys1 and "求めるもの」の意味を聞かれたら" in sys0
     assert "行き先を言ってよい" in sys2 and "行き先を言ってよい" in d._build_system("24 ÷ 4", ["tobun"], {**c, "strength": 3})
     sys3 = d._build_system("24 ÷ 4", ["tobun"], {**c, "strength": 3})
     assert "場面文を渡してよい" in sys3 and "えんぴつが 24本 あります" in sys3
@@ -696,8 +705,8 @@ with client:
     assert r["response_type"] == "prompt" and r["prompt_strength"] == 3, r
     assert r["declaration_met"] is False and r["miss_count"] == 2 and r["stuck_count"] == 4
     assert r["strength"] == 3 and r["strength_trigger"] == "miss"
-    assert r["message"] == "「ジュースが 24L あります。1人に 4Lずつ 分けます。」\nつづきの 問いを 書いて みよう。", r["message"]
-    assert r["target_label"] == "4を 1人が もらう 数に した お話"
+    assert r["message"] == "「ジュースが 24L あります。1人に 4Lずつ 分けます。」\nつづきの、求める 文を 書いて みよう。", r["message"]
+    assert r["target_label"] == "何人に 分けられるかを 求める お話"
     assert r["dialog"] is None and r["declared"] == "hougan" and r["declared_by"] == "system"
     row = logs_of(sidS)[-1]
     assert row["declared_by"] == "system" and row["declaration_met"] is False
@@ -715,7 +724,7 @@ with client:
     # (6) 包含除に到達 → stuck / miss が両方 0 に戻り、強度0の称賛
     r = judge(sidS, "11", "H: あめ24こを4こずつ")
     assert r["response_type"] == "praise" and r["prompt_strength"] == 0 and r["is_new"] is True, r
-    assert r["message"] == d.praise_message(True, "24 ÷ 4", "H: あめ24こを4こずつ") and "『H: あめ24こを4こずつ』" in r["message"]
+    assert r["message"] == d.praise_message(True, "24 ÷ 4", None) == "新しい 問題が できたね！\n今度は、**求める ものが ちがう** お話は 作れるかな？"
     assert r["target_label"] is None
     assert r["stuck_count"] == 0 and r["miss_count"] == 0 and r["declaration_met"] is True and r["declared"] is None
     assert r["strength"] == 0 and r["help_count"] == 0 and r["strength_trigger"] == "none"
@@ -730,12 +739,16 @@ with client:
     # (7) 3構造そろう → done。以降支援なし
     r = judge(sidS, "11", "B: 24本は4本の何倍")
     assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["all_reached"] is True
-    assert r["message"] == d.DONE_MESSAGE
+    assert r["message"] == ("3つ とも できたね！ 1ばん・6ばん・7ばんは、同じ 24÷4 なのに 求める ものが ぜんぶ ちがう お話だね。\n"
+                            "時間まで、もっと 作って みよう。求める ものが 同じでも、ちがう お話なら いいよ。"), r["message"]
     for i in range(4):
         r = judge(sidS, "11", f"T: 3つそろった後の反復{i}")
         assert r["response_type"] == "done" and r["prompt_strength"] == 0 and r["declared"] is None and r["dialog"] is None, r
-        assert r["strength"] == 0
-    print("OK 状態機械(7): 3構造で done、以降くり返しても予告支援は出ない")
+        assert r["strength"] == 0 and r["message"] == f"{8 + i}ばんも できたね。", r["message"]
+    # 完了後の対話：支援は出ない（help を送っても強度は 0 のまま）
+    r = judge(sidS, "11", "ヒント")
+    assert r["response_type"] == "talk" and r["strength"] == 0 and r["strength_trigger"] == "none"
+    print("OK 状態機械(7): 3構造で done（児童の問いの疑問語で3つを並べる）、以降は「◯ばんも できたね」で予告支援は出ない")
 
     # ---- 弱の変形（v3.1）：到達構造の集合で現在地の言い方が変わる。宣言 unknown は立てず定型で作問に戻す ----
     # 分ける系を両方到達（残りは倍）→「どれも 分ける お話」
@@ -747,8 +760,13 @@ with client:
     r = judge(sidQ, "14", "H: クッキーが24まいあります。1人に4まいずつ配ります。何人に配れますか。@クッキー/まい")
     assert r["prompt_strength"] == 1 and r["dialog"] == "declaration"
     assert r["message"] == ("これまでの お話は、どれも 24まいを 分ける お話だね。\n"
-                            "じゃあ 次は、24まいを 分けない お話に するなら、4を どんな ふうに 使った お話に する？"), r["message"]
+                            "じゃあ 次は、24まいを 分けない お話に するなら、何を 求める？"), ("1ばんに問いが無いので番号なし", r["message"])
     assert d.weak_variant(database.get_valid_problems(sidQ))[0] == "wakeru"
+    assert d.weak_message([{"structure": "hougan", "unit": "こ", "question_phrase": "何人にくばれますか"},
+                           {"structure": "tobun", "unit": "こ", "question_phrase": "1人分は何こですか"},
+                           {"structure": "tobun", "unit": "まい", "question_phrase": "1人何まいですか"}], "24 ÷ 4") == (
+        "1ばんは 何人か、2ばんは 何こかを 求めたね。どちらも 24まいを 分ける お話だね。\n"
+        "じゃあ 次は、24まいを 分けない お話に するなら、何を 求める？"), "wakeru：各構造の最初の問題の疑問語（助数詞は最新の問題）"
     # 宣言 unknown だが中身のある言葉（題材だけ）→ 構造は立てないが児童の言葉として引き取る（『…』だね）。
     # 上部「つぎは」にその言葉を出す（9/18：「折り紙の数」に「わからなくても だいじょうぶ」と返さない）
     r = post("/api/judge", session_id=sidQ, user_id="14", message="りんごの問題", declaring=True).json()
@@ -764,47 +782,58 @@ with client:
     r = judge(sidQ, "14", "H: ドーナツが24こあります。4こずつ箱に入れます。箱は何箱いりますか。")
     assert r["prompt_strength"] == 2 and r["strength"] == 2 and r["strength_trigger"] == "stuck" and r["declaration_met"] is None
     assert r["declared"] == "bai" and r["declared_by"] == "system" and r["declared_text"] is None, "未到達は bai"
-    assert r["message"] == ("24こと 4こを くらべて、何倍かを 求める お話に して みよう。6ばんの お話は そのままで いいよ。"), \
-        ("item が取れないときの中", r["message"])
-    assert r["target_label"] == "24こと 4こを くらべる お話"
+    assert r["message"] == ("24こは 4この 何倍かを 求める お話に して みよう。4を、くらべる 相手の 数に するよ。"
+                            "6ばんの お話は そのままで いいよ。"), ("item が取れないときの中", r["message"])
+    assert r["target_label"] == "24こは 4この 何倍かを 求める お話"
     # 倍だけを2問以上 →「どれも くらべる お話」。1問だけ（help で上がる）→ one
     sidR = post("/api/login", user_id="16").json()["session_id"]
     judge(sidR, "16", "B: 【24本は 4本の 何倍】ですか@リボン/本")
     r = judge(sidR, "16", "わからない")
     assert r["strength"] == 1 and r["strength_trigger"] == "help" and r["dialog"] == "declaration"
-    assert r["message"] == "[talk] llm\n4が『24本は 4本の 何倍』の 4じゃ ない お話に するなら、4を どんな ふうに 使った お話に する？", r["message"]
+    assert r["message"] == ("[talk] llm\n1ばんは、4を『24本は 4本の 何倍』と 使って、**何倍か**を 求める お話だったね。\n"
+                            "じゃあ 次は、何を 求める お話に する？"), r["message"]
     # 宣言「わからない」（直前の「わからない」と同じ本文だが、答えを待っているので再送にしない）→ 立てない。help も動かない
     cb = dict(CALLS)
     r = post("/api/judge", session_id=sidR, user_id="16", message="わからない", declaring=True).json()
     assert r["input_type"] == "declaration" and r["declared"] is None and r["dialog"] is None and r.get("is_help_request") is None
-    assert r["message"] == "わからなくても だいじょうぶ。じゃあ、4を ちがう 使い方に した お話を 作って みよう。", r["message"]
+    assert r["message"] == "わからなくても だいじょうぶ。じゃあ、求める ものが ちがう お話を 作って みよう。", r["message"]
     assert r["declared_by"] is None and r["target_label"] is None, "「わからない」は引き取らない"
     assert CALLS["declare"] == cb["declare"] + 1 and CALLS["llm"] == cb["llm"], "宣言は classify_declaration だけ（talk は呼ばない）"
     assert database.get_session(sidR)["help_count"] == 1 and database.get_session(sidR)["strength"] == 1
     # 宣言が立たないまま同構造 → stuck 1 → 1→2（stuck）。目標は未到達の先頭（tobun）
     r = judge(sidR, "16", "B: 【24こは 4この 何倍】ですか@あめ/こ")
     assert r["prompt_strength"] == 2 and r["strength"] == 2 and r["strength_trigger"] == "stuck" and r["declaration_met"] is None
-    assert r["message"] == "4を、分ける 人の 数に して みよう。あめの お話は そのままで いいよ。", r["message"]
-    assert r["target_label"] == "4を 分ける 人の 数に した お話"
+    assert r["message"] == "1人分が 何こかを 求める お話に して みよう。4を、分ける 人の 数に するよ。あめの お話は そのままで いいよ。", r["message"]
+    assert r["target_label"] == "1人分が 何こかを 求める お話"
     assert d.weak_variant(database.get_valid_problems(sidR))[0] == "kuraberu"
-    # 中（目標 tobun）で help → 2→3。talk の文言（強度2で生成）の後ろに強の場面文を連結する（上部ラベルだけ変えて黙らない）
+    # 中（目標 tobun）で help → 2→3。talk の文言（強度2で生成）は捨て、定型の前置き＋強の場面文（上部ラベルだけ変えて黙らない・矛盾させない）
     r = judge(sidR, "16", "ヒント")
     assert r["is_help_request"] is True and r["prompt_strength"] == 2 and r["strength"] == 3 and r["strength_trigger"] == "help"
     assert r["declared"] == "tobun" and r["dialog"] is None
-    assert r["message"] == "[talk] llm\n「あめが 24こ あります。4人で 同じ 数ずつ 分けます。」\nつづきの 問いを 書いて みよう。", r["message"]
+    assert r["message"] == ("そっか。じゃあ、こうして みよう。\n「あめが 24こ あります。4人で 同じ 数ずつ 分けます。」\n"
+                            "つづきの、求める 文を 書いて みよう。"), r["message"]
     r = judge(sidR, "16", "もっと ヒント")
     assert r["strength"] == 3 and r["strength_trigger"] == "none" and r["message"] == "[talk] llm", "上限で据え置きなら連結しない"
+    assert database.get_session(sidR)["help_count"] == 3, "help_count は数える"
     assert d.weak_message(database.get_valid_problems(sidR), "24 ÷ 4") == (
-        "これまでの お話は、どれも 24こと 4こを くらべる お話だね。\n"
-        "じゃあ 次は、くらべない お話に するなら、4を どんな ふうに 使った お話に する？")
+        "1ばんも 2ばんも、24こと 4こを くらべて、**何倍か**を 求める お話だね。\n"
+        "じゃあ 次は、くらべない お話に するなら、何を 求める お話に する？")
     # 句が取れない同構造2問 → 番号だけで対比。1問で句なし → 番号で言う
     sidU = post("/api/login", user_id="18").json()["session_id"]
     judge(sidU, "18", "T: a"); judge(sidU, "18", "T: b")
     r = judge(sidU, "18", "T: c")
-    assert r["prompt_strength"] == 1 and r["message"] == ("2ばんの お話も 3ばんの お話も、4は 同じ ことを 表して いるね。\n"
-                                                          "じゃあ 次は、4を どんな ふうに 使った お話に する？"), r["message"]
+    assert r["prompt_strength"] == 1 and r["message"] == ("2ばんも 3ばんも、4の 使い方は 同じで、求める ものも 同じだね。\n"
+                                                          "じゃあ 次は、何を 求める お話に する？"), r["message"]
     assert d.weak_message([{"structure": "tobun", "divisor_phrase": None, "unit": None}], "24 ÷ 4") == \
-        "1ばんの お話とは 4の 使い方が ちがう お話に するなら、4を どんな ふうに 使った お話に する？"
+        "1ばんの お話とは 求める ものが ちがう お話に するなら、何を 求める お話に する？"
+    assert d.weak_message([{"structure": "tobun", "divisor_phrase": None, "unit": None, "question_phrase": "1人分は何こですか"}], "24 ÷ 4") == \
+        "1ばんは、**何こか**を 求める お話だったね。\nじゃあ 次は、何を 求める お話に する？"
+    assert d.weak_message([{"structure": "tobun", "divisor_phrase": "4人で 分けます", "unit": None}], "24 ÷ 4") == \
+        "1ばんは、4を『4人で 分けます』と 使った お話だったね。\nじゃあ 次は、何を 求める お話に する？"
+    assert d.weak_message([{"structure": "hougan", "divisor_phrase": "4こずつ 買います", "question_phrase": "何人でいけばいいですか"},
+                           {"structure": "hougan", "divisor_phrase": "4つ くばると", "question_phrase": "何ふくろできますか"}], "24 ÷ 4") == (
+        "2ばんの『4こずつ 買います』も 3ばんの『4つ くばると』も、4の 使い方は 同じで、求める ものも 同じだね。\n"
+        "じゃあ 次は、何を 求める お話に する？").replace("2ばん", "1ばん").replace("3ばん", "2ばん"), "疑問語が違えば疑問語は出さない"
     # 誤答（到達済み構造の宣言）は訂正しない：そのまま作れば stuck で中へ、一致なので miss は動かない
     r = post("/api/judge", session_id=sidU, user_id="18", message="4人で分ける", declaring=True).json()
     assert r["declared"] == "tobun" and r["declared_by"] == "child" and r["message"] == "じゃあ、その お話を 作って みよう。"
@@ -858,7 +887,8 @@ with client:
     r = judge(sidW, "20", "どういうこと？")
     assert r["strength"] == 1 and r["strength_trigger"] == "talk" and r["help_count"] == 0 and r["prompt_strength"] == 0, r
     assert r["message"] == ("[talk] どこが むずかしかったかな？\n"
-                            "4が『4人で分けます』の 4じゃ ない お話に するなら、4を どんな ふうに 使った お話に する？"), r["message"]
+                            "1ばんは、4を『4人で分けます』と 使って、**何本か**を 求める お話だったね。\n"
+                            "じゃあ 次は、何を 求める お話に する？"), r["message"]
     assert r["dialog"] == "declaration" and logs_of(sidW)[-1]["awaiting"] == "declaration" and logs_of(sidW)[-1]["strength_trigger"] == "talk"
     assert database.get_session(sidW)["strength"] == 1 and database.get_session(sidW)["help_count"] == 0
     # 回帰4：awaiting 中でも完全な問題文は作問として判定（宣言待ちは打ち切り）。新構造で 0 に戻る
@@ -878,7 +908,7 @@ with client:
     assert r["strength"] == 1 and r["strength_trigger"] == "talk", "対話3ターン目（この行）で 0→1"
     r = judge(sidW, "20", "H: 24このクッキーを4こずつ配ります。何人に配れますか。")
     assert r["prompt_strength"] == 2 and r["strength_trigger"] == "stuck" and r["dialog"] is None, "強度1からの同構造は中"
-    assert r["declared"] == "bai" and r["target_label"] == "24こと 4こを くらべる お話"
+    assert r["declared"] == "bai" and r["target_label"] == "24こは 4この 何倍かを 求める お話"
     r = judge(sidW, "20", "H: 24このあめを4こずつ配ります。何人に配れますか。")
     assert r["prompt_strength"] == 3 and r["declaration_met"] is False and r["strength_trigger"] == "miss"
     assert r["message"].startswith("「たろうさんは ものを 24こ、お友だちは 4こ もって います。」") or r["message"].startswith("「はなこさんは")
@@ -891,8 +921,8 @@ with client:
     r = judge(sidT, "12", "わからない")
     assert r["is_help_request"] is True and r["prompt_strength"] == 0, "文言は更新前の強度（0）で生成"
     assert r["strength"] == 1 and r["strength_trigger"] == "help" and r["help_count"] == 1, "回帰5：強度0の help で 1 に上がる"
-    assert r["message"] == ("[talk] llm\n1ばんの お話も 2ばんの お話も、4は 同じ ことを 表して いるね。\n"
-                            "じゃあ 次は、4を どんな ふうに 使った お話に する？"), "0→1 では talk の後ろに弱の文言を連結"
+    assert r["message"] == ("[talk] llm\n1ばんも 2ばんも、4の 使い方は 同じで、求める ものも 同じだね。\n"
+                            "じゃあ 次は、何を 求める お話に する？"), "0→1 では talk の後ろに弱の文言を連結"
     assert r["dialog"] == "declaration" and r["declared"] is None
     row = logs_of(sidT)[-1]
     assert row["awaiting"] == "declaration" and row["strength"] == 1 and row["strength_trigger"] == "help" and row["prompt_strength"] == 0
@@ -918,8 +948,9 @@ with client:
     assert r["is_help_request"] is True and r["prompt_strength"] == 1, "文言は更新前の強度（1）で生成"
     assert r["strength"] == 2 and r["strength_trigger"] == "help" and r["help_count"] == 2
     assert r["declared"] == "tobun" and r["declared_by"] == "child" and r["target_label"] == "人数", "児童の宣言が立っていればそのまま"
-    assert r["dialog"] is None and r["message"] == "[talk] llm\n4を、分ける 人の 数に して みよう。2ばんの お話は そのままで いいよ。", \
-        ("1→2（help）では talk の後ろに中の文言（行き先の指定）を連結する。弱は連結しない", r["message"])
+    assert r["dialog"] is None and r["message"] == ("そっか。じゃあ、こうして みよう。\n1人分が 何こかを 求める お話に して みよう。"
+                                                    "4を、分ける 人の 数に するよ。2ばんの お話は そのままで いいよ。"), \
+        ("1→2（help）では talk の文言を捨てて前置き＋中の文言（行き先の指定）。弱は連結しない", r["message"])
     st = database.get_session(sidT)
     assert st["strength"] == 2 and st["help_count"] == 2 and st["stuck_count"] == 1 and st["miss_count"] == 0
     r = judge(sidT, "12", "これって足し算？")
@@ -929,7 +960,7 @@ with client:
     r = judge(sidT, "12", "T: c")
     assert r["declaration_met"] is True and r["miss_count"] == 0 and r["stuck_count"] == 2
     assert r["strength"] == 3 and r["strength_trigger"] == "stuck" and r["declared"] == "hougan" and r["declared_by"] == "system"
-    assert r["target_label"] == "4を 1人が もらう 数に した お話"
+    assert r["target_label"] == "何人に 分けられるかを 求める お話"
     r = judge(sidT, "12", "どうすればいいの")
     assert r["strength"] == 3 and r["strength_trigger"] == "none" and r["help_count"] == 3 and r["declared"] == "hougan", "上限3で据え置き"
     r = judge(sidT, "12", "ヒント")
@@ -996,7 +1027,7 @@ with client:
         assert "範囲を超えていた" not in calls[0]
         outputs[:] = [role_q, role_q]
         out = REAL_LLM_MESSAGE("どういうこと？", "taiwa", None, ["hougan"], [], "talk", "24 ÷ 4", context={"strength": 0})
-        assert out["message"] == "そっか。じゃあ、いま作った 問題の 4を、ちがう 使い方に して みようか。" and out["state"] == "talk_fallback"
+        assert out["message"] == "そっか。じゃあ、いま作った 問題とは、求める ものが ちがう お話に して みようか。" and out["state"] == "talk_fallback"
         outputs[:] = [role_q]
         out = REAL_LLM_MESSAGE("4ってなに", "taiwa", None, ["hougan"], [], "talk", "24 ÷ 4", context={"strength": 1})
         assert out["message"] == "お話の 中の 4は 何の 数かな？", "強度1では役割の問い返しは通る"
@@ -1006,8 +1037,8 @@ with client:
     #（旧 v3 の役割の評価は廃止。問い返しへの答えは対話として LLM に渡す）
     r = judge(sidV, "22", "わからない")
     assert r["strength"] == 1 and r["strength_trigger"] == "help" and r["dialog"] == "declaration"
-    assert r["message"] == ("[talk] llm\n4が『4本ずつハコに入れます』の 4じゃ ない お話に するなら、"
-                            "4を どんな ふうに 使った お話に する？"), r["message"]
+    assert r["message"] == ("[talk] llm\n1ばんは、4を『4本ずつハコに入れます』と 使って、**何こか**を 求める お話だったね。\n"
+                            "じゃあ 次は、何を 求める お話に する？"), r["message"]
     r = post("/api/judge", session_id=sidV, user_id="22", message="1人に4本ずつ", declaring=True).json()
     assert r["input_type"] == "declaration" and r["declared"] == "hougan" and r["declared_by"] == "child" and r["target_label"] == "1人に4本ずつ"
     r = judge(sidV, "22", "4ってなに？")
@@ -1023,28 +1054,56 @@ with client:
     print("OK 修正③④A: talk に直前のやりとり（児童入力＋判定理由＋AI応答）を渡す。強度0は役割を問わない（ガード→理由付き再生成→定型文）。"
           "help で 0→1 は弱を連結。役割の宣言（role）は廃止")
 
-    # 中・強の3構造の文言（v3.1 遷移表を一字一句。{item}{unit}{dividend}{divisor} の埋め込み）
-    assert d.mid_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "3を、分ける 人の 数に して みよう。あめの お話は そのままで いいよ。"
-    assert d.mid_message("hougan", "21 ÷ 3", 2, "あめ", "こ") == "3を、1人が もらう 数に して みよう。あめの お話は そのままで いいよ。"
-    assert d.mid_message("bai", "21 ÷ 3", 2, "えんぴつ", "本") == "21本と 3本を くらべて、何倍かを 求める お話に して みよう。えんぴつの お話は そのままで いいよ。"
-    assert d.mid_message("tobun", "21 ÷ 3", 4, None, None) == "3を、分ける 人の 数に して みよう。4ばんの お話は そのままで いいよ。"
-    assert d.strong_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "「あめが 21こ あります。3人で 同じ 数ずつ 分けます。」\nつづきの 問いを 書いて みよう。"
+    # 中・強の3構造の文言（v3.2：目標（求めるもの）＋手段（除数の使い方）＋題材固定。{item}{unit}{dividend}{divisor} の埋め込み）
+    assert d.mid_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "1人分が 何こかを 求める お話に して みよう。3を、分ける 人の 数に するよ。あめの お話は そのままで いいよ。"
+    assert d.mid_message("hougan", "21 ÷ 3", 2, "あめ", "こ") == "何人に 分けられるかを 求める お話に して みよう。3を、1人が もらう 数に するよ。あめの お話は そのままで いいよ。"
+    assert d.mid_message("bai", "21 ÷ 3", 2, "えんぴつ", "本") == "21本は 3本の 何倍かを 求める お話に して みよう。3を、くらべる 相手の 数に するよ。えんぴつの お話は そのままで いいよ。"
+    assert d.mid_message("tobun", "21 ÷ 3", 4, None, None) == "1人分が 何こかを 求める お話に して みよう。3を、分ける 人の 数に するよ。4ばんの お話は そのままで いいよ。"
+    assert d.strong_message("tobun", "21 ÷ 3", 2, "あめ", "こ") == "「あめが 21こ あります。3人で 同じ 数ずつ 分けます。」\nつづきの、求める 文を 書いて みよう。"
     assert d.strong_message("bai", "21 ÷ 3", 2, "えんぴつ", "本", session_id=10) == (
-        "「たろうさんは えんぴつを 21本、お友だちは 3本 もって います。」\nつづきの 問いを、「何倍」を 使って 書いて みよう。")
+        "「たろうさんは えんぴつを 21本、お友だちは 3本 もって います。」\nつづきの、何倍かを 求める 文を 書いて みよう。")
     assert d.strong_message("bai", "21 ÷ 3", 2, "えんぴつ", "本", session_id=11).startswith("「はなこさんは"), "人物名はセッションごとに周期的"
-    assert d.strong_message("hougan", "30 ÷ 5", 2, None, None) == "「ものが 30こ あります。1人に 5こずつ 分けます。」\nつづきの 問いを 書いて みよう。"
-    # 目標の表示：児童の宣言はその言葉、システム指定は行き先の言葉。構造のラベルは出さない
-    assert d.target_label("bai", "system", None, "24 ÷ 4", "本") == "24本と 4本を くらべる お話"
+    assert d.strong_message("hougan", "30 ÷ 5", 2, None, None) == "「ものが 30こ あります。1人に 5こずつ 分けます。」\nつづきの、求める 文を 書いて みよう。"
+    # 目標の表示：児童の宣言はその言葉、システム指定は求めるものの文（中の文言の目標部分と同じ形）。構造のラベル単独は出さない
+    assert d.target_label("bai", "system", None, "24 ÷ 4", "本") == "24本は 4本の 何倍かを 求める お話"
+    assert d.target_label("tobun", "system", None, "24 ÷ 4", "本") == "1人分が 何本かを 求める お話"
+    assert d.target_label("hougan", "system", None, "24 ÷ 4") == "何人に 分けられるかを 求める お話"
     assert d.target_label("tobun", "child", "4人で分ける", "24 ÷ 4") == "4人で分ける"
-    assert d.target_label("tobun", "child", None, "24 ÷ 4") == "4を 分ける 人の 数に した お話", "児童の言葉が無ければ行き先の言葉"
+    assert d.target_label("tobun", "child", None, "24 ÷ 4") == "1人分が 何こかを 求める お話", "児童の言葉が無ければ行き先の言葉"
     assert d.target_label(None, None, None, "24 ÷ 4") is None
+    # 完了文：各構造に最初に到達した問題の番号と疑問語（到達順）。疑問語が欠ける・重なるなら番号だけ
+    probs = [{"structure": "hougan", "question_phrase": "何人にくばれますか"}, {"structure": "hougan", "question_phrase": "何人ですか"},
+             {"structure": "tobun", "question_phrase": "1人分は何こですか"}, {"structure": "bai", "question_phrase": "何倍ですか"}]
+    assert d.done_message(probs, "24 ÷ 4") == ("3つ とも できたね！ 1ばんは『何人か』、3ばんは『何こか』、4ばんは『何倍か』。\n"
+                                              "同じ 24÷4 なのに、求める ものが ぜんぶ ちがう お話に なったね。\n"
+                                              "時間まで、もっと 作って みよう。求める ものが 同じでも、ちがう お話なら いいよ。")
+    assert d.done_message([{**probs[0], "question_phrase": "何こにくばれますか"}, *probs[1:]], "24 ÷ 4").startswith(
+        "3つ とも できたね！ 1ばん・3ばん・4ばんは、同じ 24÷4 なのに 求める ものが ぜんぶ ちがう お話だね。"), "疑問語が重なれば番号だけ"
+    # 問いの文・疑問語の抽出（正規表現）
+    assert d.extract_question_phrase("おにぎりが24こあります。1人に4こずつくばります。おにぎりは何人にくばれますか。") == "おにぎりは何人にくばれますか"
+    assert d.extract_question_phrase("クッキーが24個あります。4人で分けると、1人分は何個になりますか？") == "4人で分けると、1人分は何個になりますか？"
+    assert d.extract_question_phrase("あめが24こあります。4人にくばります。") is None
+    assert d.interrogative_of("おにぎりは何人にくばれますか") == "何人か" and d.interrogative_of("1人分は何個ですか") == "何こか"
+    assert d.interrogative_of("24本は4本のなんばいですか") == "何倍か" and d.interrogative_of("ふくろはいくついりますか") == "いくつか"
+    assert d.interrogative_of("何人分ありますか") == "何人分か" and d.interrogative_of(None) is None and d.interrogative_of("6です") is None
+    # 「求めるものって何？」の検出と定型（児童の問いの文を指す。行き先は言わない）
+    assert d.asks_what_motomeru("求めるものって何ですか") and d.asks_what_motomeru("求めるものがちがうってどういうこと？")
+    assert d.asks_what_motomeru("求めるってなに") and d.asks_what_motomeru("求めるものがわかりません")
+    assert d.asks_what_motomeru("求めるものがちがうってどう言うことですか？") and d.asks_what_motomeru("求めるものってどーいう意味")
+    assert not d.asks_what_motomeru("何を求めればいいの") and not d.asks_what_motomeru("わからない") and not d.asks_what_motomeru("どういうこと？")
+    assert d.motomeru_what_message([{"question_phrase": "何人にくばれますか"}, {"question_phrase": "何人で買いにいけばいいですか"}], "24 ÷ 4") == (
+        "2ばんの お話の 最後の 文、『何人で買いにいけばいいですか』の ところが『求める もの』だよ。\n今度は、ここが ちがう お話を 作って みよう。")
+    assert d.motomeru_what_message([], "24 ÷ 4") == "『求める もの』は、お話の 最後の 文の ことだよ。「〜は いくつですか」の ところ。"
+    assert d.motomeru_what_message([{"question_phrase": None}], "24 ÷ 4") == d.motomeru_what_message([], "24 ÷ 4")
     for label in d.STRUCTURE_LABEL.values():
         for t in d.TARGET_LABEL.values():
-            assert label not in t
+            assert t != label and "1つ分の 大きさ" not in t and "いくつ分" not in t, "構造ラベル単独は出さない（「何倍か」は求めるものの文の中でだけ）"
     assert not hasattr(d, "ROLE_ASK") and hasattr(d, "weak_variant"), "役割の宣言の文言は廃止"
     for text in [d.PRAISE_NEW, d.PRAISE_NEW_NOPHRASE, d.PRAISE_REPEAT, d.PRAISE_REPEAT_NOPHRASE,
-                 d.WEAK_SAME, d.WEAK_SAME_NOPHRASE, d.WEAK_ONE, d.WEAK_ONE_NOPHRASE, d.WEAK_WAKERU, d.WEAK_KURABERU,
-                 d.DECLARED_MESSAGE, d.DECLARATION_UNKNOWN_MESSAGE, d.DUPLICATE_MESSAGE, d.DONE_MESSAGE,
+                 d.WEAK_SAME, d.WEAK_SAME_NOPHRASE, d.WEAK_SAME_NOWHAT, d.WEAK_SAME_BARE, d.WEAK_ONE, d.WEAK_ONE_NOPHRASE,
+                 d.WEAK_ONE_NOWHAT, d.WEAK_ONE_BARE, d.WEAK_WAKERU, d.WEAK_WAKERU_NOWHAT, d.WEAK_KURABERU,
+                 d.DECLARED_MESSAGE, d.DECLARATION_UNKNOWN_MESSAGE, d.DUPLICATE_MESSAGE, d.DONE_MESSAGE, d.DONE_MESSAGE_NOWHAT,
+                 d.POST_DONE, d.POST_DONE_NOPHRASE, d.MOTOMERU_WHAT_MESSAGE, d.MOTOMERU_WHAT_NOPHRASE, d.TALK_LEADIN,
                  d.TALK_FALLBACK, d.TALK_FALLBACK_REWRITE, *d.FORM_MESSAGES.values(), *d.MID_MESSAGES.values(),
                  *d.MID_MESSAGES_NOITEM.values(), *d.STRONG_MESSAGES.values(), *d.STRUCTURE_LABEL.values(),
                  *d.TARGET_LABEL.values()]:
@@ -1084,6 +1143,27 @@ with client:
     assert d.violates_boundary("どれも 24こを 分ける お話だね。", "talk", "24 ÷ 4", strength=1) is None
     assert d.violates_boundary("これは分ける話だね", "talk", "24 ÷ 4", strength=0) == "banned_classify:分ける話"
     assert d.violates_boundary("これは倍の話だね", "talk", "24 ÷ 4", strength=2) == "banned:倍の話"
+    # v3.2 のガード：求めるものの指定も強度0・1で禁止。「くらべる ような 使い方」（9/18 模擬のすり抜け）も行き先の指定
+    assert d.violates_boundary("ここの 4を、たとえば 何かと 何かを くらべる ような 使い方に できないかな。", "talk", "24 ÷ 4", strength=1) == "role_spec"
+    assert d.violates_boundary("1人分が 何こかを 求める お話に して みよう。", "talk", "24 ÷ 4", strength=1) == "banned_unknown:1人分"
+    assert d.violates_boundary("何人かを 求める お話に して みよう。", "talk", "24 ÷ 4", strength=1) == "role_spec"
+    assert d.violates_boundary("何倍かを 求めて みよう。", "talk", "24 ÷ 4", strength=0) == "banned_unknown:何倍"
+    assert d.violates_boundary("じゃあ 次は、何を 求める お話に する？", "talk", "24 ÷ 4", strength=1) is None, "宣言の問いは行き先ではない"
+    assert d.violates_boundary("何人かを 求める お話に して みよう。", "talk", "24 ÷ 4", strength=2) is None
+    # 問いの文（次の問題の問い）は全強度で禁止。児童自身の問いの文の引用は許す
+    own = ["おにぎりが24こあります。1人に4こずつくばります。おにぎりは何人にくばれますか。"]
+    q_form = "クッキー24こを、4人で 分けたら 1人分は 何こに なるか、という お話だよ。"
+    assert d.violates_boundary(q_form, "talk", "24 ÷ 4", strength=2) == "question_form"
+    assert d.violates_boundary(q_form, "talk", "24 ÷ 4", strength=3) == "question_form"
+    assert d.violates_boundary("1人分は 何こに なりますか。", "talk", "24 ÷ 4", strength=3) == "question_form"
+    quoted = "『おにぎりは何人にくばれますか』の ところが 求める ものだよ。"
+    assert d.violates_boundary(quoted, "talk", "24 ÷ 4", strength=0, own_texts=own) is None, "児童の問いの文の引用は通す"
+    assert d.violates_boundary(quoted, "talk", "24 ÷ 4", strength=0) == "question_form", "引用元が児童の文でなければ問いの文"
+    assert d.violates_boundary("『24本は 4本の 何倍ですか』も 何倍かを 求める お話だね", "talk", "24 ÷ 4", strength=1,
+                               own_texts=["24本は4本の何倍ですか"]) == "banned_unknown:何倍", "引用の外の「何倍」は強度1では禁止"
+    assert d.violates_boundary("『24本は 4本の 何倍ですか』の ところだよ", "talk", "24 ÷ 4", strength=1,
+                               own_texts=["24本は4本の何倍ですか"]) is None
+    assert d.violates_boundary("4は 何の 数だった？", "talk", "24 ÷ 4", strength=1) is None, "役割の問い返しは問いの文ではない"
     print("OK 語彙(6章): 児童向け文言に「種類」「たずねる」「聞いていること」「等分除」「包含除」が無い。弱に構造ラベル・行き先なし。LLM 出力もガード")
 
     # ===== 付随バグ（フェーズF）：理由なしの不成立を not_problem に落とさない／逆向きの倍は reversed =====
@@ -1238,6 +1318,61 @@ with client:
     assert client.get("/admin/api/live", headers=AUTH).json()["students"] == []
     assert post("/api/login", user_id="01").json()["session_id"] is not None, "消した後も新しく始められる"
     print("OK データの片づけ: 確認語「消す」・DB を data/ に退避（全ログ入り）・5テーブルを空に・app_config は残す")
+
+    # ===== v3.2：「求めるものって何？」の定型（LLM を呼ばない・help に数えない）／help の連続昇格の抑止／talk 捨て＋前置き =====
+    admin_post("/admin/api/phase", phase=2)
+    sidM = post("/api/login", user_id="24").json()["session_id"]
+    r = judge(sidM, "24", "H: おにぎりが24こあります。【1人に 4こずつ】くばります。おにぎりは何人にくばれますか。@おにぎり/こ")
+    assert r["message"] == ("新しい 問題が できたね！ この お話は、『おにぎりは何人にくばれますか』を 求める お話だね。\n"
+                            "今度は、**求める ものが ちがう** お話は 作れるかな？"), r["message"]
+    cb = dict(CALLS)
+    r = judge(sidM, "24", "求めるものがちがうってどういうことですか？")
+    assert r["input_type"] == "taiwa" and r["response_type"] == "talk" and CALLS["llm"] == cb["llm"], "定型（LLM を呼ばない）"
+    assert r["message"] == ("1ばんの お話の 最後の 文、『おにぎりは何人にくばれますか』の ところが『求める もの』だよ。\n"
+                            "今度は、ここが ちがう お話を 作って みよう。"), r["message"]
+    assert r["is_help_request"] is False and r["strength"] == 0 and r["strength_trigger"] == "none" and r["help_count"] == 0
+    assert logs_of(sidM)[-1]["awaiting"] is None
+    r = judge(sidM, "24", "H: ビー玉が24こひつようです。1人4こずつ買います。何人でビー玉をかいにいけばいいですか。@ビー玉/こ")
+    assert r["prompt_strength"] == 0 and r["stuck_count"] == 1
+    r = judge(sidM, "24", "H: クッキーが24個あります。1人に4つくばると何人にくばることができますか。@クッキー/こ")
+    assert r["prompt_strength"] == 1 and r["strength_trigger"] == "stuck"
+    assert r["message"] == ("2ばんの『1人4こずつ買います』も 3ばんの『1人に4つくばると何人にくばることができますか』も、4の 使い方は 同じで、"
+                            "どちらも **何人か**を 求める お話だね。\nじゃあ 次は、何を 求める お話に する？"), r["message"]
+    r = post("/api/judge", session_id=sidM, user_id="24", message="わかりません", declaring=True).json()
+    assert r["input_type"] == "declaration" and r["message"] == "わからなくても だいじょうぶ。じゃあ、求める ものが ちがう お話を 作って みよう。"
+    # 「わかんない」（help）→ 1→2：talk の文言は捨てて前置き＋中（目標 tobun、題材は最新＝クッキー）
+    r = judge(sidM, "24", "わからない")
+    assert r["is_help_request"] is True and r["strength"] == 2 and r["strength_trigger"] == "help" and r["declared"] == "tobun"
+    assert r["message"] == ("そっか。じゃあ、こうして みよう。\n1人分が 何こかを 求める お話に して みよう。4を、分ける 人の 数に するよ。"
+                            "クッキーの お話は そのままで いいよ。"), r["message"]
+    assert r["target_label"] == "1人分が 何こかを 求める お話"
+    # 直後の「どういうことですか？」（help 判定）→ 作問も宣言も無いので help では上げない（2 のまま）。help_count は数える
+    r = judge(sidM, "24", "どうすればいいの")
+    assert r["is_help_request"] is True and r["strength"] == 2 and r["strength_trigger"] == "none", "help の連続昇格を抑止"
+    assert r["help_count"] == 2 and r["message"] == "[talk] llm" and r["declared"] == "tobun"
+    assert LAST_TALK["context"]["strength"] == 2 and LAST_TALK["context"]["problems"][-1]["question_phrase"] == "1人に4つくばると何人にくばることができますか"
+    # 作問（不成立でも「試した」）のあとの help は上がる
+    r = judge(sidM, "24", "X: クッキーが24個あります。4人で分けます。")
+    assert r["response_type"] == "form" and r["strength"] == 2
+    r = judge(sidM, "24", "ヒント")
+    assert r["strength"] == 3 and r["strength_trigger"] == "help" and r["help_count"] == 3
+    assert r["message"] == ("そっか。じゃあ、こうして みよう。\n「クッキーが 24こ あります。4人で 同じ 数ずつ 分けます。」\n"
+                            "つづきの、求める 文を 書いて みよう。"), r["message"]
+    # 強度2以上では「求めるものって何」も LLM（行き先を言ってよい）
+    cb = dict(CALLS)
+    r = judge(sidM, "24", "求めるものってなに")
+    assert CALLS["llm"] == cb["llm"] + 1 and r["message"] == "[talk] llm"
+    # 目標どおり（tobun）→ 全部 0・称賛。完了後の対話は支援なし
+    r = judge(sidM, "24", "T: クッキーが24個あります。4人で同じ数ずつ分けます。1人分は何個ですか。@クッキー/こ")
+    assert r["is_new"] is True and r["strength"] == 0 and r["declaration_met"] is True
+    assert r["message"].startswith("新しい 問題が できたね！ この お話は、『1人分は何個ですか』を 求める お話だね。")
+    r = judge(sidM, "24", "B: クッキー24こはクッキー4この何倍ですか。@クッキー/こ")
+    assert r["response_type"] == "done" and r["message"] == (
+        "3つ とも できたね！ 1ばんは『何人か』、4ばんは『何こか』、5ばんは『何倍か』。\n"
+        "同じ 24÷4 なのに、求める ものが ぜんぶ ちがう お話に なったね。\n"
+        "時間まで、もっと 作って みよう。求める ものが 同じでも、ちがう お話なら いいよ。"), r["message"]
+    assert database.help_raised_since_last_sakumon(sidM) is False
+    print("OK v3.2: 「求めるものって何」は定型で問いの文を指す。help は作問・宣言まで連続で上げない。中・強の連結は talk を捨てて前置き。完了文は児童の疑問語")
 
     # ===== 旧スキーマの退避（Render の永続ディスク上の DB を想定） =====
     legacy = Path(_tmp) / "legacy.db"

@@ -293,9 +293,10 @@ function addNotice(text) {
   scrollLog();
 }
 
-// 吹き出しの見た目：新しい問題の称賛は緑の強調、done はクリア表示、強（場面固定）は文頭を強調、それ以外は通常。
+// 吹き出しの見た目：新しい問題の称賛は緑の強調、done（3つそろった行＝is_new）はクリア表示、強（場面固定）は文頭を強調、それ以外は通常。
+// 3つそろった後の成立作問（「◯ばんも できたね」）も response_type は done だが is_new=false なので通常。
 function bubbleClass(responseType, isNew, strength) {
-  if (responseType === "done") return "clear";
+  if (responseType === "done") return isNew ? "clear" : "normal";
   if (responseType === "praise" && isNew) return "new-structure";
   if (responseType === "prompt" && strength === 3) return "normal strong-prompt";
   return "normal";

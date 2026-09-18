@@ -13,20 +13,23 @@
   stuck（新構造に到達しなかった成立作問の連続回数）、miss（予告不一致の累積回数）、
   help（taiwa が支援要求に分類された回数）、strength（現在の強度 0〜3。decide_strength で遷移）。
   不成立・再送ではカウンタを動かさない。新構造到達で3カウンタと強度を全て 0 に戻す。
-- 支援は「どこまで示すか」の4段階（v3.1）：0＝何も示さない（促し）／1＝弱：現在地（これまでの問題は同じだった）を
-  児童自身の除数の句で示し、次に除数をどう使うかを児童に宣言させる（1ターン）／2＝中：行き先（除数をどう使うか）を
-  システムが指定＋題材固定／3＝強：行き先の場面文まで示す。文言は遷移（分ける系の中／分ける→くらべる／くらべる→分ける）
-  で決まる（ai_dialogue.weak_variant・MID_MESSAGES・STRONG_MESSAGES）。
-- 弱の問い「じゃあ 次は、{divisor}を どんな ふうに 使った お話に する？」への答えは classify_declaration で構造に分類し、
+- 支援は「どこまで示すか」の4段階（v3.1 → v3.2 で文言を「求めるもの」軸に統一）：0＝何も示さない（促し。児童の問いの文を引用して
+  「求める ものが ちがう お話は 作れるかな」）／1＝弱：現在地（これまでの問題は4の使い方も求めるものも同じだった）を児童自身の
+  除数の句と問いの疑問語で示し、次に何を求める話にするかを児童に宣言させる（1ターン）／2＝中：目標（何を求めるか）と手段（除数を
+  どう使うか）をシステムが指定＋題材固定／3＝強：場面文まで示し、求める文だけ書かせる。文言は遷移（分ける系の中／分ける→くらべる／
+  くらべる→分ける）で決まる（ai_dialogue.weak_variant・MID_MESSAGES・STRONG_MESSAGES）。
+- 弱の問い「じゃあ 次は、何を 求める お話に する？」への答えは classify_declaration で構造に分類し、
   declared_by=child で立てる（誤答＝到達済み構造でも訂正しない。結果はカウンタで拾う）。unknown（わからない・題材・質問）
   なら立てず、定型で作問に戻す。どちらも1回で閉じ、答えの中身を追う対話には入らない。
   作問と同じ入力欄から送る（入力欄は1つ）。宣言待ちの状態で届いた入力は、完全な問題文なら通常の作問処理（打ち切り）、
   そうでなければ宣言として扱う（/api/judge の declaring。待っているかはサーバが直前のログ行の awaiting で決める）。
   旧 v3 の役割の宣言（ターン1・classify_role・訂正）は廃止（role_answer / role_corrected 列は残存・未使用）。
 - 強度 0→1 は stuck=2・help に加えて、強度0で作問のあと対話（taiwa）が 3 ターン続いたとき（trigger=talk。v3.1）。
-  help / talk で 0→1 に上がったターンは talk の文言の後ろに弱の文言を連結して宣言を待つ。
+  help / talk で 0→1 に上がったターンは talk の文言の後ろに弱の文言を連結して宣言を待つ。help で 1→2・2→3 に上がったターンは
+  talk の文言を捨てて前置き＋中・強の文言。help で上げたら次の作問か宣言まで help では上げない（v3.2）。
+  「求めるものって何？」は強度0・1では LLM を呼ばず定型（児童の問いの文を指す）。
 - 中（強度2）・強（強度3）はシステムが未到達構造を目標に立てて文言で伝える（3択の自己ラベルは廃止）。
-  画面上部の目標表示は構造のラベルを出さない（児童の宣言はその言葉、システム指定は行き先の言葉。ai_dialogue.target_label）。
+  画面上部の目標表示は構造のラベル単独を出さない（児童の宣言はその言葉、システム指定は求めるものの文。ai_dialogue.target_label）。
 - フェーズ1・3「作った お話を 見る」（3つえらぶ）：児童はいつでも選択画面を開け（/api/selection/open。開くたびに記録）、
   そのフェーズで送った作問（不成立・未判定も含む。対話は除く）から最大 min(3, 作問数) を選んで送る（/api/selection/submit。
   送るたびに記録。分析では最後の選択を採用）。判定結果・構造名は返さない。教師の「声がけした」は teacher_calls に時刻だけ記録。
@@ -219,7 +222,7 @@ def _owned_session(session_id: int, user_id: str) -> dict:
 def _pending_dialog(last: dict | None) -> str | None:
     """いま待っている対話のターン（直前のログ行の awaiting から決める。再入場時の復元にも使う）。
 
-    declaration … 弱の宣言（「{divisor}を どんな ふうに 使った お話に する？」）の答え待ち
+    declaration … 弱の宣言（「じゃあ 次は、何を 求める お話に する？」）の答え待ち
     None        … 待っていない（通常の作問入力）
     """
     if not last:
@@ -483,7 +486,7 @@ def _handle_declaration(session: dict, user_id: str, text: str, t_start: float) 
 
 @app.post("/api/declare")
 def declare(req: DeclareRequest):
-    """予告（弱）：「{divisor}を どんな ふうに 使った お話に する？」への答えを受け取り、構造に分類して declared に立てる。
+    """予告（弱）：「じゃあ 次は、何を 求める お話に する？」への答えを受け取り、構造に分類して declared に立てる。
 
     通常は /api/judge（declaring=true）から入る。unknown なら declared は立てない。フェーズ2以外は受け付けない。
     input_type='declaration' で記録する。カウンタは動かさない。"""
@@ -612,13 +615,15 @@ def _talk_context(session: dict, expression: str) -> dict:
     わる数の役割は ai_judge の判定（structure / unknown）から引く（ai_dialogue.divisor_role_label）。"""
     _dividend, divisor = config.parse_expression(expression)
     problems = database.get_valid_problems(session["session_id"])
-    listed = [{"text": p["text"], "divisor_role": ai_dialogue.divisor_role_label(p["structure"], p["unknown"], divisor)}
+    listed = [{"text": p["text"], "divisor_role": ai_dialogue.divisor_role_label(p["structure"], p["unknown"], divisor),
+               "question_phrase": p.get("question_phrase")}
               for p in problems]
     last = None
     if problems:
         p = problems[-1]
         last = {"text": p["text"], "structure": p["structure"], "unknown": p["unknown"],
-                "divisor_role": listed[-1]["divisor_role"], "item": p["item"], "unit": p["unit"]}
+                "divisor_role": listed[-1]["divisor_role"], "item": p["item"], "unit": p["unit"],
+                "question_phrase": p.get("question_phrase")}
     return {"strength": session["strength"], "target": session["declared"], "problems": listed, "last_problem": last}
 
 
@@ -644,23 +649,32 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
     help_count, declared, declared_by = counts["help"], session["declared"], session["declared_by"]
     awaiting = dialog = None
     if show:
-        dlg = ai_dialogue.dialogue(message, "taiwa", None, produced, ctx["recent"], "talk",
-                                   ctx["expression"], user_id=user_id,
-                                   context={**_talk_context(session, ctx["expression"]),
-                                            "last_turn": _last_turn_context(ctx["last"])})
-        ai_message = dlg["message"]
-        is_help = dlg.get("is_help_request")
+        problems = database.get_valid_problems(req.session_id)
+        if session["strength"] <= 1 and ai_dialogue.asks_what_motomeru(message):
+            # 「求めるものって何？」（強度0・1）：LLM に任せず、児童自身の問いの文を指す定型（行き先は言わない。v3.2）。
+            # 言葉の意味の質問なので支援要求には数えない
+            ai_message = ai_dialogue.motomeru_what_message(problems, ctx["expression"])
+            is_help = False
+        else:
+            dlg = ai_dialogue.dialogue(message, "taiwa", None, produced, ctx["recent"], "talk",
+                                       ctx["expression"], user_id=user_id,
+                                       context={**_talk_context(session, ctx["expression"]),
+                                                "last_turn": _last_turn_context(ctx["last"])})
+            ai_message = dlg["message"]
+            is_help = dlg.get("is_help_request")
         # 支援要求（フェーズE）：help += 1 → 強度規則で段階を更新（文言は更新前の強度で生成済み。反映は次ターンから）。
+        # ただし help で上げたあと作問も宣言も無いうちは、help ではもう上げない（1段ごとに最低1回は試させる。v3.2。
+        # 9/18 模擬で「わかんない」「どういうことですか」の2ターンで弱→強まで上がった）。help_count は数える。
         # 強度0で作問のあと対話だけが TALK_STALL_TURNS 回続いた（この行を含む）→ 0→1（trigger=talk。v3.1）。
         # 3つそろった後は支援なし（カウンタも動かさない）
         all_done = set(produced) >= STRUCTURES
-        problems = database.get_valid_problems(req.session_id)
         stalled = (session["strength"] == 0 and bool(problems)
                    and database.count_taiwa_since_last_sakumon(req.session_id) + 1 >= TALK_STALL_TURNS)
+        help_up = bool(is_help) and not database.help_raised_since_last_sakumon(req.session_id)
         if (is_help or stalled) and not all_done:
             if is_help:
                 help_count += 1
-            strength, trigger = decide_strength(session["strength"], help_up=bool(is_help), talk_up=stalled)
+            strength, trigger = decide_strength(session["strength"], help_up=help_up, talk_up=stalled)
             if strength >= 2 and not declared:
                 # 中・強に上がったのに目標が無ければ、ここでシステムが未到達構造を立てる
                 declared = ai_dialogue.pick_unreached_structure(produced)
@@ -675,8 +689,9 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
                 ai_message = f"{ai_message}\n{ai_dialogue.weak_message(problems, ctx['expression'])}"
                 dialog = "declaration"
             elif strength >= 2 and strength != session["strength"] and declared and problems:
-                # 1→2・2→3（help）：talk の文言は更新前の強度で生成されていて行き先を言えない。ここで連結しないと
-                # 上部の「つぎは」だけが変わり、中・強の文言は次の成立作問まで出ない（9/18 模擬）。
+                # 1→2・2→3（help）：talk の文言は更新前の強度で生成されていて行き先を言えない（行き先を示唆して中の指定と
+                # 矛盾することもある。9/18 模擬）。talk の文言は捨て、定型の前置きの後ろに中・強の文言を出す。
+                # ここで出さないと上部の「つぎは」だけが変わり、中・強の文言は次の成立作問まで出ない。
                 # 題材は最新の成立作問（{item}{unit}・番号）
                 latest = problems[-1]
                 if strength == 2:
@@ -686,7 +701,7 @@ def _handle_taiwa(req: JudgeRequest, user_id: str, message: str, ctx: dict) -> d
                     tail = ai_dialogue.strong_message(declared, ctx["expression"], len(problems),
                                                       latest.get("item"), latest.get("unit"),
                                                       session_id=req.session_id)
-                ai_message = f"{ai_message}\n{tail}"
+                ai_message = f"{ai_dialogue.TALK_LEADIN}\n{tail}"
         awaiting = _awaiting_of("talk", dialog, ai_message, ctx["expression"])
 
     result = _base_result(ai_message, "talk" if show else None, "taiwa", dialog=dialog)
@@ -737,6 +752,8 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
     if phrase_thread:
         phrase_thread.join(timeout=20)
     phrase = phrase_box.get("phrase") if jr.get("valid") else None
+    # 問いの文（求めるもの）。称賛・弱・完了で引用する。正規表現なので待ち時間はない
+    question = ai_dialogue.extract_question_phrase(message) if jr.get("valid") else None
 
     # 技術的失敗（規定回数リトライしても API が応答しない）→ 3-2 error。一覧には載せず、送り直してもらう。
     # 児童の責任ではないのでカウンタは動かさない。
@@ -817,13 +834,14 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         problems = database.get_valid_problems(req.session_id)
         if valid:
             problems = problems + [{"text": message, "structure": structure, "unknown": unknown,
-                                    "item": jr.get("item"), "unit": jr.get("unit"), "divisor_phrase": phrase}]
+                                    "item": jr.get("item"), "unit": jr.get("unit"), "divisor_phrase": phrase,
+                                    "question_phrase": question}]
         dlg = ai_dialogue.dialogue(
             message, "sakumon", {**jr, "is_new": is_new, "completes_all": completes_all},
             produced, ctx["recent"], response_type, expression,
             prompt_strength=strength, target=declared, ref_no=ref_no,
             item=jr.get("item"), unit=jr.get("unit"), session_id=req.session_id, user_id=user_id,
-            phrase=phrase, problems=problems,
+            phrase=phrase, problems=problems, question=question,
         )
         ai_message = dlg["message"]
 
@@ -835,7 +853,7 @@ def _handle_sakumon(req: JudgeRequest, user_id: str, message: str, ctx: dict) ->
         session_id=req.session_id, user_id=user_id, phase=phase, expression=expression,
         input_type="sakumon", message=message, ai_message=ai_message,
         valid=valid, structure=structure, unknown=unknown, issue=issue, is_new=is_new,
-        item=jr.get("item"), unit=jr.get("unit"), divisor_phrase=phrase,
+        item=jr.get("item"), unit=jr.get("unit"), divisor_phrase=phrase, question_phrase=question,
         response_type=response_type, prompt_strength=strength,
         declared_structure=declared_used, declared_by=declared_by_used, declaration_met=met,
         produced_structures=produced_after, stuck_count=stuck, miss_count=miss,

@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS chat_logs (
     is_new              INTEGER,
     item                TEXT,       -- 判定が読み取った物の名前（中・強の文言の {物}）
     unit                TEXT,       -- 判定が読み取った助数詞（{unit}）
-    divisor_phrase      TEXT,       -- 成立作問の除数を含む句（フェーズ2。称賛・弱の対比で引用する。extract_divisor_phrase）
+    divisor_phrase      TEXT,       -- 成立作問の除数を含む句（フェーズ2。弱の対比で引用する。extract_divisor_phrase）
+    question_phrase     TEXT,       -- 成立作問の問いの文（フェーズ2。称賛・弱・完了で「求めるもの」として引用する。extract_question_phrase。正規表現）
 
     response_type       TEXT,
     prompt_strength     INTEGER,
@@ -198,7 +199,8 @@ _MIGRATIONS = {
     "chat_logs": (("role_answer", "TEXT"), ("role_corrected", "INTEGER"), ("item", "TEXT"), ("unit", "TEXT"),
                   ("is_help_request", "INTEGER"), ("help_count", "INTEGER"), ("strength", "INTEGER"),
                   ("strength_trigger", "TEXT"), ("target_structure", "TEXT"), ("awaiting", "TEXT"),
-                  ("judge_status", "TEXT"), ("judged_at", "TEXT"), ("divisor_phrase", "TEXT")),
+                  ("judge_status", "TEXT"), ("judged_at", "TEXT"), ("divisor_phrase", "TEXT"),
+                  ("question_phrase", "TEXT")),
 }
 
 JUDGE_STATUSES = ("pending", "done", "failed")
@@ -337,6 +339,7 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
              valid: bool | None = None, structure: str | None = None, unknown: str | None = None,
              issue: str | None = None, is_new: bool | None = None,
              item: str | None = None, unit: str | None = None, divisor_phrase: str | None = None,
+             question_phrase: str | None = None,
              response_type: str | None = None, prompt_strength: int | None = None,
              declared_structure: str | None = None, declared_by: str | None = None,
              declaration_met: bool | None = None,
@@ -356,17 +359,17 @@ def save_log(*, session_id: int, user_id: str, phase: int, expression: str,
             """INSERT INTO chat_logs
                (session_id, user_id, phase, expression, created_at,
                 input_type, message, ai_message,
-                valid, structure, unknown, issue, is_new, item, unit, divisor_phrase,
+                valid, structure, unknown, issue, is_new, item, unit, divisor_phrase, question_phrase,
                 response_type, prompt_strength,
                 declared_structure, declared_by, declaration_met,
                 self_label, self_label_text, self_label_match,
                 role_answer, role_corrected, is_help_request,
                 produced_structures, stuck_count, miss_count, help_count,
                 strength, strength_trigger, target_structure, awaiting, latency_ms, judge_status, judged_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (session_id, user_id, phase, expression, _now(),
              input_type, message, ai_message,
-             b(valid), structure, unknown, issue, b(is_new), item, unit, divisor_phrase,
+             b(valid), structure, unknown, issue, b(is_new), item, unit, divisor_phrase, question_phrase,
              response_type, prompt_strength,
              declared_structure, declared_by, b(declaration_met),
              self_label, self_label_text, b(self_label_match),
@@ -511,13 +514,15 @@ def get_valid_problems(session_id: int) -> list[dict]:
     """成立した作問を時系列で返す（児童の「つくった お話」一覧用。表示番号＝この並びの 1 始まり）。"""
     with _conn() as con:
         rows = con.execute(
-            """SELECT log_id, message, structure, unknown, is_new, phase, item, unit, divisor_phrase FROM chat_logs
+            """SELECT log_id, message, structure, unknown, is_new, phase, item, unit, divisor_phrase, question_phrase
+               FROM chat_logs
                WHERE session_id = ? AND valid = 1
                ORDER BY log_id""",
             (session_id,),
         ).fetchall()
     return [{"id": r[0], "text": r[1], "structure": r[2], "unknown": r[3],
-             "is_new": bool(r[4]), "phase": r[5], "item": r[6], "unit": r[7], "divisor_phrase": r[8]} for r in rows]
+             "is_new": bool(r[4]), "phase": r[5], "item": r[6], "unit": r[7], "divisor_phrase": r[8],
+             "question_phrase": r[9]} for r in rows]
 
 
 def count_taiwa_since_last_sakumon(session_id: int) -> int:
@@ -534,6 +539,22 @@ def count_taiwa_since_last_sakumon(session_id: int) -> int:
         if kind == "taiwa":
             n += 1
     return n
+
+
+def help_raised_since_last_sakumon(session_id: int) -> bool:
+    """直前の作問行（input_type='sakumon'）または宣言行（'declaration'）より後に、支援要求（help）で強度を上げたターンがあるか。
+    help で上げたら、児童が次に作問する（または弱の問いに宣言で答える）まで help では上げない（1段ごとに最低1回は
+    試させる。9/18 模擬で「わかんない」「どういうことですか」の2ターンで弱→強まで上がったため）。"""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT input_type, strength_trigger FROM chat_logs WHERE session_id = ? ORDER BY log_id DESC", (session_id,)
+        ).fetchall()
+    for kind, trigger in rows:
+        if kind in ("sakumon", "declaration"):
+            return False
+        if kind == "taiwa" and trigger == "help":
+            return True
+    return False
 
 
 def get_max_prompt_strength(session_id: int) -> int:
@@ -670,7 +691,7 @@ def admin_get_student_sessions(user_id: str) -> list[dict]:
 LOG_COLUMNS = [
     "log_id", "session_id", "user_id", "phase", "expression", "created_at",
     "input_type", "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase", "question_phrase",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
@@ -737,7 +758,7 @@ CSV_FIELDS = [
     "user_id", "session_id", "parity_group", "session_start", "session_end",
     "log_id", "created_at", "phase", "expression", "input_type",
     "message", "ai_message",
-    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase",
+    "valid", "structure", "unknown", "issue", "is_new", "item", "unit", "divisor_phrase", "question_phrase",
     "response_type", "prompt_strength",
     "declared_structure", "declared_by", "declaration_met",
     "self_label", "self_label_text", "self_label_match",
